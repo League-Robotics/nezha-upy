@@ -1,10 +1,25 @@
 ---
 id: '001'
 title: Python-first firmware image M0-M6
-status: planning-docs
+status: executing
 branch: sprint/001-python-first-firmware-image-m0-m6
 worktree: false
-use-cases: [UC-001, UC-002, UC-003, UC-004, UC-005, UC-006, UC-007, UC-008, UC-009, UC-010, UC-011, UC-012, UC-013, UC-014, UC-015]
+use-cases:
+- UC-001
+- UC-002
+- UC-003
+- UC-004
+- UC-005
+- UC-006
+- UC-007
+- UC-008
+- UC-009
+- UC-010
+- UC-011
+- UC-012
+- UC-013
+- UC-014
+- UC-015
 issues:
 - complete-gates-3-7-full-firmware-in-micropython-image.md
 - test-on-microbit-tovez-radio-channel-3.md
