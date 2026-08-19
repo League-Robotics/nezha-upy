@@ -10,6 +10,7 @@ tickets:
 - 001-006
 - 001-007
 - 001-009
+- 001-010
 ---
 
 # Complete nezha-upy development per PLAN.md (Python-first)

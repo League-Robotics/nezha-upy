@@ -378,6 +378,34 @@ the `manifest.py` freeze entries for every `src/*.py` module (including
 RAM/flash checkpoint (ticket 009's documented procedure) measures the
 resulting heap delta.
 
+### Revision (2026-08-19, post-ticket-009 grounding pass)
+
+Ticket 009's grounding pass surfaced a missed seam: tickets 004-007
+each built one milestone's piece (native module, wire codec, protocol
+engine, WiFi transport, Python firmware layer) but none of them owned
+**assembling those pieces at power-on**. Nothing wired
+`config.load_robot_config()` → `diffdrive.configure/begin/start` →
+`comms.Comms` → transports (`radio_shim`; `wifi_at` when
+`wifi_secrets.json` is present) → `comms.PumpTimer` into a running
+image, and the pump's timer source was left unwired — so
+`docs/bench-acceptance-procedures.md` §A.3 required manual REPL
+assembly every bench session instead of the image simply booting into
+the engine, as `specification.md` §5/§6 (M3's banner/boot/READY
+sequence, M5's fail-closed boot test) already implies.
+
+Added a ninth module to Step 3's table:
+
+| Module | Purpose (one sentence) | Boundary | Use cases |
+|---|---|---|---|
+| **Boot Wiring** (frozen boot module, e.g. `src/main.py`) | Assembles the Python Firmware Layer, protocol engine, and transports into a running image at power-on. | Inside: the ordered boot sequence (config load → diffdrive arm → comms/transport bring-up → pump start → banner/READY) and the fail-closed/no-secrets branching. Outside: the modules it assembles (calls their existing published interfaces only; owns no protocol, drive, or transport logic itself). | UC-002, UC-011, UC-007 |
+
+This module sits atop the dependency graph (depends on Python Firmware
+Layer, v5 Protocol Engine, and — when secrets are present — WiFi
+Transport; nothing depends on it) and does not change the graph's
+acyclic shape or any existing module's boundary. It is additive: no
+other module's purpose, boundary, or interface changes. Delivered by
+ticket 010 (depends on 007, the last piece it assembles).
+
 ### Migration Concerns
 
 None in the backward-compatibility sense — this is a greenfield repo
@@ -428,16 +456,16 @@ it.
 | UC | Title | Actor | Delivered by | Milestone |
 |---|---|---|---|---|
 | UC-001 | Build the image | Developer | 001 | M0 |
-| UC-002 | Flash and boot to a live REPL | Developer/Stakeholder | 001, 004, 009 | M0/M1 |
+| UC-002 | Flash and boot to a live REPL | Developer/Stakeholder | 001, 004, 009, 010 | M0/M1 |
 | UC-003 | Student drives wheels from the REPL | Student | 004, 009 | M1 |
 | UC-004 | Starvation watchdog protects a blocked student loop | Student | 004, 009 | M1 |
 | UC-005 | Reset mid-drive is silenced by boot zero-write | Student/Developer | 004, 009 | M1 |
 | UC-006 | Wire codec round-trips the golden vectors | Developer | 003 | M2 |
-| UC-007 | Host tooling pings the robot through the relay, unchanged | Wire client | 005, 009 | M3 |
+| UC-007 | Host tooling pings the robot through the relay, unchanged | Wire client | 005, 009, 010 | M3 |
 | UC-008 | Motion command over radio produces motion and acks | Wire client | 004, 005, 009 | M1/M3 |
 | UC-009 | WiFi REPL mirror session | Student/Developer | 006, 009 | M4 |
 | UC-010 | UDP v5 plane on WiFi | Wire client | 006, 009 | M4 |
-| UC-011 | Robot config loads fail-closed at boot | Developer/Student | 002, 007 | M0/M5 |
+| UC-011 | Robot config loads fail-closed at boot | Developer/Student | 002, 007, 010 | M0/M5 |
 | UC-012 | Telemetry stream | Wire client | 004, 007, 009 | M1/M5 |
 | UC-013 | Queued motion sequencing | Wire client/Student | 007, 009 | M5 |
 | UC-014 | Stakeholder acceptance sweep (M6) | Stakeholder | 009 | M6 |
@@ -478,8 +506,13 @@ Before tickets can be created, all of the following must be true:
 | 007 | Python firmware layer: config/telemetry/motion/otos/line (M5) | 002, 004, 005, 006 |
 | 008 | Supersede the gates-3-7 doc with a pointer | — |
 | 009 | Bench acceptance procedures + student-facing API contract (M6) | 004, 006, 007 |
+| 010 | Boot wiring: assemble the firmware layer at power-on | 007 |
 
 Tickets execute serially in the order listed. 001/002/003/008 have no
 dependencies on each other and could run in any relative order within
 that constraint; the table lists them first because they unblock
-everything else.
+everything else. Ticket 010 was added post-hoc (2026-08-19, after
+009's grounding pass surfaced the boot-wiring gap — see the
+Architecture section's Revision note); it depends only on 007 and was
+immediately runnable since 001-009 were already done when it was
+created.
