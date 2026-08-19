@@ -1,0 +1,32 @@
+{
+  "identity": {
+    "robot_name": "malformed"
+  },
+  "connection": {
+    "radio_channel": 3
+  },
+  "motors": {
+    "left_port": 2,
+    "right_port": 1,
+    "fwd_sign_left": -1,
+    "fwd_sign_right": 1,
+    "travel_calib_left": 0.7837,
+    "travel_calib_right": 0.7837
+  },
+  "wheel_control": {
+    "v_min": 20.0,
+    "bias_max": 23.8,
+    "tau_adapt": 30.0,
+    "a_steady": 30.0,
+    "deficit_threshold": 0.0,
+    "deficit_window": 0.0,
+    "pid_kp": 0.0,
+    "pid_i_max": 60.0,
+    "pid_kaff": 0.0,
+    "pid_max": 100.0,
+    "pos_err_max": 10.0,
+    "stall_speed": 15.0,
+    "stall_demand": 40.0,
+    "stall_window": 500.0
+  }
+}

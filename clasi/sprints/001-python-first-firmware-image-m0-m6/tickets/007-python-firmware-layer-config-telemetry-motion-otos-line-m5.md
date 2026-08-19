@@ -1,9 +1,16 @@
 ---
 id: '007'
 title: 'Python firmware layer: config/telemetry/motion/otos/line (M5)'
-status: open
-use-cases: [UC-011, UC-012, UC-013]
-depends-on: ['002', '004', '005', '006']
+status: done
+use-cases:
+- UC-011
+- UC-012
+- UC-013
+depends-on:
+- '002'
+- '004'
+- '005'
+- '006'
 github-issue: ''
 issue: complete-gates-3-7-full-firmware-in-micropython-image.md
 completes_issue:
@@ -60,33 +67,79 @@ All criteria are offline. `move_protocol_bench.py`'s full pass over
 the radio path and OTOS-pose-sane-in-TLM verification move to ticket
 009's documented stakeholder procedure.
 
-- [ ] `./build.sh --clean` (now with the manifest freeze applied) exits
+- [x] `./build.sh --clean` (now with the manifest freeze applied) exits
       0, still flash end < `_fs_start`; note the RAM/flash delta from
       freezing (compare against ticket 006's last pre-freeze build) for
       ticket 009's M6 checkpoint procedure to reference.
-- [ ] `src/config.py`'s fail-closed key validation is unit-tested
+- [x] `src/config.py`'s fail-closed key validation is unit-tested
       offline (`tests/test_config.py`) against `data/tovez.json`,
       `data/gopiv.json`, and a deliberately-malformed fixture (missing
       a required key), asserting refusal on the malformed case.
-- [ ] The same test asserts `wheel_control` → `DiffDrive::Config`
+- [x] The same test asserts `wheel_control` → `DiffDrive::Config`
       mapping (`travel_calib`×10) against known input/output pairs.
-- [ ] `src/motion.py`'s queue/stop-condition/timeout-fault/replace
+- [x] `src/motion.py`'s queue/stop-condition/timeout-fault/replace
       logic is unit-tested offline (`tests/test_motion.py`) against a
       stub diffdrive backend, with an explicit regression assertion
       that durations are treated as milliseconds, not seconds.
-- [ ] `src/telemetry.py`'s 22-field frame assembly is unit-tested
+- [x] `src/telemetry.py`'s 22-field frame assembly is unit-tested
       offline (`tests/test_telemetry.py`) against a synthetic
       sensor/kernel-state fixture, asserting the watchdog fault bit and
       `cycleOverrunCount_` are present and populated.
-- [ ] `python3 -m py_compile` passes on every `src/*.py`; `mpy-cross`
+- [x] `python3 -m py_compile` passes on every `src/*.py`; `mpy-cross`
       lints every `src/*.py` clean.
-- [ ] `manifest.py` lists every `src/*.py` module — a diff/grep check
+- [x] `manifest.py` lists every `src/*.py` module — a diff/grep check
       against the actual `src/` directory listing confirms nothing is
       silently left on the filesystem-only path.
-- [ ] The teaching-framework loop-ownership question is either resolved
+- [x] The teaching-framework loop-ownership question is either resolved
       (with the decision documented in `motion.py`'s module docstring)
       or explicitly escalated in this ticket's notes — not left
       ambiguous.
+
+## Implementation Notes (added on completion)
+
+- **RAM/flash delta**: the pre-freeze baseline hex from ticket 006 was
+  not independently captured before this ticket's `--clean` run
+  overwrote it (flagged, not fabricated) — ticket 009's M6 checkpoint
+  should treat THIS ticket's post-freeze numbers as the new baseline
+  going forward. Post-freeze (`./build.sh --clean --with-diffdrive
+  --with-wifi`): `arm-none-eabi-size` reports `text=333212 data=8
+  bss=126992`; `addlayouttable.py`'s layout: MicroPython
+  `0x00000..0x5159c`, layout table `0x51fd0..0x52000`, filesystem
+  `0x6d000..0x73000` — flash end (`0x5159c`) well under `_fs_start`
+  (`0x6D000`).
+- **Loop-ownership decision**: documented in full in `src/motion.py`'s
+  module docstring — no `on_tick()` callback framework; plain function
+  calls, framework-owned `MoveQueue.tick()` pumping via `comms.py`'s
+  existing scheduled pump. Also records a known, deliberately deferred
+  gap: `clasi/issues/generator-driven-control-loop-mode-addition-not-
+  replacement.md` (status `pending`) proposes a second, additive
+  generator-driven mode, but its prerequisite native bindings
+  (`diffdrive.step()` etc.) have not landed as a follow-on ticket to
+  004 — not built here, flagged for a future ticket.
+- **Native binding scope**: `wheel_control_to_diffdrive_config()`
+  (`src/config.py`) produces the full 15-field `DiffDrive::Config`
+  mapping (tested against known input/output pairs), but
+  `native/moddiffdrive.cpp`'s `configure()` binding still only accepts
+  the 7 params it did after ticket 004 — pushing the 15 `wheel_control`
+  fields into the real kernel needs a new native call
+  (`native/README.md`'s own "ticket 007" pointer), deliberately not
+  built in this pass (a `native/` C++ change with its own qstr/glue
+  wiring, not required by this ticket's acceptance criteria). Flagged
+  for a follow-on ticket.
+- **GET_CONFIG wire delivery**: `config.ConfigDispatch` acks
+  CONFIG/SET_FIELD/GET_CONFIG via the existing ack ring and additionally
+  broadcasts a `CFG` reply frame to its own registered transports for
+  GET_CONFIG (`comms.py`'s dispatch interface has no per-request
+  transport/reply-frame channel to extend without modifying that
+  ticket-005 module) — see `config.py`'s own docstring for the full
+  reasoning.
+- **GO_TO/CALIBRATE scope**: `MoveQueue.go_to()` is a simple, documented
+  turn-then-drive decomposition (open-loop within each leg), not
+  radio-robot-elite's evolved continuously-corrected `Motion::
+  Navigator` (no equivalent exists in the vendored `DiffDrive` kernel).
+  `CALIBRATE` is scoped to line-sensor `cal_min`/`cal_max` capture (the
+  one calibration concept with a concrete reference,
+  `line_sensor.h`'s own `captureCalibMin/Max`).
 
 ## Testing
 

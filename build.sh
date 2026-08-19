@@ -1395,6 +1395,19 @@ else:
     print("  WARNING: microbithal.cpp pin_obj shape not recognized -- check manually")
 INNERPY
 
+echo "=== Step 13c: Freeze this repo's src/*.py modules (manifest.py, M5 stabilisation) ==="
+# Ticket 007 / spec Sec 7.4: this port cannot load .mpy from the
+# filesystem, so real module shipping is FROZEN_MANIFEST (codal_port/
+# Makefile already sets `FROZEN_MANIFEST ?= manifest.py`, unchanged
+# here). manifest.py is TRACKED at this repo's root (see its own header)
+# and copied verbatim into the gitignored checkout -- same pattern as
+# --with-modrobot's `cp modrobot/modrobot.cpp ...` step above.
+# Unconditional (not gated on --with-diffdrive/--with-wifi): every
+# ticket-007-stable module ships regardless of which native modules this
+# particular build wires in.
+cp manifest.py "$MP_DIR/src/codal_port/manifest.py"
+echo "  codal_port/manifest.py replaced with this repo's own freeze list"
+
 echo "=== Step 14: Build ==="
 # codal_cmake downloads CODAL libraries and configures cmake (first run only).
 # codal_build compiles everything and links with libmicropython.a -> MICROBIT.hex
