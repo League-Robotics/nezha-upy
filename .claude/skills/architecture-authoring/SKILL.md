@@ -1,0 +1,1 @@
+/Volumes/Proj/proj/RobotProjects/nezha-upy/.agents/skills/architecture-authoring/SKILL.md

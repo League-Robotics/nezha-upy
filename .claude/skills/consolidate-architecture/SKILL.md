@@ -1,0 +1,1 @@
+/Volumes/Proj/proj/RobotProjects/nezha-upy/.agents/skills/consolidate-architecture/SKILL.md
