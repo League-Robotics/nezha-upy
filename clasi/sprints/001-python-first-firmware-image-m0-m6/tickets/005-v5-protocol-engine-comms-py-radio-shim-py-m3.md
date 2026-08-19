@@ -1,9 +1,12 @@
 ---
 id: '005'
 title: 'v5 protocol engine: comms.py + radio_shim.py (M3)'
-status: open
-use-cases: [UC-007, UC-008]
-depends-on: ['003']
+status: done
+use-cases:
+- UC-007
+- UC-008
+depends-on:
+- '003'
 github-issue: ''
 issue: complete-gates-3-7-full-firmware-in-micropython-image.md
 completes_issue:
@@ -52,26 +55,26 @@ All criteria are offline. `rogo repl <robot> ping` via the relay with
 unchanged host tooling, and WHEELS-over-radio hardware verification,
 move to ticket 009's documented stakeholder procedure.
 
-- [ ] A CPython loopback test (`tests/test_comms_loopback.py`, `python3
+- [x] A CPython loopback test (`tests/test_comms_loopback.py`, `python3
       -m pytest`) exercises `src/comms.py` against a host-side v5
       client built on ticket 003's `wire.py`/`msgs.py`, asserting
       byte-exact banner and ack sequences.
-- [ ] The same test asserts dispatch order matches `dispatchLine()`:
+- [x] The same test asserts dispatch order matches `dispatchLine()`:
       relay sigils dropped first; TLM/SEED/DBG intercepted before the
       binary branch.
-- [ ] Ack-ring behavior (depth 12, `corr_id<<4|err` packing, 3 repeats)
+- [x] Ack-ring behavior (depth 12, `corr_id<<4|err` packing, 3 repeats)
       is asserted.
-- [ ] Telemetry emit-policy defaults (AUTO, silent-while-parked, 25 ms
+- [x] Telemetry emit-policy defaults (AUTO, silent-while-parked, 25 ms
       period, ack-forces-emission) are asserted against a stubbed
       telemetry source.
-- [ ] `src/radio_shim.py`'s fragment reassembly is unit-tested offline
+- [x] `src/radio_shim.py`'s fragment reassembly is unit-tested offline
       against synthetic/captured on-air byte sequences (`[SEQ][FLAGS]
       [LEN]` framing, MTU 247) without requiring radio hardware.
-- [ ] The comms.py-to-firmware-layer dispatch interface is defined and
+- [x] The comms.py-to-firmware-layer dispatch interface is defined and
       exercised via a stub in the loopback test (no dependency on
       ticket 004's native module for this ticket's own gate).
-- [ ] `python3 -m py_compile src/comms.py src/radio_shim.py` passes.
-- [ ] `mpy-cross src/comms.py src/radio_shim.py` lints clean (labelled
+- [x] `python3 -m py_compile src/comms.py src/radio_shim.py` passes.
+- [x] `mpy-cross src/comms.py src/radio_shim.py` lints clean (labelled
       as a lint per review §4, same as ticket 003).
 
 ## Testing
