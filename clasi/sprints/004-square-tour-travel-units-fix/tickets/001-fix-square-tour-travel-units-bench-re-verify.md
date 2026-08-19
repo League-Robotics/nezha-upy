@@ -1,8 +1,10 @@
 ---
 id: '001'
-title: 'Fix square tour travel units + bench re-verify'
-status: open
-use-cases: [UC-003, UC-014]
+title: Fix square tour travel units + bench re-verify
+status: in-progress
+use-cases:
+- UC-003
+- UC-014
 depends-on: []
 github-issue: ''
 issue: square-tour-legs-4-5x-short-units-bug.md
@@ -61,36 +63,125 @@ whatever factor separates the two.
 
 ## Acceptance Criteria
 
-- [ ] Root cause is identified and stated plainly in this ticket
+- [x] Root cause is identified and stated plainly in this ticket
       (what was wrong in the counts/mm/degrees math, not just "legs
       now run further").
-- [ ] Corrected math/values are cross-checked against both
+
+      **Root cause**: `src/demo_square.py`'s `TICKS_PER_MM` (1.4187)
+      mirrored `data/zetuv.json`'s `wheels` group
+      (`wheel_diameter_mm=80.77`, `ticks_per_rev=360`). BOTH of those
+      two inputs were unverified `tovez_nocal.json` template defaults,
+      never independently measured on any real Nezha unit in this
+      repo's `data/` — including `data/tovez.json` itself, whose own
+      `wheels` block carries the *identical* unqualified 80.77/360/
+      1.4187 trio with no camera/bench provenance note, unlike every
+      other calibrated group in that file. The arithmetic combining
+      them (`ticks_per_mm = ticks_per_rev / (pi * wheel_diameter_mm)`)
+      was correct; the two INPUT numbers were simply wrong, making
+      every leg/pivot's encoder-termination target ~4.2-5.3x too
+      small — exactly matching the stakeholder's live observation
+      (a "500 mm" leg turning the wheels only ~270°/0.75 rev instead
+      of the ~3.3-3.6 rev 500 mm needs on a ~145 mm-circumference
+      wheel). `diffdrive.output()`'s `positionLeft/Right` are
+      confirmed counts-native raw shaft encoder ticks (tenths of a
+      degree per count — `vendor/nezha_motor.cpp`'s own comment,
+      cross-checked against two independent `vendor/nezha_motor.h`
+      constant-derivation comments), so this was a bad-input-data bug
+      in the two template numbers feeding an otherwise-correct
+      conversion, not a units-family (counts-vs-mm) mismatch in the
+      formula itself.
+- [x] Corrected math/values are cross-checked against both
       `tovez.json`'s calibrated values and the empirical counts-per-rev
       range (~870-1080); the ticket states which source ended up
       governing when they disagreed (empirical wins on conflict, per
       the issue's explicit instruction).
-- [ ] `data/zetuv.json`'s travel-calibration fields are updated with
+
+      **Cross-check result — they disagreed, empirical governs.**
+      `tovez.json`'s `wheels` block is NOT independently calibrated
+      (see root cause above) so it offered no real second reference.
+      The one field in `tovez.json` actually named "travel
+      calib" — `motors.travel_calib_left/right` (0.7837) — DOES carry
+      a real vendor-grounded unit (`vendor/nezha_motor.h`'s own
+      comments: mm per DEGREE of raw encoder rotation, at 10
+      counts/degree), and implies `ticks_per_mm ≈ 12.76` — but that
+      field feeds a *different* kernel input entirely
+      (`fullDutyVelocity`, VELOCITY-mode `drive()`'s plant-gain
+      calibration via `src/config.py`'s
+      `wheel_control_to_diffdrive_config()`), which `demo_square.py`
+      never reads (it drives via `driveDuty()` directly, bypassing
+      `config.py`/`travel_calib` entirely — see that module's own
+      docstring). The empirical anchor — sprint-002 run-1's four leg
+      segments averaging 731.4 counts of encoder delta for the
+      stakeholder's observed 0.75 rev, i.e. 975.2 counts/rev, inside
+      the issue's own stated 870-1080 range — implies `ticks_per_mm ≈
+      6.7241`, about 1.9x lower than the `travel_calib`-implied figure.
+      Per the issue's explicit instruction, **the empirical anchor
+      governs**: `TICKS_PER_MM = EMPIRICAL_COUNTS_PER_REV (975.0) /
+      WHEEL_CIRCUMFERENCE_MM (145.0) ≈ 6.7241`. Full derivation in
+      `src/demo_square.py`'s own module docstring and
+      `data/zetuv.json`'s `wheels._wheels_note`.
+- [x] `data/zetuv.json`'s travel-calibration fields are updated with
       the corrected values and a provenance note (borrowed from
       `tovez.json`, uniform-kit assumption, cross-checked against the
       bench empirical count).
-- [ ] `data/zetuv.json` still validates against
+
+      Done — `data/zetuv.json`'s `wheels` block (`wheel_diameter_mm`,
+      `ticks_per_rev`, `ticks_per_mm`) updated with the corrected
+      values and a full provenance note (`_wheels_note`). Deliberately
+      did **not** add `motors.travel_calib_left/right` to
+      `zetuv.json` — see the cross-check note above (that field is
+      unrelated to this bug and would silently enable
+      `config.load_robot_config()`'s VELOCITY-mode boot auto-configure
+      path with an untested calibration figure, reversing sprint
+      002/003's explicit "zetuv stays no-cal profile" decision, which
+      is out of this ticket's scope).
+- [x] `data/zetuv.json` still validates against
       `data/robot_config.schema.json`.
+
+      Confirmed — `tests/test_robot_config_data.py` passes unchanged
+      (8 passed, 518 subtests). The `wheels` group is not modeled by
+      the schema (`data/README.md`'s own documented "known gap"), so
+      this edit doesn't touch the schema-checked groups at all.
 - [ ] Bench re-run (REPL-triggered handler invocation, not a physical
       button press) shows leg encoder deltas scaled to roughly 4-5×
       the old 650-811 counts (i.e., in the neighborhood of 3000-4000+
       counts for a 500 mm leg, consistent with ~870-1080 counts/rev ×
       ~3.3-3.6 revolutions), pivots proportionally sane, and a clean
       stop-verify (wheels stop cleanly at the end of the run).
-- [ ] The bench log is updated with this run's results, and explicitly
+
+      **BLOCKED — hardware fault, not a software issue.** The
+      corrected `target_ticks` read back from the device exactly as
+      computed (3362.069 for legs, 675.984 for pivots — matching the
+      ~4.74x / ~3.45 rev expectation precisely), confirming the
+      software fix is logically correct. But three independent
+      REPL-triggered duty diagnostics (combined 20%/20%, left-alone,
+      right-alone — all well above the 6% breakaway threshold that
+      was reliable in every sprint 002/003 session today, same ports/
+      signs/`max_duty`/`cycle_period_ms`) all show `appliedDutyLeft/
+      Right` correctly nonzero and `connectedLeft/Right: True`, but
+      `positionLeft`/`positionRight` staying at exactly 0.0 throughout
+      every trial — reproduced identically after a fresh hardware
+      reset (ruling out stale session state). See `throw_ticket_
+      exception` below and the bench log's new section for full
+      evidence. Not something this ticket's software-only scope
+      (units/math correction) can fix.
+- [x] The bench log is updated with this run's results, and explicitly
       corrects sprint-002's bench-log claim of "500 mm legs" with a
       pointer to this fix (append, don't silently rewrite history —
       sprint-002's log entry stays, with a correction note pointing
       here).
-- [ ] The device is left armed (`main.py`'s idle prompt live, per
+- [x] The device is left armed (`main.py`'s idle prompt live, per
       sprint 003) for the stakeholder to press A themselves — hand
       back promptly once the REPL-triggered check passes.
-- [ ] `python3 -m pytest tests/` stays green at the 204 baseline.
-- [ ] `python3 -m py_compile` passes on every changed file; `mpy-cross`
+
+      Device is armed/idle (final `reset` + 5 s settle, no further
+      `exec` issued afterward, matching sprint 003's own handoff
+      convention) — but the physical A-press will currently show the
+      same zero-motion symptom the REPL diagnostics found, since that
+      is a hardware-level fault, not something this fix touches.
+      Flagging this honestly rather than handing back silently.
+- [x] `python3 -m pytest tests/` stays green at the 204 baseline.
+- [x] `python3 -m py_compile` passes on every changed file; `mpy-cross`
       lints `demo_square.py` clean.
 
 ## Testing

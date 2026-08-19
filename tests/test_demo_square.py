@@ -35,14 +35,23 @@ def test_run_refuses_off_device():
 
 
 def test_leg_ticks_matches_distance_times_ticks_per_mm():
-    assert demo_square._leg_ticks(500.0, 1.4187) == pytest.approx(709.35)
+    # sprint 004 ticket 001: TICKS_PER_MM is now the empirically-derived
+    # ~6.7241 (see demo_square's own module docstring/root-cause note),
+    # not the old, unverified-template 1.4187 -- tied to the live
+    # constant rather than a hand-copied literal so a future correction
+    # cannot leave this test silently re-asserting a stale value.
+    assert demo_square._leg_ticks(500.0, demo_square.TICKS_PER_MM) == pytest.approx(
+        500.0 * demo_square.TICKS_PER_MM)
+    assert demo_square.TICKS_PER_MM == pytest.approx(6.7241, abs=0.001)
 
 
 def test_pivot_ticks_matches_arc_length_times_ticks_per_mm():
     # 90 degrees at trackwidth 128 mm -> arc = (pi/2) * 64 mm ~= 100.53 mm
-    ticks = demo_square._pivot_ticks(demo_square.PI / 2.0, 128.0, 1.4187)
-    assert ticks == pytest.approx((demo_square.PI / 2.0) * 64.0 * 1.4187)
-    assert ticks == pytest.approx(142.63, abs=0.05)
+    ticks = demo_square._pivot_ticks(demo_square.PI / 2.0, 128.0,
+                                      demo_square.TICKS_PER_MM)
+    assert ticks == pytest.approx(
+        (demo_square.PI / 2.0) * 64.0 * demo_square.TICKS_PER_MM)
+    assert ticks == pytest.approx(676.03, abs=0.5)
 
 
 def test_build_square_tour_shape_is_leg_pivot_interleaved_four_of_each():
