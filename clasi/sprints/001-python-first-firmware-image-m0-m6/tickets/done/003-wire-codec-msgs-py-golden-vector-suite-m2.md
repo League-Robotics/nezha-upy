@@ -1,8 +1,9 @@
 ---
 id: '003'
 title: Wire codec + msgs.py + golden-vector suite (M2)
-status: open
-use-cases: [UC-006]
+status: done
+use-cases:
+- UC-006
 depends-on: []
 github-issue: ''
 issue: complete-gates-3-7-full-firmware-in-micropython-image.md
@@ -45,22 +46,33 @@ under CPython and can run in parallel with 001.
 
 ## Acceptance Criteria
 
-- [ ] `src/wire.py` exists, ported from `wire_codec.py`.
-- [ ] `src/msgs.py` exists, carries a `GENERATED — do not edit` header.
-- [ ] `python3 -m pytest tests/unit/test_wire_golden_vectors.py` is
+- [x] `src/wire.py` exists, ported from `wire_codec.py`.
+- [x] `src/msgs.py` exists, carries a `GENERATED — do not edit` header.
+- [x] `python3 -m pytest tests/unit/test_wire_golden_vectors.py` is
       8/8 green against `tests/fixtures/wire_golden_vectors.txt`.
-- [ ] The same suite asserts byte-exact encode/decode round-trips for
+- [x] The same suite asserts byte-exact encode/decode round-trips for
       every binary verb (against host pb2 if available; against the
       fixture's own recorded bytes otherwise, with the narrower scope
-      noted in the test file).
-- [ ] COBS keyed `0x0A` and CRC-16/CCITT-FALSE (computed over
+      noted in the test file). **Narrower scope taken**: `google.protobuf`
+      is not installed in this repo's Python environment, and depending
+      on radio-robot-elite's installed pb2 modules would break this
+      repo's offline/self-contained test discipline — the round-trip
+      test round-trips all 13 binary verbs through `wire.py`'s
+      schema-agnostic `encode_frame()`/`decode_frame()` using the
+      fixture's own `sweep_0x00_0xff` payload (all 256 byte values), not
+      real protobuf-encoded message bodies. Documented in the test
+      file's module docstring.
+- [x] COBS keyed `0x0A` and CRC-16/CCITT-FALSE (computed over
       `command + ':' + payload`, CRC-then-COBS) match the fixture
       exactly.
-- [ ] `python3 -m py_compile src/wire.py src/msgs.py` passes.
-- [ ] `mpy-cross src/wire.py src/msgs.py` compiles clean — run and
+- [x] `python3 -m py_compile src/wire.py src/msgs.py` passes.
+- [x] `mpy-cross src/wire.py src/msgs.py` compiles clean — run and
       reported as a **lint** step (per review §4), with a one-line
       comment in the test output or README noting it does not prove
-      on-device loadability.
+      on-device loadability. A pre-built `mpy-cross` binary was found at
+      `micropython-microbit-v2/lib/micropython/mpy-cross/mpy-cross`
+      (arm64 Mach-O, already compiled) — used directly rather than
+      falling back to `py_compile`-only linting.
 
 ## Testing
 
