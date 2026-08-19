@@ -1,10 +1,12 @@
 ---
 id: '004'
 title: Square tour travel-units fix
-status: planning-docs
+status: closed
 branch: sprint/004-square-tour-travel-units-fix
 worktree: false
-use-cases: [UC-003, UC-014]
+use-cases:
+- UC-003
+- UC-014
 issues:
 - square-tour-legs-4-5x-short-units-bug.md
 ---
