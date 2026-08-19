@@ -1714,3 +1714,176 @@ ticket's remaining bench-verification steps (deploy, single-wheel
 probe, `on_button_a()` full-tour run, stop-verify, exception
 resolution, `done` status) are all still blocked pending an
 independently-confirmed live connection.
+
+## 42. Reconnected — bench reshuffled, full corrected tour bench-verified
+
+The coordinator reported having independently verified the
+reconnection before re-dispatching: `mbdeploy list` showing zetuv
+(correct UID) **CONNECTED on a NEW port, `/dev/cu.usbmodem2121402`** —
+the bench had been physically reshuffled, not just zetuv replugged:
+`vevov` moved to zetuv's old port (`2121202`), `tovez` moved to
+`2121102`. Independently re-confirmed here, before touching anything,
+via a fresh `mbdeploy list` and `mbdeploy probe`:
+
+```
+ENUM  CONN  DEVICE NAME  COMMON NAME  ROLE          PORT                     UID
+--------------------------------------------------------------------------------
+1     yes   getez        relay        RADIOBRIDGE   /dev/cu.usbmodem214102   990636020005282017449eac613c0332000000006e052820
+2     yes   zetuv        robot        NEZHA2        /dev/cu.usbmodem2121402  9906360200052820312bde85515a72e6000000006e052820
+3     yes   zavaz        relay        RADIOBRIDGE   /dev/cu.usbmodem2121302  9906360200052820e9d16c3809a44554000000006e052820
+4     yes   tovez        robot        NEZHA2        /dev/cu.usbmodem2121102  9906360200052820a8fdb5e413abb276000000006e052820
+5     yes   vevov        robot        NEZHA2        /dev/cu.usbmodem2121202  9906360200052820b8e12372c44f4f67000000006e052820
+```
+
+Genuinely connected this time — matches the coordinator's report
+exactly. `getez`/`zavaz` unchanged relays, never touched; `tovez`/
+`vevov` present but never touched at any point this session (per this
+ticket's own "zetuv ONLY" discipline). All subsequent commands
+addressed zetuv strictly by its new port, resolved from the UID via
+`mbdeploy list` immediately above, never assumed from a prior session.
+
+**Filesystem probe** (probe-before-reflash discipline): `os.listdir()`
+showed `demo_square.py`, `main.py`, `robot.json` all present — the
+STALE sprint-004 copies (`demo_square.py` 10908 bytes, the old
+6.7241/3362-tick constants; `robot.json` 2417 bytes, the old
+`wheel_diameter_mm=46.1521`). One `exec` call this step hit the same
+intermittent `TransportError: could not enter raw repl` flakiness
+documented in sprint 003's own §22 process note — recovered on a plain
+retry, no reset needed, exactly as that precedent describes.
+
+**Deploy — fresh stripped copies from the corrected repo sources**:
+regenerated via the same transform as every prior session (strip
+`_`-prefixed keys from the JSON, compact; strip the module docstring
+from `demo_square.py`, add a short pointer comment) —
+`robot.json` 2415 bytes (from the corrected `data/zetuv.json`,
+`wheels` block now `wheel_diameter_mm=80.77`/`ticks_per_rev=975.0`/
+`ticks_per_mm=3.8424`), `demo_square.py` 12495 bytes (from the
+corrected `src/demo_square.py` — grew from 10908 due to this ticket's
+own added inline derivation comments on the constants block, which sit
+outside the docstring and survive the strip). `gc.mem_free()` before
+copying: 35184 bytes — comfortable headroom. Copied via
+`mpremote ... fs cp`; the `demo_square.py` copy's own follow-up
+verification `exec` hit the same intermittent raw-repl flakiness once
+more, recovered on retry. On-device `os.stat` confirmed both new sizes
+exactly (`robot.json` 2415, `demo_square.py` 12495); `main.py`
+unchanged at 2999 bytes (this ticket makes no `main.py` changes).
+
+**Cautious single-wheel probe** (robot had been moved/unplugged/
+replugged since its last known-good state — same discipline as every
+prior post-reset re-probe in this file): `configure(left_port=2,
+right_port=1, fwd_sign_left=1, fwd_sign_right=1, max_duty=25.0,
+full_duty_velocity=0.0, cycle_period_ms=24)`, `begin()`, `start()` all
+`"ok"`. LEFT alone (`driveDuty(10.0, 0.0, 350)`): `positionLeft`
+0.0 -> 288.0 (post-lease) -> 313.0 (stop-verify, some coast, matching
+this drivetrain's documented coast-down behavior); `positionRight`
+unchanged at 0.0 throughout. RIGHT alone (`driveDuty(0.0, 10.0, 350)`):
+`positionRight` 313.0(carried) -> 408.0 -> 438.0; `positionLeft`
+unchanged at 313.0. Both wheels respond normally, correctly signed,
+real encoder motion — motion confirmed alive before trusting a full
+tour.
+
+**REPL-triggered `on_button_a()`** (the exact handler `main.py` wires
+to button A, same approach as every prior session's own verification —
+`exec(main.py source, {"__name__": "verify"})`, confirm
+`robot_ready() -> True`, call `on_button_a()` directly):
+
+```
+VERIFY: mem_free before loading main: 32464
+VERIFY: mem_free after loading main: 26720
+VERIFY: robot_ready() -> True
+VERIFY: mem_free before on_button_a(): 26656
+VERIFY: calling on_button_a() directly (the exact handler main.py wires to button A)
+VERIFY: HEART -> demo_square tour -> idle
+demo_square: configure ok
+demo_square: begin ok
+demo_square: start ok
+demo_square: tour has 8 segments
+demo_square: segment 0 leg   status ok target_ticks 1921.209 delta_left 1784.0 delta_right 2064.0 mean_delta 1924.0 reached True elapsed_ms 2450
+demo_square: segment 1 pivot status ok target_ticks 386.2821 delta_left -300.0 delta_right 539.0  mean_delta 419.5 reached True elapsed_ms 650
+demo_square: segment 2 leg   status ok target_ticks 1921.209 delta_left 1761.0 delta_right 2114.0 mean_delta 1937.5 reached True elapsed_ms 2550
+demo_square: segment 3 pivot status ok target_ticks 386.2821 delta_left -239.0 delta_right 583.0  mean_delta 411.0 reached True elapsed_ms 700
+demo_square: segment 4 leg   status ok target_ticks 1921.209 delta_left 1794.0 delta_right 2103.0 mean_delta 1948.5 reached True elapsed_ms 2450
+demo_square: segment 5 pivot status ok target_ticks 386.2821 delta_left -305.0 delta_right 495.0  mean_delta 400.0 reached True elapsed_ms 650
+demo_square: segment 6 leg   status ok target_ticks 1921.209 delta_left 1789.0 delta_right 2078.0 mean_delta 1933.5 reached True elapsed_ms 2300
+demo_square: segment 7 pivot status ok target_ticks 386.2821 delta_left -295.0 delta_right 533.0  mean_delta 414.0 reached True elapsed_ms 700
+demo_square: tour complete
+VERIFY: on_button_a() returned
+VERIFY: stop-verify position before (6059.0, 11059.0) after 2s (6059.0, 11059.0)
+VERIFY: done
+```
+
+**All 8/8 segments `reached True`.** Legs: mean deltas
+1924.0/1937.5/1948.5/1933.5 against target 1921.209 — within **~1.5%**
+of target, matching the ticket's own ≈1922-tick / ≈2-wheel-revolution
+/ ≈50 cm expectation almost exactly. Elapsed time per leg (2300-2550
+ms) lands squarely inside this ticket's own predicted ~2.4-2.8 s
+typical completion window (`src/demo_square.py`'s own updated
+`SEGMENT_LEASE_MS` comment), comfortably inside the unchanged 6000 ms
+`SEGMENT_TIMEOUT_MS` safety bound. Pivots: mean deltas
+419.5/411.0/400.0/414.0 against target 386.2821 — within **~3.6-8.6%**
+of target, correctly signed throughout (`delta_left` negative,
+`delta_right` positive — LEFT/CCW, matching the kernel's own `twist`
+convention), consistent with this drivetrain's own previously
+documented right-outpaces-left asymmetry (sprint 002 §15: "RIGHT
+consistently outpaces LEFT ... over-rotates on every pivot") — not a
+regression, the same known-uncalibrated behavior this demo has shown
+every session.
+
+**Stop-verify**: position `(6059.0, 11059.0)` before and after a 2 s
+wait — **Δ=(0.0, 0.0)**, no drift, matching this ticket's own "Δ=0
+over 2 s" requirement exactly.
+
+**Scale-down vs. sprint 004's own wrong run** (Sec 34 above): sprint
+004's leg means were ~3373.5-3390.0 (target 3362.069); this session's
+leg means are ~1924.0-1948.5 (target 1921.209) — a **~0.573x**
+reduction, matching the ticket's own predicted `3.8424/6.7241 ≈
+0.5715x` ratio almost exactly. Sprint 004's pivot means were
+~691.0-709.5 (target 675.984); this session's pivot means are
+~400.0-419.5 (target 386.2821) — a **~0.58x** reduction, same ratio,
+same direction, confirming both legs and pivots scaled consistently
+off the single `TICKS_PER_MM` correction as designed.
+
+## 43. Device left in a safe, armed state
+
+A final `mpremote ... reset` + 5 s settle was performed, with no
+further `exec`/`run` issued afterward (matching every prior session's
+own handoff convention in this file). `mpremote ... exec
+"print('post-reset REPL alive')"` confirmed the REPL responsive
+post-reset. `mbdeploy list` immediately after confirmed `zetuv` still
+connected, responsive, at the same port (`/dev/cu.usbmodem2121402`);
+`getez`/`zavaz`/`tovez`/`vevov` all unchanged, none touched at any
+point this session beyond the enumeration checks in Sec 39/41. The
+corrected, rescaled `demo_square.py`/`robot.json` remain deployed;
+`main.py`'s idle loop will report armed/ready and show the breathing
+idle pulse. Ready for the stakeholder's physical A press.
+
+## 44. Offline gate (unchanged from commit `c62f4b4`)
+
+No source files changed this session — only the on-device deploy
+(a transform of already-committed sources) and this bench log/ticket
+documentation. `python3 -m pytest tests/`, `py_compile`, and
+`mpy-cross` all still pass exactly as recorded against commit
+`c62f4b4` above; not re-run redundantly since nothing in `src/`/
+`tests/`/`data/` changed this session.
+
+## Summary for future readers
+
+1. **Bench reshuffle**: between the previous exception and this
+   session, the bench's physical USB layout changed — zetuv moved to
+   a NEW port (`/dev/cu.usbmodem2121402`), `vevov` took zetuv's old
+   port (`2121202`), `tovez` moved to `2121102`. Always resolve the
+   target port fresh from `mbdeploy list`/`probe` by UID/name, never
+   assume a port from a prior session.
+2. **Full corrected tour bench-verified, all 8 segments reached**: legs
+   within ~1.5% of the ≈1921-tick target (≈2 wheel revolutions, ≈50 cm,
+   as intended), pivots within ~3.6-8.6% of the ≈386-tick target
+   (known right-outpaces-left asymmetry, not a regression), clean
+   Δ=(0,0) stop-verify.
+3. **Scale-down matches the predicted ratio almost exactly**: both legs
+   and pivots shrank by ~0.57-0.58x relative to sprint 004's own wrong
+   run, matching the `3.8424/6.7241 ≈ 0.5715` ratio the correction
+   itself implies.
+4. Device left connected, reset, armed at the idle prompt, for the
+   stakeholder's own physical A press. No source changes were needed
+   this session — commit `c62f4b4`'s software fix stood as-is; only
+   the deploy and bench documentation happened here.

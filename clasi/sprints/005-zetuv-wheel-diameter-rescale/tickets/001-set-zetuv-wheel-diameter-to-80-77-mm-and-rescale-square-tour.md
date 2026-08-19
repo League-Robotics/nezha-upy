@@ -1,7 +1,7 @@
 ---
 id: '001'
 title: Set zetuv wheel diameter to 80.77 mm and rescale square tour
-status: exception
+status: done
 use-cases:
 - UC-003
 - UC-014
@@ -37,6 +37,30 @@ exception:
     to reconcile a verbal/relayed report against three independent, repeatedly-checked
     hardware enumeration sources that all disagree with it.
   surface: user-visible
+  resolved: true
+  resolution: 'Coordinator independently verified the reconnection before re-dispatching
+    (mbdeploy list showing zetuv, correct UID, CONNECTED on a NEW port /dev/cu.usbmodem2121402
+    -- the bench had been reshuffled: vevov moved to zetuv''s old port 2121202, tovez
+    moved to 2121102). Independently re-confirmed here via mbdeploy list + a fresh
+    mbdeploy probe re-scan before touching anything: zetuv genuinely connected at
+    that new port, tovez/vevov/getez/zavaz all present and none touched. Deployed
+    the rescaled stripped copies (robot.json regenerated from the corrected data/zetuv.json,
+    2415 bytes; demo_square.py regenerated stripped from the corrected src/demo_square.py,
+    12495 bytes; both verified byte-for-byte via on-device os.stat); main.py (2999
+    bytes, unchanged) confirmed still present. Cautious single-wheel probe (LEFT alone
+    then RIGHT alone, modest duty, short lease) confirmed real, correctly-signed encoder
+    motion on both wheels with clean stop-verify before trusting a full tour. REPL-triggered
+    on_button_a() (the exact button-A handler) via exec(main.py source, {"__name__":
+    "verify"}): all 8/8 segments reached True -- legs (target 1921.209 ticks) delivered
+    mean deltas 1924.0/1937.5/1948.5/1933.5 (within ~1.5% of target, ~2 wheel revolutions
+    each); pivots (target 386.2821 ticks) delivered mean deltas 419.5/411.0/400.0/414.0
+    (within ~3.6-8.6% of target, correctly signed -- delta_left negative, delta_right
+    positive, matching the kernel''s CCW/LEFT convention). Stop-verify: position (6059.0,
+    11059.0) before and after a 2 s wait -- Delta=(0,0), no drift. Device reset +
+    5 s settle afterward; mbdeploy list confirmed still connected, responsive, at
+    the same port, with no further exec/run issued -- left armed at the idle prompt
+    for the stakeholder''s physical A press. Full results in docs/bench-log-zetuv-2026-08-19.md
+    Sec 42.'
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
 
@@ -136,25 +160,28 @@ scope.
 - [x] Any test hardcoding a stale tick constant is updated to follow
       the live/recomputed constant (confirm sprint 004's tests already
       do this; fix any that don't).
-- [ ] **BLOCKED, hardware not connected**: Bench re-run (REPL-triggered)
-      shows leg deltas ≈1922 ticks (≈2 wheel revolutions, visibly
-      ~50 cm), pivots ≈90°, and a clean stop-verify. `zetuv` is not
-      physically connected to the bench machine this session (confirmed
-      via `mbdeploy list`/`probe` and independently via `pyocd list` —
-      two separate USB interfaces, both agree, re-checked 3x — see
-      `docs/bench-log-zetuv-2026-08-19.md` Sec 39). Escalated via
-      `throw_ticket_exception`.
+- [x] Bench re-run (REPL-triggered) shows leg deltas ≈1922 ticks
+      (≈2 wheel revolutions, visibly ~50 cm), pivots ≈90°, and a clean
+      stop-verify. RESOLVED once zetuv reconnected on its new port
+      (`/dev/cu.usbmodem2121402` this session, bench reshuffled — see
+      `docs/bench-log-zetuv-2026-08-19.md` Sec 42): all 8/8 segments
+      `reached True`. Legs (target 1921.209 ticks) mean deltas
+      1924.0/1937.5/1948.5/1933.5 (within ~1.5% of target). Pivots
+      (target 386.2821 ticks) mean deltas 419.5/411.0/400.0/414.0
+      (within ~3.6-8.6% of target, correctly signed). Stop-verify:
+      position `(6059.0, 11059.0)` before and after a 2 s wait —
+      Δ=(0,0), no drift.
 - [x] Bench log updated with the root-cause note (sprint 004 was right
       in revolutions but wrong in mm due to the circumference
-      assumption) and with this session's hardware-blocker finding
-      (Sec 37-40). Bench *results* (leg/pivot deltas) could not be
-      recorded — blocked, see above.
-- [ ] **BLOCKED, hardware not connected**: Device left armed (`main.py`
-      idle prompt live) for the stakeholder's physical A press —
-      unverifiable this session since `zetuv` was never reachable; its
-      last-known state (armed, from the end of sprint 004's own
-      session) was not disturbed, as no device command was issued this
-      session.
+      assumption), this session's earlier hardware-blocker findings
+      (Sec 37-41), and the final successful reconnection + full-tour
+      results (Sec 42).
+- [x] Device left armed (`main.py` idle prompt live) for the
+      stakeholder's physical A press — confirmed this session: reset
+      + 5 s settle performed after the REPL-triggered verification,
+      `mbdeploy list` confirmed zetuv still connected and responsive at
+      the same port immediately after, with no further `exec`/`run`
+      issued.
 - [x] `python3 -m pytest tests/` stays green at the 204 baseline.
 - [x] `python3 -m py_compile` passes on every changed file; `mpy-cross`
       lints `demo_square.py` clean.
