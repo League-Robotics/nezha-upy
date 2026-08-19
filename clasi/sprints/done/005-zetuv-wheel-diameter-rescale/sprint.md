@@ -1,10 +1,12 @@
 ---
 id: '005'
 title: Zetuv wheel diameter rescale
-status: planning-docs
+status: closed
 branch: sprint/005-zetuv-wheel-diameter-rescale
 worktree: false
-use-cases: [UC-003, UC-014]
+use-cases:
+- UC-003
+- UC-014
 issues:
 - zetuv-wheel-diameter-from-tovez.md
 ---
