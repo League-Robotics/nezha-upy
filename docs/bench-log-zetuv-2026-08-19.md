@@ -533,6 +533,17 @@ claimed as satisfied.
 
 ## 15. Square tour demo — implementation and bench run
 
+> **CORRECTION (2026-08-19, sprint 004 ticket 001,
+> `clasi/sprints/004-square-tour-travel-units-fix/`)**: the "500 mm"
+> legs documented in this section were never actually 500 mm of real
+> travel — `TICKS_PER_MM` (1.4187) was derived from unverified
+> template wheel/tick constants, off by a factor of ~4.2-5.3x. The
+> `target 709.35`/`142.62` tick counts below are the OLD, WRONG
+> targets. See the "Sprint 004 ticket 001" section at the end of this
+> file for the root cause, the fix, and the re-verification attempt.
+> This entry is left unedited below, per that ticket's own instruction
+> not to silently rewrite history.
+
 **Implementation choice** (full reasoning in `src/demo_square.py`'s
 own module docstring): direct, timed, encoder-terminated
 `diffdrive.driveDuty()` calls for EVERY segment (legs and pivots
@@ -1016,3 +1027,463 @@ vendor/` clean. `manifest.py` (repo root) untouched — confirmed via
    clean stop-verify, main-context discipline preserved throughout.
    The physical button press itself was left to the stakeholder, per
    this ticket's own instruction.
+
+---
+
+# Sprint 004 ticket 001 session: travel-units root-cause fix + bench
+# re-verify attempt (hardware-blocked)
+
+Sprint 004, ticket 001
+(`clasi/sprints/004-square-tour-travel-units-fix/tickets/
+001-fix-square-tour-travel-units-bench-re-verify.md`), issue
+`clasi/sprints/004-square-tour-travel-units-fix/issues/
+square-tour-legs-4-5x-short-units-bug.md`. Same date, same physical
+device (`/dev/cu.usbmodem2121202`, UID
+`9906360200052820312bde85515a72e6000000006e052820`). `mbdeploy list`
+re-confirmed at the start of this session and again before every
+deploy step: `getez`/`zavaz` both still `RADIOBRIDGE` relays,
+`vevov` (a fourth, unrelated device now visible on the bus) never
+touched, never a deploy target, `--force-relay` never passed.
+
+## 24. Root cause — units bug in `TICKS_PER_MM`'s two input constants
+
+Stakeholder-observed live (2026-08-19): each "500 mm" leg of the
+button-A square tour turns the wheels only ~270° (0.75 rev) — a Nezha
+wheel (~145 mm circumference) needs ~3.3-3.6 rev for 500 mm, so legs
+ran ~4-5x short. Golden measurement: 270° observed for the OLD leg
+target; §15 above's own run-1 leg encoder deltas (725.5/719.0/730.5/
+750.5 counts mean-of-both-wheels) for that same 0.75 rev give an
+empirical counts-per-revolution of 731.4/0.75 = 975.2 — inside the
+issue's own stated 870-1080 range.
+
+**Audit** (per the ticket's own "confirm by reading, don't assume"
+instruction): `src/demo_square.py`'s `TICKS_PER_MM = 1.4187` mirrored
+`data/zetuv.json`'s `wheels` block (`wheel_diameter_mm=80.77`,
+`ticks_per_rev=360` -> `ticks_per_mm = 360/(pi*80.77) = 1.4187`).
+Checked `data/tovez.json`'s own `wheels` block: **identical** unqualified
+80.77/360/1.4187 trio, with no camera/bench provenance note at all —
+unlike every other calibrated group in that file (`motors`, `drive`,
+`geometry`, `otos` all carry rich bench-measurement history).
+Confirmed via `vendor/nezha_motor.cpp` (line ~129, `NezhaMotor::tick()`)
+that `diffdrive.output()`'s `positionLeft`/`positionRight` are
+counts-native raw shaft-encoder ticks ("the 0x46 register's own unit
+(tenths of a shaft degree) -- sign-corrected only, no unit
+conversion"), cross-checked against two independent
+`vendor/nezha_motor.h` comments (`kReconfigureRestVelocity`/
+`kStopConfirmVelocity`: "5.0 mm/s ... at tovez's 0.7837 mm/deg that is
+~6.4 deg/s ~= 64 counts/s" and "8.0 mm/s ~= 102 counts/s" — both derive
+to exactly 10 counts/degree). So the counts-vs-mm *convention* was
+never the bug (`demo_square.py` already treated `positionLeft/Right`
+as raw counts correctly); the arithmetic combining
+`wheel_diameter_mm`/`ticks_per_rev` into `ticks_per_mm` was also
+correct. **The two INPUT numbers were simply wrong** — unverified
+`tovez_nocal.json` template defaults never independently measured on
+any real Nezha unit in this repo's `data/` — off by a factor that made
+every leg/pivot's encoder-termination target ~4.2-5.3x too small.
+
+## 25. Cross-check against `tovez.json` — conflict found, empirical wins
+
+Per the ticket's explicit instruction, checked whether `tovez.json`
+carries a REAL calibrated reference for this quantity. Its `wheels`
+block does not (see above — identical unverified template). Its
+`motors.travel_calib_left/right` (0.7837) DOES carry a real
+vendor-grounded unit — `vendor/nezha_motor.h`'s own comments confirm
+these units are mm per DEGREE of raw encoder rotation (at 10
+counts/degree) — but that field feeds `fullDutyVelocity`
+(`src/config.py`'s `wheel_control_to_diffdrive_config()`,
+VELOCITY-mode `drive()`'s plant-gain calibration), which
+`src/demo_square.py` never reads: it drives via `driveDuty()` directly,
+bypassing `config.py`/`travel_calib` entirely by design (see that
+module's own docstring, "Why direct diffdrive calls"). Numerically,
+`travel_calib` implies `ticks_per_mm ~= 1/(0.7837/10) ~= 12.76` —
+about **1.9x** the empirically-anchored 6.7241 derived below. Per the
+issue's explicit instruction ("if they disagree, the empirical bench
+number wins"), the empirical anchor governs. `src/config.py`'s own
+docstring already flags `travel_calib`'s "x10" multiplier as
+underspecified ("No document in this repo elaborates the multiplier's
+derivation further than 'x10'"), consistent with it being a
+second unverified figure rather than a settled reference.
+
+## 26. Fix applied
+
+`src/demo_square.py`:
+```
+WHEEL_CIRCUMFERENCE_MM = 145.0     # issue's own stated figure
+EMPIRICAL_COUNTS_PER_REV = 975.0   # midpoint of the empirical 870-1080
+                                    # range (sprint-002 run-1 derived)
+TICKS_PER_MM = EMPIRICAL_COUNTS_PER_REV / WHEEL_CIRCUMFERENCE_MM  # ~6.7241
+TRACKWIDTH_MM = 128.0               # UNCHANGED -- caliper-measured,
+                                     # not part of this bug
+```
+`data/zetuv.json`'s `wheels` block updated to match
+(`wheel_diameter_mm=46.1521`, `ticks_per_rev=975.0`,
+`ticks_per_mm=6.7241`), with a full `_wheels_note` provenance note.
+`motors.travel_calib_left/right` deliberately NOT added to
+`zetuv.json` — see Sec 25 above; adding it would silently enable
+`config.load_robot_config()`'s VELOCITY-mode boot auto-configure path
+with an untested figure, reversing sprint 002/003's explicit "zetuv
+stays no-cal profile" decision, out of this ticket's scope.
+`tests/test_demo_square.py`'s two constant-dependent tests
+(`test_leg_ticks_matches_distance_times_ticks_per_mm`,
+`test_pivot_ticks_matches_arc_length_times_ticks_per_mm`) updated to
+reference the live `demo_square.TICKS_PER_MM` constant rather than the
+old hardcoded `1.4187` literal, so a future correction cannot leave a
+stale value silently re-asserted.
+
+## 27. Deploy — docstring-stripped copies, same convention as before
+
+Probed the resident filesystem first (per this project's own
+probe-before-reflash discipline): `demo_square.py` (6997 bytes, raw
+stripped source — confirms sprint 003's own real, bench-verified
+outcome; `main.py`'s own docstring claim of a precompiled `.mpy`
+deploy is stale/aspirational and does not match what is actually on
+the device, consistent with `MICROPY_PERSISTENT_CODE_LOAD` being off
+per sprint 003's own Constraint B finding), `robot.json` (2413 bytes),
+`main.py` (2999 bytes) all present. `main_zetuv_demo.py`'s
+`run_tour()` does `sys.modules.pop("demo_square", None); import
+demo_square` — whatever `demo_square.py`/`.mpy` is on the filesystem
+at press time is what runs, so only that file needs updating for the
+fix to take effect (this module reads nothing from `robot.json` at
+runtime — its geometry constants are hardcoded, per its own
+docstring — so `data/zetuv.json`'s edit is a repo-source-of-truth
+consistency fix, not something that needed pushing to re-verify the
+fix itself).
+
+Generated a fresh docstring-stripped `demo_square.py` (same transform
+as sprint 002/003: strip the module docstring, add a short pointer
+comment) — 18031 bytes raw source -> 7876 bytes stripped (grew ~880
+bytes vs. the prior 6997-byte stripped copy, from this ticket's own
+added inline comments on the new geometry constants, which sit outside
+the docstring and survive the strip). Also regenerated the stripped
+`robot.json` from the corrected `data/zetuv.json` (same `_`-prefix-key
+strip, compact JSON) — 2417 bytes (barely changed from 2413). Combined
+on-device footprint ~13292 bytes, comfortably inside the 24576-byte
+filesystem region (sprint 002/003's own established budget).
+
+```
+$ mpremote connect /dev/cu.usbmodem2121202 fs cp <stripped demo_square.py> :demo_square.py
+$ mpremote connect /dev/cu.usbmodem2121202 fs cp <stripped robot.json> :robot.json
+```
+Verified sizes on-device via `os.stat` (per sprint 003's own finding
+that `mpremote fs ls`'s size column is unreliable on this
+device/mpremote combination): `demo_square.py` 7876 bytes, `robot.json`
+2417 bytes — both match exactly. `gc.mem_free()` before the tour import:
+24928 bytes (comfortably above the ~7876-byte source, matching sprint
+003's own precedent of ~29 KB free being sufficient for a
+similarly-sized file).
+
+## 28. Software correctness confirmed — target ticks match the fix exactly
+
+REPL-triggered verification (`exec(main.py source, {"__name__":
+"verify"})`, `robot_ready() -> True`, then `on_button_a()` called
+directly — the exact handler `main.py` wires to button A, same
+approach as sprint 003's own Sec 21):
+
+```
+demo_square: segment 0 leg   status ok target_ticks 3362.069 ...
+demo_square: segment 1 pivot status ok target_ticks 675.984  ...
+demo_square: segment 2 leg   status ok target_ticks 3362.069 ...
+... (all 8 segments; leg targets 3362.069, pivot targets 675.984)
+```
+Both figures match the hand-derived correction exactly (500.0 x
+6.7241 = 3362.05..3362.07 depending on rounding; (pi/2)*64.0*6.7241 =
+675.98) — confirms the software fix is logically correct end-to-end,
+independent of the hardware issue below. This is a **4.74x** increase
+over the old targets (709.35 -> 3362.069 legs; 142.62 -> 675.984
+pivots) — inside the ticket's own expected 4-5x band.
+
+## 29. Bench re-run — HARDWARE-BLOCKED, wheels do not move (new finding,
+## not root-caused, escalated)
+
+> **RESOLVED (2026-08-19, same ticket, after stakeholder action)**: the
+> stakeholder performed a full physical reset of the robot ("the robot
+> has plenty of power, but I completely reset it") — this cleared
+> whatever was wedged; power was explicitly ruled out. See "Sec 32
+> onward" below for the re-probe, the follow-on timing fix this
+> uncovered, and the successful full-tour bench verification. This
+> entry is left unedited below, per this file's own established
+> append-don't-rewrite convention (Sec 15's own correction note).
+
+The same `on_button_a()` call that confirmed correct target ticks
+above showed **every segment timing out** (`reached False`,
+`elapsed_ms 3000`, `delta_left`/`delta_right` exactly `0.0`) — no wheel
+motion at all, on either wheel, for the full 8-segment tour.
+
+**Systematic-debugging discipline applied** (reproduce, discriminate
+cheaply, cap attempts): three independent diagnostics, matching
+sprint 002 ticket 002's own bench-verified-working protocol exactly
+(`configure(left_port=2, right_port=1, fwd_sign_left=1,
+fwd_sign_right=1, max_duty=25.0, full_duty_velocity=0.0,
+cycle_period_ms=24)`, `begin()`, `start()`, all returning `"ok"`):
+
+1. **Combined** `driveDuty(20.0, 20.0, 500)` — well above the 6%
+   breakaway floor this exact wheel pair has reliably moved at in
+   every sprint 002/003 session today. `appliedDutyLeft/Right` read
+   20.0 during the pulse (duty genuinely commanded/staged),
+   `connectedLeft/Right: True` throughout (I2C acking normally on both
+   channels), `cycleCount` advancing normally (kernel fiber alive,
+   `cyclePeriodMeasured` ~28 ms, matching every prior session's own
+   baseline) — but `positionLeft`/`positionRight` stayed at `0.0` for
+   the entire pulse and after.
+2. **LEFT alone** (`driveDuty(20.0, 0.0, 500)`) then **RIGHT alone**
+   (`driveDuty(0.0, 20.0, 500)`), one wheel at a time (this project's
+   own "smallest-necessary-probing" discipline) — same result on
+   BOTH: `appliedDuty` nonzero, `connected: True`, `position` frozen
+   at `0.0` throughout.
+3. **Reset + retest**: a full `mpremote ... reset` + 5 s settle,
+   followed by an exact repeat of diagnostic 2 — **identical result**,
+   ruling out stale in-session kernel/construct state as the cause.
+
+`lastError()` reported `"ok"` throughout every trial; no `estopped`,
+`stallHalted`, or `watchdogFault` flag ever latched. `neutral()` was
+called after every trial (no duty left commanded).
+
+**Not root-caused, not fixed** — this symptom set (duty genuinely
+applied, I2C still acking on both channels, encoder position frozen at
+exactly zero on both wheels regardless of which is driven or in what
+combination, reproducing identically across a fresh hardware reset)
+does not match this session's own software change (the fix touches
+only `TICKS_PER_MM`'s value, never `configure()`/`driveDuty()`'s
+parameters, ports, or signs — independently confirmed byte-identical
+to prior working sessions by reading the deployed file back). It also
+does not match the sprint 002 "combined-drive anomaly" (that was
+LEFT-specific and duty-threshold-marginal, root-caused to a units bug
+already fixed; this is BOTH wheels, at 20% duty — well clear of any
+prior marginal threshold — showing zero response). This reproduces a
+NEW condition relative to every prior bench pass today (sprint 002/003
+both recorded real, repeated, correctly-signed motion on both wheels
+under this exact protocol). Candidates, none confirmed (no camera
+access to visually inspect): a mechanical fault (wheel/gearbox
+disconnect), a power/battery issue insufficient to actually turn the
+motors under load despite the I2C bus and kernel fiber staying healthy,
+or an encoder-specific hardware fault on this unit. **Escalated via
+`throw_ticket_exception`** rather than pressed further with
+higher-duty/longer-duration retries, per this project's own
+conservative-duty/minimal-necessary-probing discipline and this
+ticket's explicit "if hardware faults, STOP + record + throw exception"
+instruction.
+
+## 30. Device left in a safe, armed state
+
+A final `mpremote ... reset` + 5 s settle was performed, with no
+further `exec`/`run` issued afterward (matching sprint 003's own Sec
+22 handoff convention) — `mbdeploy list` immediately after confirmed
+`zetuv` still connected and responsive at the same port/UID. The
+corrected `demo_square.py`/`robot.json` remain deployed; `main.py`'s
+idle loop (`robot_ready()` only checks `robot.json` presence +
+`diffdrive` importability, not actual physical motion) will report
+armed/ready and show the breathing idle pulse — but a physical A-press
+right now will very likely reproduce the same zero-motion symptom Sec
+29 found, since that is a hardware-level issue this ticket's
+software-only fix cannot address. Flagged honestly rather than handed
+back silently.
+
+## 31. Offline gate
+
+```
+$ python3 -m pytest tests/ -q
+204 passed, 518 subtests passed
+```
+204 baseline, unchanged pass count (two existing tests updated to
+reference the live `TICKS_PER_MM` constant rather than a hardcoded
+stale literal; no new tests added — the corrected constants are
+already exercised by the existing parametric/shape tests via that
+constant). `python3 -m py_compile src/demo_square.py` and `mpy-cross
+src/demo_square.py -o ...` both clean. `git diff --exit-code --
+vendor/` clean — vendor/ untouched.
+
+## Summary for future readers
+
+1. **Root cause, software**: `TICKS_PER_MM`'s two input constants
+   (`wheel_diameter_mm`, `ticks_per_rev`) were unverified template
+   defaults, not a units-convention bug — fixed using the
+   stakeholder's own empirical bench anchor (975 counts/rev, ~145 mm
+   circumference), per the issue's "empirical wins on conflict"
+   instruction, since `tovez.json`'s one real vendor-grounded
+   "travel_calib" figure conflicted by ~1.9x AND feeds an unrelated
+   kernel field this module never reads.
+2. **Software fix independently confirmed correct**: REPL-read-back
+   `target_ticks` (3362.069 legs, 675.984 pivots) match the hand
+   derivation exactly, a 4.74x increase over the old targets, inside
+   the ticket's own expected band.
+3. **Bench re-verification is BLOCKED by a new, hardware-level fault**:
+   both wheels show zero encoder motion under duty that reliably moved
+   them in every sprint 002/003 session today, reproduced across a
+   fresh reset, not explained by this ticket's software change. Not
+   root-caused this session — escalated via `throw_ticket_exception`.
+4. Device left in a safe, connected, armed-but-likely-non-moving idle
+   state; corrected files remain deployed for whoever picks up the
+   hardware investigation.
+
+---
+
+# Sprint 004 ticket 001 session, continued: exception resolved,
+# timing follow-on fix, full corrected tour bench-verified
+
+Stakeholder resolved the Sec 29 exception directly: "the robot has
+plenty of power, but I completely reset it, so have at it." Power was
+explicitly ruled out; a full physical robot reset plausibly cleared
+the wedged Nezha motor board (the Sec 29 signature — duty applied,
+I2C connected, encoders frozen — is consistent with a board-level
+wedge a physical reset would clear, though this remains the
+stakeholder's own diagnosis, not independently root-caused by this
+agent). Ticket reopened, resumed same session, same physical device
+(`/dev/cu.usbmodem2121202`, UID
+`9906360200052820312bde85515a72e6000000006e052820`).
+
+## 32. Re-verify connection + filesystem, cautious motion re-probe
+
+`mbdeploy list`: port unchanged (`/dev/cu.usbmodem2121202`), same UID,
+`getez`/`zavaz` still relays, `vevov` still untouched. Filesystem
+probed directly (not assumed to have survived the physical reset,
+though a micro:bit power/board reset does not touch flash): `robot.json`
+(2417 bytes), `main.py` (2999 bytes), `demo_square.py` (7876 bytes,
+the pre-timing-fix stripped copy from Sec 27) all present, exact same
+sizes as deployed — nothing missing, no re-copy needed at this step.
+
+Cautious single-wheel re-probe FIRST, matching the original
+smallest-necessary-probing discipline (modest duty, short lease, one
+wheel at a time) before trusting a full tour again:
+`driveDuty(10.0, 0.0, 350)` LEFT alone, then `driveDuty(0.0, 10.0,
+350)` RIGHT alone. **Motion confirmed alive on both wheels**:
+`positionLeft` 0.0 -> 355.0 (post-lease) -> 388.0 (stop-verify, some
+coast, matching this drivetrain's own previously-documented coast-down
+behavior); `positionRight` then 388.0(unchanged) -> 416.0 -> 452.0 on
+the RIGHT-alone pulse. Both wheels respond normally again — the
+stakeholder's reset resolved Sec 29's symptom.
+
+## 33. Full tour re-run — a NEW, separate issue surfaces: legs time out
+## against the corrected (much longer) target
+
+With motion confirmed alive, reset + 5 s settle, then the same
+REPL-triggered `on_button_a()` verification as Sec 28
+(`exec(main.py source, {"__name__": "verify"})`, `robot_ready() ->
+True`, `on_button_a()` called directly):
+
+All 4 pivots: `reached True`, mean deltas 685.0/678.0/678.5/683.0
+against target 675.984, elapsed 900-1000 ms — correct and proportional,
+as expected. **All 4 legs: `reached False`**, hitting the
+`SEGMENT_TIMEOUT_MS` safety bound at exactly 3000 ms every time, mean
+deltas only 2378.5-2493.0 against the corrected target of 3362.069
+(~70-74% of target) — below the ticket's own "3000-4000+" expected
+neighborhood.
+
+**Root cause of this second issue** (found immediately, not a fresh
+mystery): `SEGMENT_LEASE_MS`/`SEGMENT_TIMEOUT_MS` (3000 ms each) were
+sized for the OLD, wrong (~4-5x too short) leg targets, which
+completed in ~900-1050 ms per every prior session's own bench numbers
+(Sec 15, Sec 21) — comfortable 3x margin under the old 3000 ms budget.
+Correcting `TICKS_PER_MM` this ticket made every leg ~4.74x longer
+without revisiting that budget: extrapolating this run's own
+mid-segment rate (slowest observed, 2378.5 ticks / 3000 ms = 0.793
+ticks/ms) to the full 3362.069-tick target gives ~4241 ms needed —
+past the 3000 ms timeout, and uncomfortably close to the native
+binding's own hard 5000 ms single-`driveDuty()`-call lease ceiling
+(refused outright above it, never clamped) if simply raised as one
+long lease.
+
+**Fix**: `src/demo_square.py`'s `_run_segment()` now REFRESHES the
+`driveDuty()` lease periodically (`LEASE_REFRESH_MS = 400`, comfortably
+inside a short `SEGMENT_LEASE_MS = 600` safety lease) rather than
+holding one lease for the whole segment — this reaches whatever total
+drive duration a segment actually needs without approaching the native
+5000 ms ceiling, AND keeps the lease's own fail-safe intent tighter
+than before (a hung polling loop now loses the wheels within ~600 ms,
+not within a multi-second single lease). `SEGMENT_TIMEOUT_MS` raised to
+6000 ms (decoupled from the native lease ceiling now that the lease is
+refreshed), with real margin over the ~4.2-4.9 s the corrected leg
+target needs. A refresh call that itself returns non-`"ok"` stops the
+segment immediately (e.g. an estop landing mid-segment), rather than
+continuing to poll a segment nothing is advancing. `python3 -m pytest
+tests/` re-run clean (204 passed, 518 subtests — no test referenced
+the old lease/timeout values), `py_compile`/`mpy-cross` both clean.
+
+Regenerated the stripped deploy copy (same docstring-strip convention):
+21063 bytes raw -> 10908 bytes stripped (grew from 7876 due to the new
+lease-refresh design's own inline documentation, which sits outside
+the docstring and survives the strip). Redeployed to zetuv; `os.stat`
+confirmed 10908 bytes on-device, exact match. `gc.mem_free()` before
+the tour: 33232 bytes — comfortable headroom (well above the
+7876-byte file that already worked fine).
+
+## 34. Full corrected tour — bench-verified, all 8 segments reached
+
+Reset + 5 s settle, then the same REPL-triggered `on_button_a()`
+verification once more:
+
+```
+demo_square: segment 0 leg   status ok target_ticks 3362.069 delta_left 3186.0 delta_right 3561.0 mean_delta 3373.5 reached True elapsed_ms 4000
+demo_square: segment 1 pivot status ok target_ticks 675.984  delta_left -520.0 delta_right 862.0  mean_delta 691.0  reached True elapsed_ms 1050
+demo_square: segment 2 leg   status ok target_ticks 3362.069 delta_left 3216.0 delta_right 3555.0 mean_delta 3385.5 reached True elapsed_ms 4000
+demo_square: segment 3 pivot status ok target_ticks 675.984  delta_left -633.0 delta_right 786.0  mean_delta 709.5  reached True elapsed_ms 1000
+demo_square: segment 4 leg   status ok target_ticks 3362.069 delta_left 3205.0 delta_right 3542.0 mean_delta 3373.5 reached True elapsed_ms 4000
+demo_square: segment 5 pivot status ok target_ticks 675.984  delta_left -575.0 delta_right 808.0  mean_delta 691.5  reached True elapsed_ms 950
+demo_square: segment 6 leg   status ok target_ticks 3362.069 delta_left 3258.0 delta_right 3522.0 mean_delta 3390.0 reached True elapsed_ms 4000
+demo_square: segment 7 pivot status ok target_ticks 675.984  delta_left -558.0 delta_right 830.9999 mean_delta 694.5 reached True elapsed_ms 950
+demo_square: tour complete
+```
+
+**All 8/8 segments `reached True`.** Legs: mean deltas 3373.5-3390.0
+against target 3362.069 (within ~1% of target, all completing at
+exactly 4000 ms — comfortably inside the new 6000 ms budget). Pivots:
+mean deltas 691.0-709.5 against target 675.984 (within ~5%),
+correctly signed throughout (`delta_left` negative, `delta_right`
+positive — LEFT/CCW, matching the kernel's own `twist` convention).
+
+**Scale-up vs. the old, wrong run (Sec 15/21)**: old leg mean deltas
+were 650-811 (~730 average); new leg means 3373.5-3390.0 (~3380
+average) — a **4.63x** increase. Old pivot means were ~142-173
+(~155 average, though those numbers were themselves the OLD, wrong
+pivot targets' own encoder deltas, not directly comparable
+apples-to-apples since the pivot angle math didn't change, only
+`TICKS_PER_MM` did); new pivot means ~691-709 (~699 average) — a
+**4.5x** increase. Both land inside the ticket's own expected 4-5x
+band, and legs land squarely inside the "3000-4000+ counts" numeric
+neighborhood the acceptance criteria specify.
+
+**Stop-verify**: position before `(10634.0, 18045.0)`, after 2 s
+`(10634.0, 18045.0)` — delta `(0.0, 0.0)`. Clean, no drift, matching
+this ticket's own "Δ=0 over 2 s" requirement exactly.
+
+## 35. Device left in a safe, armed state
+
+A final `mpremote ... reset` + 5 s settle was performed, with no
+further `exec`/`run` issued afterward (matching sprint 003's own
+handoff convention). `mbdeploy list` immediately after confirmed
+`zetuv` still connected and responsive at the same port/UID. The
+corrected, timing-fixed `demo_square.py` remains deployed; `main.py`'s
+idle loop will report armed/ready and show the breathing idle pulse.
+Ready for the stakeholder's physical A press.
+
+## 36. Offline gate (final)
+
+```
+$ python3 -m pytest tests/ -q
+204 passed, 518 subtests passed
+```
+204 baseline, unchanged pass count. `python3 -m py_compile
+src/demo_square.py` and `mpy-cross src/demo_square.py -o ...` both
+clean. `git diff --exit-code -- vendor/` clean — vendor/ untouched
+throughout this entire ticket.
+
+## Summary for future readers (final)
+
+1. **Root cause, software**: `TICKS_PER_MM`'s two input constants were
+   unverified template defaults — fixed using the stakeholder's own
+   empirical bench anchor, per the issue's "empirical wins on
+   conflict" instruction (Sec 24-26).
+2. **Second issue, surfaced only once motion was confirmed alive**:
+   the per-segment lease/timeout budget (3000 ms) was sized for the
+   OLD, much-shorter leg targets and needed raising for the corrected
+   ~4.74x-longer ones — fixed by refreshing `driveDuty()`'s lease
+   periodically rather than holding one long lease near the native
+   binding's 5000 ms ceiling (Sec 33).
+3. **Hardware wedge (Sec 29) resolved by the stakeholder's own physical
+   reset**, power explicitly ruled out — re-probed cautiously
+   (single wheel, modest duty) before trusting a full tour again
+   (Sec 32).
+4. **Full corrected tour bench-verified**: all 8 segments reached
+   target, legs and pivots both scaled ~4.5-4.7x over the old, wrong
+   run, clean stop-verify (Sec 34).
+5. Device left connected, reset, armed at the idle prompt, for the
+   stakeholder's own physical A press.

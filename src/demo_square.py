@@ -81,14 +81,85 @@ ceiling -- reaching that would need either a real velocity control loop
 disabled, and tuning it is its own calibration exercise). Recorded here
 and in the bench log rather than silently claimed as met.
 
-**Geometry**, uncalibrated (this sprint's own scope: "wheels visibly
-execute a square-ish tour", not survey-grade geometry): ``TICKS_PER_MM``
-and ``TRACKWIDTH_MM`` below mirror ``data/zetuv.json``'s own
-``wheels``/``geometry`` blocks, which are themselves INHERITED,
-UNVERIFIED-ON-ZETUV template values (see that file's own provenance
-note) -- carried here as plain module constants rather than read from
-``/robot.json`` at runtime, so this module has no filesystem
-dependency and works even before a config is copied onto the device.
+**Geometry -- CORRECTED sprint 004 ticket 001, 2026-08-19** (root-cause
+fix for the "legs run ~4-5x short" bug,
+``clasi/sprints/004-square-tour-travel-units-fix/``, UC-003/UC-014;
+full derivation in the bench log's own sprint-004 section,
+``docs/bench-log-zetuv-2026-08-19.md``): ``TICKS_PER_MM`` below used to
+mirror ``data/zetuv.json``'s own ``wheels`` block
+(``wheel_diameter_mm=80.77``, ``ticks_per_rev=360`` -> ``ticks_per_mm=
+1.4187``). BOTH of those two source numbers were unverified
+``tovez_nocal.json`` template defaults, never independently measured on
+ANY real Nezha unit in this repo's ``data/`` -- including
+``data/tovez.json`` itself, whose own ``wheels`` block carries the
+IDENTICAL unqualified 80.77/360/1.4187 trio with no camera/bench
+provenance note, unlike every other calibrated group in that file, so
+it offered no real second data point, only a matching template
+default. The arithmetic combining them (``ticks_per_mm = ticks_per_rev
+/ (pi * wheel_diameter_mm)``) was correct; the two INPUT numbers were
+simply wrong, by a factor that made every leg/pivot's
+encoder-termination target ~4.2-5.3x too small -- exactly matching the
+stakeholder's live bench observation (2026-08-19): a "500 mm" leg
+turned the wheels only ~270 degrees (0.75 rev, the issue's own golden
+measurement), not the ~3.3-3.6 rev that 500 mm actually needs on a
+~145 mm-circumference Nezha wheel.
+
+**Fix**: ``TICKS_PER_MM`` is now derived from the stakeholder's own
+empirical bench anchor, per the issue's explicit instruction that the
+empirical number governs on conflict with any borrowed/templated
+value. Sprint-002 run-1's four leg segments (the run the issue itself
+cites) delivered mean per-wheel encoder deltas of
+725.5/719.0/730.5/750.5 counts (``docs/bench-log-zetuv-2026-08-19.md``
+Sec 15) for that same observed 0.75 rev, averaging 731.4 counts -- an
+empirical counts-per-revolution of 731.4 / 0.75 = 975.2 (the issue's
+own stated range is ~870-1080; its midpoint, 975, is used here as the
+clean anchor -- see ``EMPIRICAL_COUNTS_PER_REV`` below). Combined with
+the issue's stated wheel circumference (``WHEEL_CIRCUMFERENCE_MM`` =
+145.0 mm) this gives ``TICKS_PER_MM`` = 975.0 / 145.0 ~= 6.7241 -- a
+~4.74x correction, landing squarely in the ticket's own expected
+4-5x / 3.3-3.6-rev band (bench-re-verified, see the bench log).
+
+**Cross-checked against, and found to CONFLICT with,**
+``data/tovez.json``'s own ``motors.travel_calib_left/right`` (0.7837)
+-- the one "travel calibration"-named field that DOES carry a real
+vendor-grounded unit (``vendor/nezha_motor.h``'s own comments confirm
+``travel_calib``'s units are literally mm PER DEGREE of raw encoder
+shaft rotation, and that the raw encoder register itself reports
+TENTHS of a degree, i.e. 10 counts/degree): that implies
+``ticks_per_mm`` = 1 / (0.7837 / 10) ~= 12.76, roughly 1.9x the
+empirical-anchored 6.7241 above. Per the issue's own explicit
+instruction ("if they disagree, the empirical bench number wins"), the
+empirical anchor governs here, NOT ``travel_calib`` -- flagged, not
+silently discarded: this disagreement, plus ``src/config.py``'s own
+already-flagged uncertainty about ``travel_calib``'s "x10" multiplier
+("No document in this repo elaborates the multiplier's derivation
+further than 'x10'"), together suggest ``travel_calib`` itself may be
+an unverified/stale figure, not a settled reference -- worth a fresh
+camera pass before trusting either number as final. Also note
+``travel_calib_left/right`` feeds a DIFFERENT kernel field entirely
+(``fullDutyVelocity``, VELOCITY-mode ``drive()``'s plant-gain
+calibration, ``src/config.py``'s own
+``wheel_control_to_diffdrive_config()``) -- this module never calls
+``drive()``/reads ``travel_calib`` at all (see "Why direct diffdrive
+calls" above), so it was never the field actually driving this bug,
+regardless of the conflict above.
+
+``data/zetuv.json``'s own ``wheels`` block is updated to match (same
+derivation, same provenance note) for consistency between the repo's
+config source of truth and this module's own hardcoded mirror -- still
+NOT independently camera/tape-verified on zetuv's own physical wheel,
+same disclosed-not-hidden caveat this whole file already carried
+before this fix. This module still reads nothing from ``/robot.json``
+at runtime -- ``TICKS_PER_MM``/``TRACKWIDTH_MM`` remain plain module
+constants, so it has no filesystem dependency and works even before a
+config is copied onto the device.
+
+``TRACKWIDTH_MM`` (128.0) is UNCHANGED and NOT part of this bug --
+``data/tovez.json``'s own ``geometry._trackwidth_note``: "the
+CALIPER-MEASURED wheel separation (stakeholder, 128 mm) ... the one
+independently verifiable number in this file," and pivots scale
+correctly off it (bench-re-verified, the same ~4.74x factor as legs --
+see the bench log).
 
 **Termination is encoder-closed-loop, not a blind timer.** Each
 segment polls ``diffdrive.output()`` and stops (commands neutral) once
@@ -111,13 +182,23 @@ except ImportError:  # pragma: no cover -- exercised only off-device (CPython)
     _ON_DEVICE = False
 
 # ---------------------------------------------------------------------
-# Geometry -- mirrors data/zetuv.json's wheels/geometry blocks, INHERITED
-# from tovez_nocal.json, NOT independently bench-verified on zetuv (see
-# that file's own provenance note). Good enough for an uncalibrated
-# "square-ish" tour, not a precision claim.
+# Geometry -- CORRECTED sprint 004 ticket 001, 2026-08-19 (root-cause
+# units fix). See module docstring's "Geometry" section for the full
+# derivation, the tovez.json travel_calib cross-check, and why the
+# empirical bench anchor governs. Mirrors data/zetuv.json's own
+# wheels block (kept in sync, same derivation/provenance note there).
 # ---------------------------------------------------------------------
-TICKS_PER_MM = 1.4187
-TRACKWIDTH_MM = 128.0
+WHEEL_CIRCUMFERENCE_MM = 145.0     # [mm] issue's own stated figure --
+                                    # not independently re-measured this
+                                    # ticket (no camera/caliper access
+                                    # available to this agent)
+EMPIRICAL_COUNTS_PER_REV = 975.0   # [counts/rev] stakeholder's own
+                                    # golden-measurement anchor -- see
+                                    # module docstring for the full
+                                    # sprint-002-run-1-derived math
+TICKS_PER_MM = EMPIRICAL_COUNTS_PER_REV / WHEEL_CIRCUMFERENCE_MM  # ~6.7241
+TRACKWIDTH_MM = 128.0               # [mm] UNCHANGED -- caliper-measured,
+                                    # not part of this bug (see docstring)
 PI = 3.14159265358979323846
 
 LEG_DISTANCE_MM = 500.0
@@ -137,9 +218,41 @@ SEGMENT_DUTY_PERCENT = 6.0    # commanded duty for every segment -- the
                                # module docstring's "Honest limitation")
 CYCLE_PERIOD_MS = 24          # matches ticket 001's own bench convention
 
-SEGMENT_LEASE_MS = 3000       # per-segment driveDuty() lease; well under
-                               # the native binding's 5000 ms ceiling
-SEGMENT_TIMEOUT_MS = 3000     # safety bound: stop and move on regardless
+SEGMENT_LEASE_MS = 600        # per-driveDuty() safety lease -- REFRESHED
+                               # periodically by _run_segment() (see
+                               # LEASE_REFRESH_MS) rather than held for a
+                               # whole segment. CORRECTED sprint 004 ticket
+                               # 001: the old single-shot 3000 ms lease was
+                               # sized for the old, wrong (~4-5x too short)
+                               # leg targets; the corrected ~3362-tick leg
+                               # target needs ~4.2-4.9 s of continuous drive
+                               # at SEGMENT_DUTY_PERCENT (bench-measured,
+                               # docs/bench-log-zetuv-2026-08-19.md), which
+                               # would sit right at (or over) the native
+                               # binding's own hard 5000 ms single-lease
+                               # ceiling (refused outright above it, never
+                               # clamped) if held as one long lease. A
+                               # short, frequently-renewed lease reaches the
+                               # same total drive duration while keeping the
+                               # lease's own fail-safe intent tight (a
+                               # polling loop that itself hangs still loses
+                               # the wheels within one lease period, not
+                               # within whatever the segment's full budget
+                               # is).
+LEASE_REFRESH_MS = 400        # reissue driveDuty() this often while still
+                               # driving -- comfortably inside
+                               # SEGMENT_LEASE_MS so the lease never
+                               # actually expires mid-drive under normal
+                               # poll timing
+SEGMENT_TIMEOUT_MS = 6000     # CORRECTED sprint 004 ticket 001: overall
+                               # per-segment safety bound, decoupled from
+                               # the native binding's 5000 ms single-lease
+                               # ceiling now that driveDuty() is reissued
+                               # (see SEGMENT_LEASE_MS above). Sized with
+                               # real margin over the corrected leg
+                               # target's bench-measured ~4.2-4.9 s typical
+                               # completion time; pivots finish in ~1 s and
+                               # exit this bound long before it matters.
 POLL_INTERVAL_MS = 50
 SETTLE_MS = 1200              # TOUR_SQUARE's own rest-to-rest settle
 
@@ -199,7 +312,14 @@ def _run_segment(index, segment):
     """Drives one segment to completion (target reached or timeout),
     then commands neutral and settles. Returns a small result dict for
     the caller to log -- this is the module's own bench-observation
-    evidence trail, printed by run() below."""
+    evidence trail, printed by run() below.
+
+    CORRECTED sprint 004 ticket 001: driveDuty()'s lease is now
+    REFRESHED periodically (every LEASE_REFRESH_MS) rather than held
+    once for the whole segment -- see SEGMENT_LEASE_MS's own comment
+    for why. If a refresh call itself refuses (e.g. an estop landed
+    mid-segment), the loop stops driving immediately rather than
+    continuing to poll a segment nothing is actually advancing."""
     out0 = diffdrive.output()
     start_left = out0["positionLeft"]
     start_right = out0["positionRight"]
@@ -208,19 +328,26 @@ def _run_segment(index, segment):
                                   SEGMENT_LEASE_MS)
 
     elapsed_ms = 0
+    since_refresh_ms = 0
     reached = False
     mean_delta = 0.0
     delta_left = 0.0
     delta_right = 0.0
-    while elapsed_ms < SEGMENT_TIMEOUT_MS:
+    refresh_status = status
+    while elapsed_ms < SEGMENT_TIMEOUT_MS and refresh_status == "ok":
         time.sleep_ms(POLL_INTERVAL_MS)
         elapsed_ms += POLL_INTERVAL_MS
+        since_refresh_ms += POLL_INTERVAL_MS
         out = diffdrive.output()
         mean_delta, delta_left, delta_right = _mean_abs_delta(
             out, start_left, start_right)
         if mean_delta >= segment["target_ticks"]:
             reached = True
             break
+        if since_refresh_ms >= LEASE_REFRESH_MS:
+            refresh_status = diffdrive.driveDuty(
+                segment["duty_left"], segment["duty_right"], SEGMENT_LEASE_MS)
+            since_refresh_ms = 0
 
     diffdrive.neutral()
     time.sleep_ms(SETTLE_MS)
