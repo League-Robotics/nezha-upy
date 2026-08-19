@@ -1,7 +1,7 @@
 ---
-id: '008'
+id: 008
 title: Supersede the gates-3-7 doc with a pointer
-status: open
+status: done
 use-cases: []
 depends-on: []
 github-issue: ''
@@ -42,21 +42,53 @@ already exists.
 
 ## Acceptance Criteria
 
-- [ ] `docs/micropython-full-firmware-in-the-image-gates-3-7.md` opens
+- [x] `docs/micropython-full-firmware-in-the-image-gates-3-7.md` opens
       with a clearly marked supersession banner naming
       `docs/design/specification.md` as authoritative and
       `specification.md` §8 as where its carried-over constraints live.
-- [ ] `docs/design/specification.md` and `docs/design/overview.md`
+- [x] `docs/design/specification.md` and `docs/design/overview.md`
       both link to the gates-3-7 doc and those links resolve (relative
       path check) — verify existing links rather than assuming.
-- [ ] The gates-3-7 doc links back to `specification.md`.
-- [ ] A short confirmation note (in this ticket, or a one-line
+- [x] The gates-3-7 doc links back to `specification.md`.
+- [x] A short confirmation note (in this ticket, or a one-line
       changelog entry) records that all four `nezha-upy-review.md`
       findings are represented in `specification.md` §7 — a
       traceability check, not new authoring.
-- [ ] No content is duplicated between the two docs beyond the
+- [x] No content is duplicated between the two docs beyond the
       existing carried-over-constraints summary already in
       `specification.md` §8.
+
+## Verification notes (recorded during execution)
+
+- **Existing links checked, not stale.** `docs/design/overview.md`
+  "Governing documents" (lines 42–45) and `docs/design/specification.md`
+  header (lines 3–9) and §8 heading (line 316) already reference
+  `docs/micropython-full-firmware-in-the-image-gates-3-7.md` by
+  repo-root-relative path; both paths exist on disk (verified by direct
+  file-existence check). No edit was needed to either file.
+- **Reciprocal link added.** The gates-3-7 doc did not previously link
+  back to `specification.md`; the new banner adds that pointer plus a
+  pointer to `PLAN.md` and `docs/design/overview.md`.
+- **Traceability confirmation — the four `nezha-upy-review.md` findings
+  map onto `specification.md` §7 as follows** (verified by reading both
+  documents in full during this ticket):
+  1. Heap-corruption mechanism (CODAL shared-stack + in-switch
+     malloc/free; hook question permanently closed) → §7.1.
+  2. Starvation is a control gap; realistic trigger is the
+     `radio.receive()` polling idiom, not the busy-wait; watchdog must
+     be visible → §7.2.
+  3. Fiber-exit design (`step()` as a re-entrant non-blocking state
+     machine off a pended SWI) if M1's safety gate reads badly → §7.3.
+  4. `mpy-cross` compiles as a lint only, not a load-path proof (this
+     port cannot load `.mpy` from the filesystem); module shipping is
+     `manifest.py` freezing → §7.4.
+
+  All four are represented; no re-authoring was needed.
+- **No duplication introduced.** The two new banners are pointers
+  (a few sentences each), not restatements of content — the
+  carried-over-constraints summary already lives solely in
+  `specification.md` §8, and the findings summary already lives solely
+  in `specification.md` §7.
 
 ## Testing
 

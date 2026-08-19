@@ -1,5 +1,13 @@
 # nezha-upy — architecture review
 
+> **Incorporated into the main design document.** All four findings
+> below (heap-corruption mechanism, starvation/polling-idiom gap,
+> fiber-exit design, mpy-cross-is-a-lint) are represented in
+> `docs/design/specification.md` §7, "Architecture review findings
+> (2026-08-18, incorporated)" — §7.1–§7.4 respectively. This document
+> remains the full-text source; read it for the complete reasoning
+> behind each finding.
+
 **Repo:** `League-Robotics/nezha-upy` @ HEAD (2026-08-18)
 **Scope:** PLAN.md, `patches/`, `codal_overlay.json`, `vendor/differential_drive.{h,cpp}`, `vendor/nezha_motor.{h,cpp}`, against upstream `micropython-microbit-v2` and `codal-core`
 **Verdict:** the plan is sound and the landmine ledger is accurate. Three findings below change the reasoning under an existing decision, identify an unmitigated failure mode, and correct a gate.
