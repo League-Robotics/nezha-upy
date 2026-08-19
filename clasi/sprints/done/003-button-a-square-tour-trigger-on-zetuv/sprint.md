@@ -1,10 +1,12 @@
 ---
 id: '003'
 title: Button A square tour trigger on zetuv
-status: planning-docs
+status: closed
 branch: sprint/003-button-a-square-tour-trigger-on-zetuv
 worktree: false
-use-cases: [UC-002, UC-003]
+use-cases:
+- UC-002
+- UC-003
 issues:
 - button-a-square-tour-on-device-trigger.md
 ---
