@@ -1,0 +1,14 @@
+# secrets -- provided locally at bench time, never committed
+wifi_secrets.json
+config/wifi_secrets.json
+
+# build outputs
+build/
+*.hex
+*.map
+*.o
+*.mpy
+__pycache__/
+
+# vendored upstream MicroPython checkout (fetched by build.sh)
+micropython-microbit-v2/
