@@ -14,7 +14,15 @@ and it is documented as run via `mpremote run` (source upload +
 execute), never `import demo_square` on-device -- see that module's
 own docstring. This does not weaken the invariant for FRAMEWORK
 modules (config.py, motion.py, comms.py, ...), which must still be
-frozen and still fail this test if they drift out of manifest.py."""
+frozen and still fail this test if they drift out of manifest.py.
+
+`src/main_zetuv_demo.py` (sprint 003 ticket 001) is the second entry:
+it is the version-controlled copy of zetuv's on-device `main.py` (the
+filesystem student-code slot -- `src/boot.py`'s own module docstring
+confirms, directly against `codal_port/main.c`, that a FROZEN module
+literally named `main` would never be found by `mp_main()`'s
+filesystem-only `main.py` probe, so this file must stay off the
+freeze list by construction, not merely by convention)."""
 
 import re
 from pathlib import Path
@@ -23,8 +31,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_PATH = REPO_ROOT / "manifest.py"
 SRC_DIR = REPO_ROOT / "src"
 
-# Bench/demo scripts, never frozen -- see this module's own docstring.
-_BENCH_ONLY_MODULES = {"demo_square.py"}
+# Bench/demo scripts and on-device-main.py copies, never frozen -- see
+# this module's own docstring.
+_BENCH_ONLY_MODULES = {"demo_square.py", "main_zetuv_demo.py"}
 
 
 def _actual_src_modules():

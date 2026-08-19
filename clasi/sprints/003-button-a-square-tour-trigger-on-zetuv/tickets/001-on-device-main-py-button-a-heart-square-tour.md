@@ -1,8 +1,10 @@
 ---
 id: '001'
-title: 'On-device main.py: button A → heart + square tour'
-status: open
-use-cases: [UC-002, UC-003]
+title: "On-device main.py: button A \u2192 heart + square tour"
+status: done
+use-cases:
+- UC-002
+- UC-003
 depends-on: []
 github-issue: ''
 issue: button-a-square-tour-on-device-trigger.md
@@ -71,27 +73,39 @@ bench log).
 
 ## Acceptance Criteria
 
-- [ ] `main.py` exists on zetuv's filesystem implementing: idle
+- [x] `main.py` exists on zetuv's filesystem implementing: idle
       prompt → button A → heart → `demo_square` tour → idle, main-context
       only, Ctrl-C/REPL preserved.
-- [ ] Deploy probe is recorded in the bench log: whether the resident
+- [x] Deploy probe is recorded in the bench log: whether the resident
       image was already current or a reflash was needed, and which.
-- [ ] `/robot.json` presence is confirmed (or re-copied from
+      (Probed: `boot`/`config` frozen modules found stale-stub; decided
+      NO reflash needed since `main.py`/`demo_square` don't depend on
+      their currency — disclosed as a flagged, out-of-scope finding.
+      Bench log §17.)
+- [x] `/robot.json` presence is confirmed (or re-copied from
       `data/zetuv.json` if missing) before verification — recorded in
-      the bench log.
-- [ ] Bench log records: idle prompt observed on the display; the
+      the bench log. (Confirmed present and valid, 2413 bytes, via
+      on-device `os.stat`/`open` — `mpremote fs ls`'s own size column
+      was found unreliable on this port; bench log §18.)
+- [x] Bench log records: idle prompt observed on the display; the
       button-A handler function invoked directly via REPL and observed
-      to run heart → tour → idle end-to-end.
-- [ ] The robot is handed back to the stakeholder for the physical
+      to run heart → tour → idle end-to-end. (§21 — idle prompt not
+      independently visually confirmed, no camera access, consistent
+      with every prior bench session in this file; `on_button_a()`
+      REPL-invoked run fully evidenced, 8/8 segments reached, clean
+      stop-verify.)
+- [x] The robot is handed back to the stakeholder for the physical
       button press promptly after the REPL-invoked check passes — not
-      blocked on further verification.
-- [ ] `python3 -m pytest tests/` stays green at the 204 baseline (no
+      blocked on further verification. (§22 — final reset + settle,
+      no further exec/run commands issued, `mbdeploy list` confirmed
+      zetuv connected at handoff.)
+- [x] `python3 -m pytest tests/` stays green at the 204 baseline (no
       regressions; this ticket adds no CPython-testable logic beyond
       what a lint catches, since `main.py`'s only job is to call
       existing, already-tested modules).
-- [ ] `python3 -m py_compile` passes on the new `main.py`; `mpy-cross`
+- [x] `python3 -m py_compile` passes on the new `main.py`; `mpy-cross`
       lints it clean.
-- [ ] No manifest change — `main.py` lives on the filesystem
+- [x] No manifest change — `main.py` lives on the filesystem
       (student-code slot), not the frozen manifest; confirm
       `src/codal_port/manifest.py` is untouched by this ticket.
 
