@@ -83,6 +83,22 @@ acceptance criteria explicitly allow. This is expected to change once
 ticket 007's `config.py` and the schema evolve together; this data
 copy does not attempt to pre-empt that reshape.
 
+## On-device filesystem size (sprint 002 ticket 001 finding)
+
+A fully-annotated robot JSON from this directory does **not** fit the
+built image's on-device filesystem (`0x6d000..0x73000`, 24,576 bytes
+before per-file overhead — see `micropython-microbit-v2/src/MICROBIT.hex`'s
+own build-time layout table). `data/tovez.json` alone is ~59 KB; even the
+smaller `data/tovez_nocal.json` (~14 KB) and this sprint's own
+`data/zetuv.json` (~20 KB) exceeded free space when copied verbatim to a
+real device as `/robot.json` (`docs/bench-log-zetuv-2026-08-19.md` §5).
+Every `_`-prefixed key in these files is free-text documentation
+`config.py`'s field validation already ignores by convention (see "Known
+gap" below), so stripping them before copying to a device is
+behavior-preserving. **Do this whenever flashing any of this directory's
+robot JSON onto real hardware** — the checked-in files here stay the full
+documented source; only the on-device copy needs stripping.
+
 ## Secrets check
 
 Checked at copy time (`grep -n -i` across all six source files for

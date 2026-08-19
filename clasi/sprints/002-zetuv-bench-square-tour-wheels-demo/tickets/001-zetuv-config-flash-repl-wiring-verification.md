@@ -1,8 +1,10 @@
 ---
 id: '001'
-title: 'zetuv config + flash + REPL wiring verification'
-status: open
-use-cases: [UC-002, UC-003]
+title: zetuv config + flash + REPL wiring verification
+status: done
+use-cases:
+- UC-002
+- UC-003
 depends-on: []
 github-issue: ''
 issue: zetuv-square-tour-wheels-demo.md
@@ -84,26 +86,27 @@ and investigate rather than working around the refusal.
 This ticket's acceptance is a mix of hardware bench observations
 (recorded, not simulated) and offline checks:
 
-- [ ] `data/zetuv.json` exists, derived from `data/tovez_nocal.json`,
+- [x] `data/zetuv.json` exists, derived from `data/tovez_nocal.json`,
       with provenance notes on every derived/unverified value.
-- [ ] `data/zetuv.json` validates against `data/robot_config.schema.json`
+- [x] `data/zetuv.json` validates against `data/robot_config.schema.json`
       the same way `tests/test_robot_config_data.py` validates every
       other `data/*.json` file (extend that test to cover zetuv.json).
-- [ ] Bench log records: `./build.sh --clean --with-diffdrive
+- [x] Bench log records: `./build.sh --clean --with-diffdrive
       --with-wifi` succeeded; `mbdeploy` deploy to zetuv by UID
       succeeded (UID recorded); ~5 s settle observed; REPL answered;
       `diffdrive` importable.
-- [ ] Bench log records the measured `left_port`/`right_port`/
+- [x] Bench log records the measured `left_port`/`right_port`/
       `fwd_sign_left`/`fwd_sign_right` values and how they were
       determined (which pulse produced which observed motion).
-- [ ] `data/zetuv.json`'s `motors` block reflects those measured
+- [x] `data/zetuv.json`'s `motors` block reflects those measured
       values (not the template's placeholders).
-- [ ] Bench log records the lease-expiry safety spot-check result
+- [x] Bench log records the lease-expiry safety spot-check result
       (wheels stopped at expiry).
-- [ ] `python3 -m pytest tests/` stays green (187 baseline from sprint
+- [x] `python3 -m pytest tests/` stays green (187 baseline from sprint
       001 plus this ticket's own `data/zetuv.json` schema-validation
-      addition).
-- [ ] getez/zavaz were never targeted; `--force-relay` was never
+      addition). (195 passed: 193 sprint-001-era baseline + this
+      ticket's own `TestZetuvRadioChannel`/`TestZetuvWiring` additions.)
+- [x] getez/zavaz were never targeted; `--force-relay` was never
       passed — confirmed by the bench log recording the exact
       `mbdeploy` invocation used (by UID).
 
