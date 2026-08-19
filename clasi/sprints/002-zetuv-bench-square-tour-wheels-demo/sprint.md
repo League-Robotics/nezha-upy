@@ -1,10 +1,13 @@
 ---
 id: '002'
 title: 'Zetuv bench: square tour wheels demo'
-status: planning-docs
+status: executing
 branch: sprint/002-zetuv-bench-square-tour-wheels-demo
 worktree: false
-use-cases: [UC-002, UC-003, UC-014]
+use-cases:
+- UC-002
+- UC-003
+- UC-014
 issues:
 - zetuv-square-tour-wheels-demo.md
 ---
