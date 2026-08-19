@@ -1,7 +1,7 @@
 ---
 id: '001'
 title: Python-first firmware image M0-M6
-status: executing
+status: closed
 branch: sprint/001-python-first-firmware-image-m0-m6
 worktree: false
 use-cases:
