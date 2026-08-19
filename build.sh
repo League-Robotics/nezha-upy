@@ -25,6 +25,13 @@
 #                     patches/apply_yield.py's own header for why that
 #                     exact diff is unsafe against this port's stock
 #                     MICROPY_VM_HOOK_POLL wiring.
+#   --with-wifi       Wire in the wifiuart native module (builtin
+#                     `import wifiuart`) -- ticket 006/M4's UARTE1
+#                     byte-pipe shim + stdio TCP-REPL mirror hook.
+#                     Independent of --with-diffdrive (only depends on
+#                     M0); the AT dialogue itself (join/CIPMUX/
+#                     CIPSERVER/CIPSTART) is Python (src/wifi_at.py),
+#                     not part of this flag -- see native/wifi_uart_fwd.h.
 #   --clean           Delete build directories before building
 #
 # PREREQUISITES (macOS):
@@ -50,6 +57,7 @@ MP_PIN_SHA="0697c6d5b035e9369d3f2142b1d7a4cbe2301b11"
 WITH_MODROBOT=0
 WITH_DIFFDRIVE=0
 WITH_YIELD=0
+WITH_WIFI=0
 CLEAN=0
 
 for arg in "$@"; do
@@ -57,6 +65,7 @@ for arg in "$@"; do
     --with-modrobot)  WITH_MODROBOT=1 ;;
     --with-diffdrive) WITH_DIFFDRIVE=1; WITH_YIELD=1 ;;
     --with-yield)     WITH_YIELD=1 ;;
+    --with-wifi)      WITH_WIFI=1 ;;
     --clean)          CLEAN=1 ;;
   esac
 done
@@ -918,6 +927,267 @@ if "moddiffdrive_boot_zero_write" not in src:
         print("  WARNING: main.c's gc_init()/mp_init() sequence did not match expected form -- boot zero-write NOT wired, patch this by hand")
 else:
     print("  main.c already patched for boot zero-write")
+PYEOF
+fi
+
+if [ "$WITH_WIFI" -eq 1 ]; then
+  echo "=== Step 6c: Wire in wifiuart native module (UARTE1 byte-pipe + stdio hook) ==="
+  # Same in-place-reference pattern --with-diffdrive established: native/
+  # sources are referenced via $(abspath ../../../native/...) from
+  # codal_port/, never copied -- editing native/ takes effect on the next
+  # build without a re-copy. Independent of WITH_DIFFDRIVE: every check
+  # below is guarded so this works whether diffdrive's own Makefile/
+  # mpconfigport.h edits ran first or not.
+  python3 - << 'PYEOF'
+path = "micropython-microbit-v2/src/codal_port/Makefile"
+with open(path) as f:
+    src = f.read()
+
+changed = False
+
+# 1. Include path for native/wifi_uart_fwd.h -- same guarded check
+#    --with-diffdrive's own step uses, safe to run whether or not that
+#    step already added this line.
+if "-I$(abspath ../../../native)" not in src:
+    src = src.replace(
+        "INC += -I$(TOP)\n",
+        "INC += -I$(TOP)\nINC += -I$(abspath ../../../native)\n"
+    )
+    changed = True
+
+# 2. CXXFLAGS + the SRC_CXX -> OBJ pattern -- shared scaffolding with
+#    --with-diffdrive's own block; guarded so passing both flags
+#    together never double-defines it.
+if "CXXFLAGS =" not in src:
+    src = src.replace(
+        "OBJ = $(PY_O)\n",
+        "CXXFLAGS = $(INC) -std=gnu++20 $(CFLAGS_ARCH) $(COPT) $(CFLAGS_EXTRA) -fno-rtti -fno-exceptions -Wno-register -Wno-deprecated\nOBJ = $(PY_O)\n"
+    )
+    changed = True
+if "$(SRC_CXX:.cpp=.o)" not in src:
+    src = src.replace(
+        "OBJ += $(addprefix $(BUILD)/, $(LIB_SRC_C:.c=.o))\n",
+        "OBJ += $(addprefix $(BUILD)/, $(LIB_SRC_C:.c=.o))\nOBJ += $(addprefix $(BUILD)/, $(SRC_CXX:.cpp=.o))\n"
+    )
+    changed = True
+
+# 3. Sources: modwifiuart_glue.c (C) + modwifiuart.cpp (C++), each in
+#    their OWN SRC_C/SRC_CXX += block anchored directly on the
+#    `include $(TOP)/py/mkrules.mk` line -- MUST land textually before
+#    it (ticket 004's own comment on this file explains why: GNU Make
+#    expands a rule's prerequisite list when the rule is PARSED, and
+#    mkrules.mk's own $(LIBMICROPYTHON): $(OBJ) rule is parsed at the
+#    `include` line). Deliberately NOT anchored on --with-diffdrive's
+#    own debug.c/SRC_CXX text (which that step's edit consumes,
+#    unreliable to find a second time) -- a SEPARATE `SRC_C +=`/
+#    `SRC_CXX +=` block accumulates into the same variables regardless
+#    of how many blocks there are, as long as each lands before the
+#    include.
+if "modwifiuart_glue.c" not in src:
+    wifi_sources = (
+        "SRC_C += \\\n"
+        "\t$(abspath ../../../native/modwifiuart_glue.c) \\\n"
+        "\n"
+        "SRC_CXX += \\\n"
+        "\t$(abspath ../../../native/modwifiuart.cpp) \\\n"
+        "\n"
+    )
+    if "include $(TOP)/py/mkrules.mk" in src:
+        src = src.replace(
+            "include $(TOP)/py/mkrules.mk",
+            wifi_sources + "include $(TOP)/py/mkrules.mk",
+        )
+        changed = True
+    else:
+        print("  WARNING: 'include $(TOP)/py/mkrules.mk' not found -- wifiuart sources NOT wired, patch this by hand")
+
+# 4. QSTR_DEFS: append qstrdefs_wifiuart.h, robust to --with-diffdrive
+#    having already appended qstrdefs_diffdrive.h ahead of us.
+if "qstrdefs_wifiuart.h" not in src:
+    import re
+    new_src, n = re.subn(
+        r"^(QSTR_DEFS\s*=.*)$",
+        r"\1 qstrdefs_wifiuart.h",
+        src,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if n == 1:
+        src = new_src
+        changed = True
+
+with open(path, 'w') as f:
+    f.write(src)
+if changed:
+    print("  Makefile patched for wifiuart C++ build")
+else:
+    print("  codal_port/Makefile already patched for wifiuart")
+PYEOF
+
+  # Write qstrdefs_wifiuart.h with the wifiuart module's qstr
+  # identifiers (matching qstrdefs_diffdrive.h's own established
+  # pattern -- redundant with automatic qstr extraction where it also
+  # applies, harmless where it overlaps: qstrs dedupe by string value).
+  cat > "$MP_DIR/src/codal_port/qstrdefs_wifiuart.h" << 'QEOF'
+// qstrdefs_wifiuart.h -- qstrs for the built-in wifiuart module
+Q(wifiuart)
+Q(init)
+Q(write)
+Q(any)
+Q(read)
+Q(repl_active)
+Q(stdin_push)
+Q(stdout_pull)
+Q(baudrate)
+QEOF
+  echo "  qstrdefs_wifiuart.h refreshed"
+
+  python3 - << 'PYEOF'
+# Patch mpconfigport.h: register wifiuart_module. Same guarded anchors
+# --with-diffdrive's own step uses (both survive that step's own edit
+# unchanged -- it prepends before them, never consumes them -- so this
+# is safe whether or not --with-diffdrive ran first).
+path = "micropython-microbit-v2/src/codal_port/mpconfigport.h"
+with open(path) as f:
+    src = f.read()
+if "wifiuart_module" not in src:
+    src = src.replace(
+        "extern const struct _mp_obj_module_t utime_module;",
+        "extern const struct _mp_obj_module_t wifiuart_module;\n"
+        "extern const struct _mp_obj_module_t utime_module;"
+    )
+    src = src.replace(
+        "#define MICROPY_PORT_BUILTIN_MODULES \\\n",
+        "#define MICROPY_PORT_BUILTIN_MODULES \\\n"
+        "    { MP_ROM_QSTR(MP_QSTR_wifiuart), MP_ROM_PTR(&wifiuart_module) }, \\\n"
+    )
+    with open(path, 'w') as f:
+        f.write(src)
+    print("  wifiuart_module registered in mpconfigport.h")
+else:
+    print("  wifiuart_module already registered")
+PYEOF
+
+  # Copy the codal_app-hosted implementation (needs full CODAL access --
+  # NRF52Serial, uBit.io.* -- which codal_port's plain Makefile build
+  # does not provide; see native/codal_fwd.h's own header). Mirrors
+  # --with-modrobot's own cp-into-codal_app/ precedent for wifi_stdio.cpp
+  # (that flag's cp MECHANISM is sound even though the rest of its own
+  # block is dead by directive -- see this file's own --with-modrobot
+  # option comment).
+  cp native/wifi_uart_fwd.h "$MP_DIR/src/codal_app/wifi_uart_fwd.h"
+  cp native/codal_app/wifi_uart_pipe.h "$MP_DIR/src/codal_app/wifi_uart_pipe.h"
+  cp native/codal_app/wifi_uart_pipe.cpp "$MP_DIR/src/codal_app/wifi_uart_pipe.cpp"
+  cp native/codal_app/wifi_stdio_hook.h "$MP_DIR/src/codal_app/wifi_stdio_hook.h"
+  cp native/codal_app/wifi_stdio_hook.cpp "$MP_DIR/src/codal_app/wifi_stdio_hook.cpp"
+  echo "  wifi_uart_pipe/wifi_stdio_hook copied into codal_app/"
+
+  python3 - << 'PYEOF'
+# Patch codal_app/mphalport.cpp's three stdio HAL functions to also
+# mirror through Native::WifiStdioHook -- reuses
+# reference/modrobot/wifi_stdio.cpp's own core pattern (coalescing
+# capture, non-blocking stdin check folded into the existing
+# stdin-wait loop) adapted to this ticket's split: this hook does NO AT
+# parsing itself (see native/wifi_uart_fwd.h's own header) -- it only
+# mirrors bytes wifi_at.py has ALREADY demuxed via wifiuart.stdin_push()/
+# stdout_pull(). mp_handle_pending(true), already called in the stock
+# stdin-wait loop below, is what lets wifi_at.py's OWN scheduled pump
+# keep running while the REPL sits blocked here (spec Sec 5's
+# "stdin-wait patch" requirement -- this stock call already satisfies
+# it; nothing new needed for that half).
+path = "micropython-microbit-v2/src/codal_app/mphalport.cpp"
+with open(path) as f:
+    src = f.read()
+
+if '#include "wifi_uart_fwd.h"' not in src:
+    src = src.replace(
+        '#include "microbithal.h"\n',
+        '#include "microbithal.h"\n#include "wifi_uart_fwd.h"\n'
+    )
+
+src = src.replace("""uintptr_t mp_hal_stdio_poll(uintptr_t poll_flags) {
+    uintptr_t ret = 0;
+    if (poll_flags & MP_STREAM_POLL_RD) {
+        if (uBit.serial.isReadable()) {
+            ret |= MP_STREAM_POLL_RD;
+        }
+    }
+    if (poll_flags & MP_STREAM_POLL_WR) {
+        if (uBit.serial.isWriteable()) {
+            ret |= MP_STREAM_POLL_WR;
+        }
+    }
+    return ret;
+}
+""", """uintptr_t mp_hal_stdio_poll(uintptr_t poll_flags) {
+    uintptr_t ret = 0;
+    if (poll_flags & MP_STREAM_POLL_RD) {
+        if (uBit.serial.isReadable() || wifiStdioStdinReadable()) {
+            ret |= MP_STREAM_POLL_RD;
+        }
+    }
+    if (poll_flags & MP_STREAM_POLL_WR) {
+        if (uBit.serial.isWriteable()) {
+            ret |= MP_STREAM_POLL_WR;
+        }
+    }
+    return ret;
+}
+""")
+
+src = src.replace("""void mp_hal_stdout_tx_strn(const char *str, size_t len) {
+    uBit.serial.send((uint8_t*)str, len, SYNC_SPINWAIT);
+}
+""", """void mp_hal_stdout_tx_strn(const char *str, size_t len) {
+    uBit.serial.send((uint8_t*)str, len, SYNC_SPINWAIT);
+    wifiStdioCaptureStdout(str, len);
+}
+""")
+
+src = src.replace("""int mp_hal_stdin_rx_chr(void) {
+    for (;;) {
+        while (!uBit.serial.isReadable()) {
+            mp_handle_pending(true);
+            microbit_hal_idle();
+        }
+        int c = uBit.serial.read(SYNC_SPINWAIT);
+        if (c == last_interrupt_char && num_interrupt_chars) {
+            --num_interrupt_chars;
+        } else {
+            return c;
+        }
+    }
+}
+""", """int mp_hal_stdin_rx_chr(void) {
+    for (;;) {
+        while (!uBit.serial.isReadable() && !wifiStdioStdinReadable()) {
+            mp_handle_pending(true);
+            microbit_hal_idle();
+        }
+        if (wifiStdioStdinReadable()) {
+            int c = wifiStdioStdinReadChr();
+            if (c < 0) {
+                continue;
+            }
+            if (c == last_interrupt_char && num_interrupt_chars) {
+                --num_interrupt_chars;
+                continue;
+            }
+            return c;
+        }
+        int c = uBit.serial.read(SYNC_SPINWAIT);
+        if (c == last_interrupt_char && num_interrupt_chars) {
+            --num_interrupt_chars;
+        } else {
+            return c;
+        }
+    }
+}
+""")
+
+with open(path, "w") as f:
+    f.write(src)
+print("  mphalport.cpp refreshed for wifiuart stdio mirror")
 PYEOF
 fi
 

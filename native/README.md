@@ -1,15 +1,27 @@
-# native/ — moddiffdrive
+# native/ — moddiffdrive, wifiuart
 
-The only C/C++ this repo ships beyond the vendored kernel (`vendor/`,
-never edited — see `CLAUDE.md`). Implements PLAN.md/spec M1: exposes the
-vendored `DiffDrive::DifferentialDrive` kernel to Python as a
-lease-bounded wheel API, on its own CODAL fiber, plus the safety
-machinery the kernel does not provide by itself (boot zero-write,
-VM-hook starvation watchdog, a binding-level lease ceiling).
+The C/C++ this repo ships beyond the vendored kernel (`vendor/`, never
+edited — see `CLAUDE.md`). Two native modules live here:
 
-Built by `./build.sh --clean --with-diffdrive` (implies `--with-yield`).
+- **moddiffdrive** (this section) — PLAN.md/spec M1: exposes the
+  vendored `DiffDrive::DifferentialDrive` kernel to Python as a
+  lease-bounded wheel API, on its own CODAL fiber, plus the safety
+  machinery the kernel does not provide by itself (boot zero-write,
+  VM-hook starvation watchdog, a binding-level lease ceiling). Built by
+  `./build.sh --clean --with-diffdrive` (implies `--with-yield`).
+- **wifiuart** (ticket 006, M4) — the UARTE1 byte-pipe shim + stdio
+  TCP-REPL mirror hook the WiFi transport needs (the stock port never
+  exposes the second UARTE, and `microbit.uart.init(tx,rx)` retargets
+  the one stdio UART). See `wifi_uart_fwd.h`'s own header for the full
+  design and the split with `src/wifi_at.py` (the AT dialogue itself is
+  Python, not C — this module is a byte pipe only). Built by
+  `./build.sh --clean --with-wifi`, independent of `--with-diffdrive`.
+  `codal_app/` here holds the CODAL-header-dependent half of that
+  module (copied by build.sh into the CMake-driven CODAL build, never
+  compiled by codal_port's plain Makefile — see `codal_fwd.h`'s own
+  header for why).
 
-## Layout
+## Layout (moddiffdrive)
 
 | File | Role |
 |---|---|

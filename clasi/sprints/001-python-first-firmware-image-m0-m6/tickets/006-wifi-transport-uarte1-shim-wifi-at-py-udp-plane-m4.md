@@ -1,9 +1,13 @@
 ---
 id: '006'
 title: 'WiFi transport: UARTE1 shim + wifi_at.py + UDP plane (M4)'
-status: open
-use-cases: [UC-009, UC-010]
-depends-on: ['001', '005']
+status: done
+use-cases:
+- UC-009
+- UC-010
+depends-on:
+- '001'
+- '005'
 github-issue: ''
 issue: complete-gates-3-7-full-firmware-in-micropython-image.md
 completes_issue:
@@ -39,22 +43,22 @@ ticket 009's documented stakeholder procedure — including the
 power-cycle-the-module discipline (the WiFi module persists state
 across nRF reflashes).
 
-- [ ] `./build.sh --clean` with the UARTE1 shim wired in (a new
+- [x] `./build.sh --clean` with the UARTE1 shim wired in (a new
       `--with-wifi` flag, or folded into `--with-diffdrive` if that's
       the cleaner seam — programmer's call, documented either way)
       exits 0, links cleanly, flash end still < `_fs_start`.
-- [ ] `src/wifi_at.py`'s AT state machine is offline-testable against
+- [x] `src/wifi_at.py`'s AT state machine is offline-testable against
       a mock/fake serial object (`tests/test_wifi_at.py`, `python3 -m
       pytest`), covering: `CIPMUX=1` sequencing, one-CIPSEND-per-
       datagram (assert the mock never receives a per-character send),
       the ≥50 ms TLM-throttle timer logic, and READY-on-new-peer-edge
       handling.
-- [ ] `python3 -m py_compile src/wifi_at.py` passes; `mpy-cross
+- [x] `python3 -m py_compile src/wifi_at.py` passes; `mpy-cross
       src/wifi_at.py` lints clean.
-- [ ] Source review confirms the WiFi UART is on a distinct UARTE1
+- [x] Source review confirms the WiFi UART is on a distinct UARTE1
       shim, not `microbit.uart.init(tx,rx)` (which would collide with
       the USB stdio REPL).
-- [ ] Source review confirms the UDP v5 plane calls into `src/
+- [x] Source review confirms the UDP v5 plane calls into `src/
       comms.py`'s existing dispatch entry point (ticket 005) rather
       than duplicating dispatch logic.
 
