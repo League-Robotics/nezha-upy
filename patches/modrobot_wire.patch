@@ -1,0 +1,20 @@
+Wires modrobot.c into the MicroPython build as a builtin module.
+Apply from micropython-microbit-v2/src/ with: git apply <patch>
+
+--- a/codal_port/Makefile
++++ b/codal_port/Makefile
+@@ -... @@
+ SRC_C += \
+ 	modmicrobit.c \
++	modrobot.c \
+ 	modmusic.c \
+
+--- a/codal_port/mpconfigport.h
++++ b/codal_port/mpconfigport.h
+@@ -... add before MICROPY_PORT_BUILTIN_MODULES @@
++extern const struct _mp_obj_module_t robot_module;
+ extern const struct _mp_obj_module_t utime_module;
+ 
+ #define MICROPY_PORT_BUILTIN_MODULES \
++    { MP_ROM_QSTR(MP_QSTR_robot), MP_ROM_PTR(&robot_module) }, \
+     { MP_ROM_QSTR(MP_QSTR_antigravity), MP_ROM_PTR(&antigravity_module) }, \

@@ -1,0 +1,15 @@
+{
+    "_comment": "Config keys to MERGE into micropython-microbit-v2/src/codal_app/codal.json",
+    "_apply": "See build.sh -- python3 patches/apply_overlay.py merges these into the repo's codal.json",
+    "config": {
+        "DEVICE_BLE": 0,
+        "MICROBIT_BLE_ENABLED": 0,
+        "MICROBIT_BLE_PAIRING_MODE": 0,
+        "MICROBIT_RADIO_MAX_PACKET_SIZE": 250,
+        "DEVICE_STACK_SIZE": 8192,
+        "_gc_heap_note": "GC heap reduced 64->40KB: frees ~24KB for CODAL; set MICROBIT_HEAP_SIZE in codal_port/main.c not here (no codal.json key exists for it). See build.sh.",
+        "_ble_note": "DEVICE_BLE=0 drops SoftDevice+DFU. PARTIAL_FLASHING and SECURITY_MODE must also be 0 to avoid linker errors.",
+        "MICROBIT_BLE_PARTIAL_FLASHING": 0,
+        "MICROBIT_BLE_SECURITY_MODE": 0
+    }
+}
