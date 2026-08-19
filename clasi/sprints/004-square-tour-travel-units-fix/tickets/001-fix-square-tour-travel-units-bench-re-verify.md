@@ -9,6 +9,79 @@ depends-on: []
 github-issue: ''
 issue: square-tour-legs-4-5x-short-units-bug.md
 completes_issue: true
+exception:
+  thrown_by: programmer
+  thrown_at: '2026-08-19T20:08:22.420147+00:00'
+  attempted: 'Completed the full software fix: audited demo_square.py''s TICKS_PER_MM
+    (1.4187) end to end, confirmed via vendor/nezha_motor.cpp + two independent vendor/nezha_motor.h
+    comments that diffdrive.output() positions are counts-native raw shaft-encoder
+    ticks (tenths of a degree/count), and found the bug was bad input data (zetuv.json''s/tovez.json''s
+    identical, unverified wheel_diameter_mm=80.77/ticks_per_rev=360 template defaults)
+    feeding an otherwise-correct formula, not a units-convention mismatch. Cross-checked
+    against tovez.json''s motors.travel_calib_left/right (0.7837 mm/deg, vendor-grounded)
+    and found it conflicts by ~1.9x with the empirical bench anchor (975 counts/rev
+    derived from sprint-002 run-1''s own recorded leg deltas over the stakeholder''s
+    observed 270 deg) -- also confirmed travel_calib feeds an unrelated kernel field
+    (fullDutyVelocity, VELOCITY-mode) that demo_square.py never reads. Per the issue''s
+    explicit "empirical wins on conflict" instruction, set TICKS_PER_MM = 975.0/145.0
+    ~= 6.7241 in demo_square.py, mirrored the same corrected values into data/zetuv.json''s
+    wheels block with a full provenance note, updated the two hardcoded-literal tests
+    in tests/test_demo_square.py, ran the full suite (204 passed, 518 subtests, unchanged
+    baseline), py_compile + mpy-cross both clean, vendor/ untouched. Deployed docstring-stripped
+    copies of the corrected demo_square.py and robot.json to zetuv (same convention
+    as sprint 002/003), then ran a REPL-triggered on_button_a() invocation: the read-back
+    target_ticks (3362.069 legs, 675.984 pivots) matched the hand-derived correction
+    exactly, confirming the software fix is logically correct -- but every one of
+    the 8 segments timed out with delta_left/delta_right exactly 0.0 (no wheel motion
+    at all). Ran three further diagnostics matching sprint 002 ticket 002''s own bench-verified-working
+    protocol exactly (combined driveDuty(20,20,500), left-alone, right-alone, all
+    well above the 6% breakaway floor reliable all day): appliedDutyLeft/Right read
+    correctly nonzero and connectedLeft/Right stayed True throughout, but positionLeft/positionRight
+    stayed frozen at exactly 0.0 in every trial. Performed a full hardware reset +
+    5s settle and repeated the diagnostic identically -- same zero-motion result,
+    ruling out stale in-session kernel state. Did not press further (no higher duty,
+    no longer duration) per this project''s own conservative-duty/minimal-necessary-probing
+    discipline and this ticket''s own explicit "if hardware faults, STOP + record
+    + throw exception" instruction. Committed all software work (commit d3f0cd8) and
+    documented full evidence in the bench log (Sec 24-31) and the ticket''s own Acceptance
+    Criteria before throwing this exception.'
+  conflict: 'Acceptance Criterion 5 ("Bench re-run ... shows leg encoder deltas scaled
+    to roughly 4-5x ... pivots proportionally sane, and a clean stop-verify") and
+    this ticket''s completes_issue:true resolution of the issue, plus the sprint''s
+    own Use Cases UC-003/UC-014 (button-A square tour must physically execute), are
+    blocked by a newly-discovered hardware-level fault: both wheels show zero encoder
+    motion under duty commands that reliably moved them in every sprint 002/003 session
+    earlier today, reproduced identically across a fresh hardware reset. This is outside
+    this ticket''s software-only scope (units/math correction in demo_square.py +
+    zetuv.json) -- there is no code change available to a programmer agent that can
+    restore physical wheel motion, and continuing to escalate duty/retry against a
+    possibly-jammed or power-starved drivetrain risks equipment damage, which this
+    project''s hardware rules explicitly instruct against. The stakeholder is at the
+    bench and can physically inspect (battery charge, loose wheel/gearbox, obstruction)
+    far faster than further remote REPL diagnostics could isolate it.'
+  surface: user-visible
+  resolved: true
+  resolved_at: '2026-08-19T20:20:00.000000+00:00'
+  resolution: 'Stakeholder resolved directly: "the robot has plenty of power,
+    but I completely reset it, so have at it." Power explicitly ruled out; a
+    full physical robot reset plausibly cleared the wedged Nezha motor board
+    (the exception''s own zero-motion signature -- duty applied, I2C connected,
+    encoders frozen -- is consistent with a board-level wedge a physical reset
+    would clear). Re-verified the connection (mbdeploy list, same port/UID),
+    confirmed the filesystem survived (robot.json/main.py/demo_square.py all
+    present, unchanged sizes), then did a cautious single-wheel re-probe
+    (modest duty, short lease) BEFORE trusting a full tour again -- motion
+    confirmed alive on both wheels. Running the full corrected tour then
+    surfaced a SECOND, separate, unrelated issue: SEGMENT_LEASE_MS/
+    SEGMENT_TIMEOUT_MS (3000 ms) were sized for the OLD, much-shorter leg
+    targets and were too short for the corrected ~4.74x-longer ones (legs
+    hit the timeout at ~70-74% of target). Fixed by refreshing driveDuty()''s
+    lease periodically (every 400 ms) instead of holding one lease for the
+    whole segment, decoupling the per-segment timeout (raised to 6000 ms)
+    from the native binding''s 5000 ms single-lease ceiling. Re-deployed and
+    re-ran: all 8 segments reached target (legs ~3373-3390 vs target 3362.069,
+    pivots ~691-710 vs target 675.984), clean stop-verify (delta 0,0 over
+    2 s). Full evidence: docs/bench-log-zetuv-2026-08-19.md Sec 32-36.'
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
 
@@ -142,29 +215,33 @@ whatever factor separates the two.
       (8 passed, 518 subtests). The `wheels` group is not modeled by
       the schema (`data/README.md`'s own documented "known gap"), so
       this edit doesn't touch the schema-checked groups at all.
-- [ ] Bench re-run (REPL-triggered handler invocation, not a physical
+- [x] Bench re-run (REPL-triggered handler invocation, not a physical
       button press) shows leg encoder deltas scaled to roughly 4-5×
       the old 650-811 counts (i.e., in the neighborhood of 3000-4000+
       counts for a 500 mm leg, consistent with ~870-1080 counts/rev ×
       ~3.3-3.6 revolutions), pivots proportionally sane, and a clean
       stop-verify (wheels stop cleanly at the end of the run).
 
-      **BLOCKED — hardware fault, not a software issue.** The
-      corrected `target_ticks` read back from the device exactly as
-      computed (3362.069 for legs, 675.984 for pivots — matching the
-      ~4.74x / ~3.45 rev expectation precisely), confirming the
-      software fix is logically correct. But three independent
-      REPL-triggered duty diagnostics (combined 20%/20%, left-alone,
-      right-alone — all well above the 6% breakaway threshold that
-      was reliable in every sprint 002/003 session today, same ports/
-      signs/`max_duty`/`cycle_period_ms`) all show `appliedDutyLeft/
-      Right` correctly nonzero and `connectedLeft/Right: True`, but
-      `positionLeft`/`positionRight` staying at exactly 0.0 throughout
-      every trial — reproduced identically after a fresh hardware
-      reset (ruling out stale session state). See `throw_ticket_
-      exception` below and the bench log's new section for full
-      evidence. Not something this ticket's software-only scope
-      (units/math correction) can fix.
+      **RESOLVED.** The prior hardware wedge (zero encoder motion,
+      see the ticket's own `exception` block above) was cleared by the
+      stakeholder's own physical robot reset; power was ruled out.
+      After re-verifying the connection and a cautious single-wheel
+      re-probe confirmed motion was alive again, the full corrected
+      tour surfaced one further, unrelated issue — the per-segment
+      lease/timeout budget (3000 ms) was still sized for the OLD,
+      much-shorter targets and was too short for the corrected
+      ~4.74x-longer legs. Fixed by refreshing `driveDuty()`'s lease
+      periodically instead of holding one long lease, and raising the
+      per-segment timeout to 6000 ms. Final bench re-run: **all 8
+      segments `reached True`.** Legs: mean deltas 3373.5/3385.5/
+      3373.5/3390.0 against target 3362.069 (within ~1%, a **4.63×**
+      increase over the old 650-811/~730-average run — inside the
+      3000-4000+ neighborhood and the 4-5x band). Pivots: mean deltas
+      691.0/709.5/691.5/694.5 against target 675.984 (within ~5%, a
+      **4.5×** increase, correctly signed). Stop-verify: position
+      `(10634.0, 18045.0)` before and after a 2 s hold — delta
+      `(0.0, 0.0)`, clean. Full evidence:
+      `docs/bench-log-zetuv-2026-08-19.md` Sec 32-36.
 - [x] The bench log is updated with this run's results, and explicitly
       corrects sprint-002's bench-log claim of "500 mm legs" with a
       pointer to this fix (append, don't silently rewrite history —
@@ -176,10 +253,10 @@ whatever factor separates the two.
 
       Device is armed/idle (final `reset` + 5 s settle, no further
       `exec` issued afterward, matching sprint 003's own handoff
-      convention) — but the physical A-press will currently show the
-      same zero-motion symptom the REPL diagnostics found, since that
-      is a hardware-level fault, not something this fix touches.
-      Flagging this honestly rather than handing back silently.
+      convention), connection re-confirmed via `mbdeploy list`. Motion
+      is confirmed alive and the full corrected tour bench-verified
+      (see the criterion above) — the stakeholder's physical A-press
+      should now run the complete, correctly-scaled square tour.
 - [x] `python3 -m pytest tests/` stays green at the 204 baseline.
 - [x] `python3 -m py_compile` passes on every changed file; `mpy-cross`
       lints `demo_square.py` clean.

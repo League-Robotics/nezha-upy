@@ -218,9 +218,41 @@ SEGMENT_DUTY_PERCENT = 6.0    # commanded duty for every segment -- the
                                # module docstring's "Honest limitation")
 CYCLE_PERIOD_MS = 24          # matches ticket 001's own bench convention
 
-SEGMENT_LEASE_MS = 3000       # per-segment driveDuty() lease; well under
-                               # the native binding's 5000 ms ceiling
-SEGMENT_TIMEOUT_MS = 3000     # safety bound: stop and move on regardless
+SEGMENT_LEASE_MS = 600        # per-driveDuty() safety lease -- REFRESHED
+                               # periodically by _run_segment() (see
+                               # LEASE_REFRESH_MS) rather than held for a
+                               # whole segment. CORRECTED sprint 004 ticket
+                               # 001: the old single-shot 3000 ms lease was
+                               # sized for the old, wrong (~4-5x too short)
+                               # leg targets; the corrected ~3362-tick leg
+                               # target needs ~4.2-4.9 s of continuous drive
+                               # at SEGMENT_DUTY_PERCENT (bench-measured,
+                               # docs/bench-log-zetuv-2026-08-19.md), which
+                               # would sit right at (or over) the native
+                               # binding's own hard 5000 ms single-lease
+                               # ceiling (refused outright above it, never
+                               # clamped) if held as one long lease. A
+                               # short, frequently-renewed lease reaches the
+                               # same total drive duration while keeping the
+                               # lease's own fail-safe intent tight (a
+                               # polling loop that itself hangs still loses
+                               # the wheels within one lease period, not
+                               # within whatever the segment's full budget
+                               # is).
+LEASE_REFRESH_MS = 400        # reissue driveDuty() this often while still
+                               # driving -- comfortably inside
+                               # SEGMENT_LEASE_MS so the lease never
+                               # actually expires mid-drive under normal
+                               # poll timing
+SEGMENT_TIMEOUT_MS = 6000     # CORRECTED sprint 004 ticket 001: overall
+                               # per-segment safety bound, decoupled from
+                               # the native binding's 5000 ms single-lease
+                               # ceiling now that driveDuty() is reissued
+                               # (see SEGMENT_LEASE_MS above). Sized with
+                               # real margin over the corrected leg
+                               # target's bench-measured ~4.2-4.9 s typical
+                               # completion time; pivots finish in ~1 s and
+                               # exit this bound long before it matters.
 POLL_INTERVAL_MS = 50
 SETTLE_MS = 1200              # TOUR_SQUARE's own rest-to-rest settle
 
@@ -280,7 +312,14 @@ def _run_segment(index, segment):
     """Drives one segment to completion (target reached or timeout),
     then commands neutral and settles. Returns a small result dict for
     the caller to log -- this is the module's own bench-observation
-    evidence trail, printed by run() below."""
+    evidence trail, printed by run() below.
+
+    CORRECTED sprint 004 ticket 001: driveDuty()'s lease is now
+    REFRESHED periodically (every LEASE_REFRESH_MS) rather than held
+    once for the whole segment -- see SEGMENT_LEASE_MS's own comment
+    for why. If a refresh call itself refuses (e.g. an estop landed
+    mid-segment), the loop stops driving immediately rather than
+    continuing to poll a segment nothing is actually advancing."""
     out0 = diffdrive.output()
     start_left = out0["positionLeft"]
     start_right = out0["positionRight"]
@@ -289,19 +328,26 @@ def _run_segment(index, segment):
                                   SEGMENT_LEASE_MS)
 
     elapsed_ms = 0
+    since_refresh_ms = 0
     reached = False
     mean_delta = 0.0
     delta_left = 0.0
     delta_right = 0.0
-    while elapsed_ms < SEGMENT_TIMEOUT_MS:
+    refresh_status = status
+    while elapsed_ms < SEGMENT_TIMEOUT_MS and refresh_status == "ok":
         time.sleep_ms(POLL_INTERVAL_MS)
         elapsed_ms += POLL_INTERVAL_MS
+        since_refresh_ms += POLL_INTERVAL_MS
         out = diffdrive.output()
         mean_delta, delta_left, delta_right = _mean_abs_delta(
             out, start_left, start_right)
         if mean_delta >= segment["target_ticks"]:
             reached = True
             break
+        if since_refresh_ms >= LEASE_REFRESH_MS:
+            refresh_status = diffdrive.driveDuty(
+                segment["duty_left"], segment["duty_right"], SEGMENT_LEASE_MS)
+            since_refresh_ms = 0
 
     diffdrive.neutral()
     time.sleep_ms(SETTLE_MS)

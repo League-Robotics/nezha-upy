@@ -1195,6 +1195,15 @@ pivots) — inside the ticket's own expected 4-5x band.
 ## 29. Bench re-run — HARDWARE-BLOCKED, wheels do not move (new finding,
 ## not root-caused, escalated)
 
+> **RESOLVED (2026-08-19, same ticket, after stakeholder action)**: the
+> stakeholder performed a full physical reset of the robot ("the robot
+> has plenty of power, but I completely reset it") — this cleared
+> whatever was wedged; power was explicitly ruled out. See "Sec 32
+> onward" below for the re-probe, the follow-on timing fix this
+> uncovered, and the successful full-tour bench verification. This
+> entry is left unedited below, per this file's own established
+> append-don't-rewrite convention (Sec 15's own correction note).
+
 The same `on_button_a()` call that confirmed correct target ticks
 above showed **every segment timing out** (`reached False`,
 `elapsed_ms 3000`, `delta_left`/`delta_right` exactly `0.0`) — no wheel
@@ -1305,3 +1314,176 @@ vendor/` clean — vendor/ untouched.
 4. Device left in a safe, connected, armed-but-likely-non-moving idle
    state; corrected files remain deployed for whoever picks up the
    hardware investigation.
+
+---
+
+# Sprint 004 ticket 001 session, continued: exception resolved,
+# timing follow-on fix, full corrected tour bench-verified
+
+Stakeholder resolved the Sec 29 exception directly: "the robot has
+plenty of power, but I completely reset it, so have at it." Power was
+explicitly ruled out; a full physical robot reset plausibly cleared
+the wedged Nezha motor board (the Sec 29 signature — duty applied,
+I2C connected, encoders frozen — is consistent with a board-level
+wedge a physical reset would clear, though this remains the
+stakeholder's own diagnosis, not independently root-caused by this
+agent). Ticket reopened, resumed same session, same physical device
+(`/dev/cu.usbmodem2121202`, UID
+`9906360200052820312bde85515a72e6000000006e052820`).
+
+## 32. Re-verify connection + filesystem, cautious motion re-probe
+
+`mbdeploy list`: port unchanged (`/dev/cu.usbmodem2121202`), same UID,
+`getez`/`zavaz` still relays, `vevov` still untouched. Filesystem
+probed directly (not assumed to have survived the physical reset,
+though a micro:bit power/board reset does not touch flash): `robot.json`
+(2417 bytes), `main.py` (2999 bytes), `demo_square.py` (7876 bytes,
+the pre-timing-fix stripped copy from Sec 27) all present, exact same
+sizes as deployed — nothing missing, no re-copy needed at this step.
+
+Cautious single-wheel re-probe FIRST, matching the original
+smallest-necessary-probing discipline (modest duty, short lease, one
+wheel at a time) before trusting a full tour again:
+`driveDuty(10.0, 0.0, 350)` LEFT alone, then `driveDuty(0.0, 10.0,
+350)` RIGHT alone. **Motion confirmed alive on both wheels**:
+`positionLeft` 0.0 -> 355.0 (post-lease) -> 388.0 (stop-verify, some
+coast, matching this drivetrain's own previously-documented coast-down
+behavior); `positionRight` then 388.0(unchanged) -> 416.0 -> 452.0 on
+the RIGHT-alone pulse. Both wheels respond normally again — the
+stakeholder's reset resolved Sec 29's symptom.
+
+## 33. Full tour re-run — a NEW, separate issue surfaces: legs time out
+## against the corrected (much longer) target
+
+With motion confirmed alive, reset + 5 s settle, then the same
+REPL-triggered `on_button_a()` verification as Sec 28
+(`exec(main.py source, {"__name__": "verify"})`, `robot_ready() ->
+True`, `on_button_a()` called directly):
+
+All 4 pivots: `reached True`, mean deltas 685.0/678.0/678.5/683.0
+against target 675.984, elapsed 900-1000 ms — correct and proportional,
+as expected. **All 4 legs: `reached False`**, hitting the
+`SEGMENT_TIMEOUT_MS` safety bound at exactly 3000 ms every time, mean
+deltas only 2378.5-2493.0 against the corrected target of 3362.069
+(~70-74% of target) — below the ticket's own "3000-4000+" expected
+neighborhood.
+
+**Root cause of this second issue** (found immediately, not a fresh
+mystery): `SEGMENT_LEASE_MS`/`SEGMENT_TIMEOUT_MS` (3000 ms each) were
+sized for the OLD, wrong (~4-5x too short) leg targets, which
+completed in ~900-1050 ms per every prior session's own bench numbers
+(Sec 15, Sec 21) — comfortable 3x margin under the old 3000 ms budget.
+Correcting `TICKS_PER_MM` this ticket made every leg ~4.74x longer
+without revisiting that budget: extrapolating this run's own
+mid-segment rate (slowest observed, 2378.5 ticks / 3000 ms = 0.793
+ticks/ms) to the full 3362.069-tick target gives ~4241 ms needed —
+past the 3000 ms timeout, and uncomfortably close to the native
+binding's own hard 5000 ms single-`driveDuty()`-call lease ceiling
+(refused outright above it, never clamped) if simply raised as one
+long lease.
+
+**Fix**: `src/demo_square.py`'s `_run_segment()` now REFRESHES the
+`driveDuty()` lease periodically (`LEASE_REFRESH_MS = 400`, comfortably
+inside a short `SEGMENT_LEASE_MS = 600` safety lease) rather than
+holding one lease for the whole segment — this reaches whatever total
+drive duration a segment actually needs without approaching the native
+5000 ms ceiling, AND keeps the lease's own fail-safe intent tighter
+than before (a hung polling loop now loses the wheels within ~600 ms,
+not within a multi-second single lease). `SEGMENT_TIMEOUT_MS` raised to
+6000 ms (decoupled from the native lease ceiling now that the lease is
+refreshed), with real margin over the ~4.2-4.9 s the corrected leg
+target needs. A refresh call that itself returns non-`"ok"` stops the
+segment immediately (e.g. an estop landing mid-segment), rather than
+continuing to poll a segment nothing is advancing. `python3 -m pytest
+tests/` re-run clean (204 passed, 518 subtests — no test referenced
+the old lease/timeout values), `py_compile`/`mpy-cross` both clean.
+
+Regenerated the stripped deploy copy (same docstring-strip convention):
+21063 bytes raw -> 10908 bytes stripped (grew from 7876 due to the new
+lease-refresh design's own inline documentation, which sits outside
+the docstring and survives the strip). Redeployed to zetuv; `os.stat`
+confirmed 10908 bytes on-device, exact match. `gc.mem_free()` before
+the tour: 33232 bytes — comfortable headroom (well above the
+7876-byte file that already worked fine).
+
+## 34. Full corrected tour — bench-verified, all 8 segments reached
+
+Reset + 5 s settle, then the same REPL-triggered `on_button_a()`
+verification once more:
+
+```
+demo_square: segment 0 leg   status ok target_ticks 3362.069 delta_left 3186.0 delta_right 3561.0 mean_delta 3373.5 reached True elapsed_ms 4000
+demo_square: segment 1 pivot status ok target_ticks 675.984  delta_left -520.0 delta_right 862.0  mean_delta 691.0  reached True elapsed_ms 1050
+demo_square: segment 2 leg   status ok target_ticks 3362.069 delta_left 3216.0 delta_right 3555.0 mean_delta 3385.5 reached True elapsed_ms 4000
+demo_square: segment 3 pivot status ok target_ticks 675.984  delta_left -633.0 delta_right 786.0  mean_delta 709.5  reached True elapsed_ms 1000
+demo_square: segment 4 leg   status ok target_ticks 3362.069 delta_left 3205.0 delta_right 3542.0 mean_delta 3373.5 reached True elapsed_ms 4000
+demo_square: segment 5 pivot status ok target_ticks 675.984  delta_left -575.0 delta_right 808.0  mean_delta 691.5  reached True elapsed_ms 950
+demo_square: segment 6 leg   status ok target_ticks 3362.069 delta_left 3258.0 delta_right 3522.0 mean_delta 3390.0 reached True elapsed_ms 4000
+demo_square: segment 7 pivot status ok target_ticks 675.984  delta_left -558.0 delta_right 830.9999 mean_delta 694.5 reached True elapsed_ms 950
+demo_square: tour complete
+```
+
+**All 8/8 segments `reached True`.** Legs: mean deltas 3373.5-3390.0
+against target 3362.069 (within ~1% of target, all completing at
+exactly 4000 ms — comfortably inside the new 6000 ms budget). Pivots:
+mean deltas 691.0-709.5 against target 675.984 (within ~5%),
+correctly signed throughout (`delta_left` negative, `delta_right`
+positive — LEFT/CCW, matching the kernel's own `twist` convention).
+
+**Scale-up vs. the old, wrong run (Sec 15/21)**: old leg mean deltas
+were 650-811 (~730 average); new leg means 3373.5-3390.0 (~3380
+average) — a **4.63x** increase. Old pivot means were ~142-173
+(~155 average, though those numbers were themselves the OLD, wrong
+pivot targets' own encoder deltas, not directly comparable
+apples-to-apples since the pivot angle math didn't change, only
+`TICKS_PER_MM` did); new pivot means ~691-709 (~699 average) — a
+**4.5x** increase. Both land inside the ticket's own expected 4-5x
+band, and legs land squarely inside the "3000-4000+ counts" numeric
+neighborhood the acceptance criteria specify.
+
+**Stop-verify**: position before `(10634.0, 18045.0)`, after 2 s
+`(10634.0, 18045.0)` — delta `(0.0, 0.0)`. Clean, no drift, matching
+this ticket's own "Δ=0 over 2 s" requirement exactly.
+
+## 35. Device left in a safe, armed state
+
+A final `mpremote ... reset` + 5 s settle was performed, with no
+further `exec`/`run` issued afterward (matching sprint 003's own
+handoff convention). `mbdeploy list` immediately after confirmed
+`zetuv` still connected and responsive at the same port/UID. The
+corrected, timing-fixed `demo_square.py` remains deployed; `main.py`'s
+idle loop will report armed/ready and show the breathing idle pulse.
+Ready for the stakeholder's physical A press.
+
+## 36. Offline gate (final)
+
+```
+$ python3 -m pytest tests/ -q
+204 passed, 518 subtests passed
+```
+204 baseline, unchanged pass count. `python3 -m py_compile
+src/demo_square.py` and `mpy-cross src/demo_square.py -o ...` both
+clean. `git diff --exit-code -- vendor/` clean — vendor/ untouched
+throughout this entire ticket.
+
+## Summary for future readers (final)
+
+1. **Root cause, software**: `TICKS_PER_MM`'s two input constants were
+   unverified template defaults — fixed using the stakeholder's own
+   empirical bench anchor, per the issue's "empirical wins on
+   conflict" instruction (Sec 24-26).
+2. **Second issue, surfaced only once motion was confirmed alive**:
+   the per-segment lease/timeout budget (3000 ms) was sized for the
+   OLD, much-shorter leg targets and needed raising for the corrected
+   ~4.74x-longer ones — fixed by refreshing `driveDuty()`'s lease
+   periodically rather than holding one long lease near the native
+   binding's 5000 ms ceiling (Sec 33).
+3. **Hardware wedge (Sec 29) resolved by the stakeholder's own physical
+   reset**, power explicitly ruled out — re-probed cautiously
+   (single wheel, modest duty) before trusting a full tour again
+   (Sec 32).
+4. **Full corrected tour bench-verified**: all 8 segments reached
+   target, legs and pivots both scaled ~4.5-4.7x over the old, wrong
+   run, clean stop-verify (Sec 34).
+5. Device left connected, reset, armed at the idle prompt, for the
+   stakeholder's own physical A press.
