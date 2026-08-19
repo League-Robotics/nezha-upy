@@ -144,12 +144,30 @@ during the prior MicroPython exploration).
 import diffdrive
 diffdrive.configure(left_port=2, right_port=1,
                      fwd_sign_left=-1, fwd_sign_right=1,
-                     max_duty=0.15, full_duty_velocity=7.837,
+                     max_duty=15.0, full_duty_velocity=7.837,
                      cycle_period_ms=24)
 diffdrive.begin()
 diffdrive.start()
-diffdrive.driveDuty(0.05, 0.05, 200)   # smallest visible pulse: low duty, short lease
+diffdrive.driveDuty(5.0, 5.0, 200)   # smallest visible pulse: low duty, short lease
 ```
+
+**Units correction (sprint 002 ticket 002,
+`docs/bench-log-zetuv-2026-08-19.md`)**: `max_duty` and
+`driveDuty()`'s `dutyLeft`/`dutyRight` are PERCENT (0-100), matching
+the vendored kernel's own field comments (`vendor/differential_drive.h`:
+`Config.maxDuty`/`Command.dutyLeft` `// [%]`) — this section previously
+showed `max_duty=0.15`/`driveDuty(0.05, 0.05, ...)`, which reads as
+"15%"/"5%" but is actually ~0.15%/~0.05%, a rail far below the write
+path's own 3% output-deadband floor. That collapses every commanded
+duty to the SAME ~3% floor regardless of what was asked for — a value
+that happened to sit right at zetuv's own left-wheel breakaway
+threshold, producing unreliable, sometimes-zero motion that looked
+like a hardware fault (see the bench log's "combined-drive anomaly"
+write-up). The values above are corrected to genuine 15%/5%; not
+independently re-verified on tovez's own hardware this ticket (no
+access to that bench), but the unit convention is a property of the
+native binding/vendored kernel shared by every robot, not
+robot-specific.
 
 The `left_port`/`right_port`/`fwd_sign_*` values above are tovez's own
 wiring fix from `data/tovez.json`'s `motors` group (`left_port: 2,
@@ -157,7 +175,7 @@ right_port: 1, fwd_sign_left: -1, fwd_sign_right: 1` — note this is
 tovez's own sign convention, not gopiv's, per that file's own
 `_port_note`). `full_duty_velocity=7.837` is `travel_calib`×10 from
 that same file (`travel_calib_left`/`travel_calib_right` = 0.7837).
-`max_duty=0.15` here is a conservative bench-testing value for the
+`max_duty=15.0` here is a conservative bench-testing value for the
 *first* pulse — raise it once motion direction/sign is confirmed sane.
 (For the real per-robot config-driven values, `diffdrive_configure_kwargs()`
 in `src/config.py` computes exactly this dict from
@@ -539,7 +557,7 @@ diffdrive.configure(left_port, right_port, fwd_sign_left=1, fwd_sign_right=1,
 diffdrive.begin() -> status:str
 diffdrive.start() -> status:str
 diffdrive.drive(velocity, twist, lease_ms) -> status:str      # [counts/s] [counts/s] [ms]
-diffdrive.driveDuty(dutyLeft, dutyRight, lease_ms) -> status:str  # [-1,1] [-1,1] [ms]
+diffdrive.driveDuty(dutyLeft, dutyRight, lease_ms) -> status:str  # [%] [%] [ms] (0-100; see A.4's own units-correction note)
 diffdrive.neutral() -> None
 diffdrive.estop() -> None
 diffdrive.output() -> dict     # cycle counters, per-wheel position/velocity, applied duty,

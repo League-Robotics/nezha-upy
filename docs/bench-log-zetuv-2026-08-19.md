@@ -352,3 +352,313 @@ $ python3 -m pytest tests/ -q
    ticket 002 will need to drive `diffdrive` directly (§6).
 5. Safety spot-check (lease-expiry zeroing) passed cleanly every time
    (§9).
+
+---
+
+# Ticket 002 session: combined-drive anomaly root-cause + square tour demo
+
+Sprint 002, ticket 002
+(`clasi/sprints/002-zetuv-bench-square-tour-wheels-demo/tickets/
+002-on-device-square-tour-demo.md`). Continues directly from ticket
+001's session above, same date, same physical device
+(`/dev/cu.usbmodem2121202`, UID
+`9906360200052820312bde85515a72e6000000006e052820`). `mbdeploy list`/
+`mbdeploy probe` re-confirmed at the start of this session and again
+before every deploy step below: getez/zavaz both still RADIOBRIDGE
+relays, never targeted, `--force-relay` never passed.
+
+## 12. Pre-existing blocker: raw-REPL access lost (new finding, resolved)
+
+Before any of ticket 001's own findings could be re-checked, the very
+first `mpremote ... run` invocation this session failed with
+`TransportError: could not enter raw repl`, and the device's USB
+serial line was found to be continuously emitting `TLM:0:0:0\n` (bare
+`pyserial` read, bypassing `mpremote` entirely, confirmed this was
+real repeating text, not line noise). No literal `"TLM:0:0:0"` string
+exists anywhere in this repo's own source (`grep`-searched
+exhaustively across `src/`, `native/`, `vendor/`, `reference/`) — the
+exact origin was **not identified**. `mbdeploy probe`'s own
+`config/devices.json` registry shows it can read a live
+`DEVICE:NEZHA2:robot:zetuv:...`-style announcement from this same
+serial line, which is itself a fact not fully reconciled with ticket
+001's own claim that `comms.py`'s broadcast methods never reach raw
+USB stdout — flagged here as an open question for whoever next
+touches the comms/transport wiring, not resolved this ticket.
+
+**Recovery attempts, in order**: Ctrl-C over raw serial (no effect —
+the spew continued unbroken); Ctrl-C + Ctrl-A raw-repl entry sequence
+sent directly over `pyserial` (no raw-repl prompt ever appeared);
+`mpremote ... reset` (failed the same `ensure_raw_repl()` way — its
+own reset command apparently also depends on raw-repl entry, so it
+likely never reached the board); a genuine hardware reset via the
+on-board debug probe, bypassing serial entirely
+(`pyocd reset -u 9906360200052820312bde85515a72e6000000006e052820`,
+exit 0) — the SAME `TLM:0:0:0` spew reappeared immediately after a
+~5 s settle, which rules out leftover interactive REPL state (a real
+probe-level reset clears that) and points instead at something that
+happens fresh on every boot. **What worked**: a full re-deploy of the
+already-built, unchanged hex (`mbdeploy deploy
+9906360200052820312bde85515a72e6000000006e052820 --hex
+micropython-microbit-v2/src/MICROBIT.hex` — no rebuild, native/vendor
+untouched) — this hit the SAME locked-device `flash erase sector
+failure (result code 0x67)` ticket 001's own initial deploy hit, and
+`mbdeploy`'s automatic CTRL-AP mass-erase recovery cleared it exactly
+as documented (§3 above). After the mass erase + reflash, the serial
+line was silent (confirmed via bare `pyserial` read) and
+`mpremote ... exec "import diffdrive"` worked cleanly again.
+
+**Consequence**: the mass erase wipes the on-device filesystem, so
+`/robot.json` was re-copied (same stripped/compact approach as §5
+above — 2413 bytes, byte-identical procedure) before any further work.
+**Not root-caused, workaround applied and disclosed honestly**: this
+is exactly the kind of thing this ticket's own instructions warn
+against papering over silently — recorded here as an open finding, not
+claimed as understood. It does not appear to be the SAME phenomenon as
+§13 below (that one reproduces on demand from a clean boot every time;
+this one has not recurred since the reflash, through two full demo
+runs and multiple diagnostic sessions).
+
+## 13. Combined-drive anomaly — root-caused and resolved
+
+**Approach** (systematic-debugging discipline, per this ticket's own
+instruction): reproduce first, discriminate hypotheses with the
+cheapest probe before any fix attempt, cap at ~4 distinct attempts.
+
+**Attempt 1 — reproduce, then test staggered engagement.** A bench
+script (`configure(max_duty=0.15, ...)`, matching ticket 001's own
+convention exactly) reproduced ticket 001's finding once more:
+`driveDuty(0.20, 0.20, 400)` left `positionLeft` at 0.0 throughout,
+`positionRight` climbing normally. The leading hypothesis going in was
+(a) an I2C write-collision between the two channels' near-simultaneous
+duty writes in one kernel cycle (both channels share the SAME 7-bit
+I2C address 0x10 — only the `port` byte in the write frame
+discriminates the channel — read closely in `vendor/nezha_motor.cpp`/
+`native/i2c_broker.cpp` before forming this hypothesis, not assumed).
+Test: stagger the engagement — `driveDuty(0.20, 0.0, 500)` (left
+alone, let it establish) then `driveDuty(0.20, 0.20, 600)` (bring
+right in after, which triggers only a right-channel write since
+left's own commanded duty did not change — the write-on-change dedup
+in `NezhaMotor::writeRawDuty()`). **Result: LEFT DID NOT MOVE EVEN
+WHEN DRIVEN ALONE, FIRST, WITH NO RIGHT-WHEEL TRAFFIC AT ALL** — this
+directly refutes hypothesis (a): there was no second channel present
+to collide with. Reversing the stagger order (right first, then bring
+left in) gave the identical result. Two attempts, hypothesis (a)
+refuted with the cheapest available discriminating evidence (single-
+channel reproduction).
+
+**Attempt 2 — units hypothesis.** Reading the vendored kernel's own
+`Config`/`Command`/`Output` struct field comments closely
+(`vendor/differential_drive.h`) shows `maxDuty`, `dutyLeft`,
+`dutyRight`, `appliedDutyLeft`/`Right` are ALL annotated `// [%]`
+(percent, 0-100) — consistently, throughout the whole struct — not the
+`[-1,1]` fraction `native/moddiffdrive.cpp`'s own file-header comment
+and `native/README.md` both (independently) claimed. Tracing the
+actual math in `DifferentialDrive::controlStep()`'s raw-duty branch
+confirms it: `demandL = cmd.dutyLeft * 0.01f` (a percent-to-fraction
+conversion) clamped against `rail = active_.maxDuty * 0.01f`. With
+`max_duty=0.15` (intended as "15%"), the REAL rail is `0.15 * 0.01 =
+0.0015` (0.15%) — and ANY nonzero duty clamped into that rail gets
+BOOSTED back up to `NezhaMotor`'s own 3% output-deadband floor
+(`writeShapedDuty()`: a sub-deadband nonzero duty is boosted to the
+deadband, sign-preserving, never zeroed) — so every commanded duty,
+regardless of the number requested, collapsed to the SAME ~3% floor.
+Bench evidence this ticket's own §7c/§7d matched: 3%-floor duty was
+right at LEFT (port 2)'s own breakaway threshold — occasionally just
+enough (ticket 001's lone single-wheel test moved 5 ticks), usually
+not (every combined trial in ticket 001 AND every reproduction this
+ticket, alone or combined, moved 0 ticks). RIGHT (port 1)'s much lower
+breakaway threshold meant the SAME 3% floor moved it reliably every
+single time in both tickets — which is exactly why this read as a
+"combined-drive-specific, left-only" fault: it was a marginal-duty
+reliability issue that happened to always show up as "left doesn't
+move," not a combined-vs-single-channel effect at all.
+
+**Verification** (the actual fix, bench-run):
+`diffdrive.configure(..., max_duty=25.0, ...)` (a genuine 25% rail)
+followed by `driveDuty(20.0, 0.0, 400)` (left alone),
+`driveDuty(0.0, 20.0, 400)` (right alone), and
+`driveDuty(20.0, 20.0, 400)` (combined, simultaneous) — **all three
+moved both wheels reliably**, with clean stop-verify (Δposition = 0
+over 1 s after each `neutral()`) between every trial:
+
+```
+left-alone-mid   posL 222.0 posR 0.0    appL 20.0 appR 0.0
+left-alone-postlease posL 717.0 posR 0.0
+right-alone-mid  posL 795.0 posR 334.0  appL 0.0  appR 20.0
+right-alone-postlease posL 795.0 posR 917.0
+combined-mid     posL 1070.0 posR 1303.0 appL 20.0 appR 20.0
+combined-postlease posL 1600.0 posR 1906.0
+combined result left_moved True right_moved True
+```
+
+**Root cause, stated plainly**: a call-site UNITS bug (percent vs.
+fraction), not an I2C timing/collision issue, not a vendor-side
+kernel fault, not a power/brownout effect, not a watchdog/lease
+interaction. `driveDuty`/`configure`'s own documented `[-1,1]` units
+in `native/moddiffdrive.cpp`'s file header and `native/README.md`
+were themselves wrong relative to what the vendored kernel actually
+implements — fixed in both files this ticket (doc-only, no rebuild
+needed — see the diff), and in `docs/bench-acceptance-procedures.md`'s
+own A.4 worked example (`max_duty=0.15`/`driveDuty(0.05, 0.05, ...)`
+corrected to `15.0`/`driveDuty(5.0, 5.0, ...)`, not independently
+re-verified on tovez's own hardware this session but the same
+convention bug applies to any caller of this same binding).
+`data/zetuv.json`'s own `_combined_drive_anomaly_note` is updated to
+match. **No workaround was needed** — this is a genuine root-cause
+fix, not a papered-over symptom: the demo below uses the corrected
+percent convention throughout, with no staggering, alternating, or
+other engagement trick.
+
+## 14. Duty sweep — choosing the demo's operating point
+
+A follow-up sweep (`max_duty=25.0` rail, `driveDuty(d, d, 500)` for
+`d` in `[6.0, 8.0, 10.0]`, reading `velocityLeft`/`velocityRight`
+directly) found this plant is close to on/off around breakaway: even
+6% duty already produces ~480-680 mm/s of measured wheel speed
+(`velocityLeft` 679.7, `velocityRight` 963.7 counts/s at
+`ticks_per_mm=1.4187` from `data/zetuv.json`'s own — inherited,
+unverified — wheels block). sprint.md's own `omega_max=2.4 rad/s`
+ceiling (carried from radio-robot-elite's closed-loop `TOUR_SQUARE`
+planner) implies a wheel tangential speed of only ~150 mm/s at this
+robot's 128 mm trackwidth — 3-4x below what even the gentlest reliable
+duty produces. `driveDuty()` is open-loop raw PWM with no velocity
+feedback, so there is no dial that reaches that target without either
+a real calibrated velocity loop (out of this sprint's own no-cal
+scope) or the drive block's disabled `crawl_pulse` dithering (its own
+calibration exercise). **Disclosed, not silently missed**:
+`SEGMENT_DUTY_PERCENT = 6.0` (the gentlest bench-verified-reliable
+value) is what `src/demo_square.py` uses; `omega_max` is not met, and
+this is documented in the module's own docstring and here rather than
+claimed as satisfied.
+
+## 15. Square tour demo — implementation and bench run
+
+**Implementation choice** (full reasoning in `src/demo_square.py`'s
+own module docstring): direct, timed, encoder-terminated
+`diffdrive.driveDuty()` calls for EVERY segment (legs and pivots
+alike) — not `motion.MoveQueue`. `MoveQueue.tick()` drives every move
+through `diffdrive.drive()` (VELOCITY mode), which the vendored kernel
+refuses outright whenever `fullDutyVelocity <= 0`
+(`Status::kRefusedUnconfigured`'s own doc comment: "VELOCITY with
+fullDutyVelocity == 0") — and zetuv's own config deliberately carries
+no `travel_calib_left`/`right` this sprint, so there is no real number
+to derive `full_duty_velocity` from without fabricating a calibration
+sprint.md's own Design Rationale explicitly rejects. `driveDuty()`
+needs no `fullDutyVelocity` at all (the vendored kernel's own comment:
+"usable for plant-ID runs on an uncalibrated robot") — the module uses
+it uniformly, terminating each segment by polling
+`diffdrive.output()`'s position fields against a target tick count
+(mean of `|Δleft|`/`|Δright|`, mirroring
+`MoveQueue._distance_travelled()`'s own convention) rather than a
+blind timer, with a hard safety timeout (3000 ms) per segment.
+
+**Run command** (one line, matches the module's own docstring):
+
+```
+mpremote connect /dev/cu.usbmodem2121202 run src/demo_square.py
+```
+
+**Run 1**:
+
+```
+demo_square: segment 0 leg   target 709.35 dLeft 709.0 dRight 742.0 mean 725.5 reached True elapsed 900
+demo_square: segment 1 pivot target 142.62 dLeft -111.0 dRight 236.0 mean 173.5 reached True elapsed 350
+demo_square: segment 2 leg   target 709.35 dLeft 683.0 dRight 755.0 mean 719.0 reached True elapsed 950
+demo_square: segment 3 pivot target 142.62 dLeft -75.0  dRight 217.0 mean 146.0 reached True elapsed 300
+demo_square: segment 4 leg   target 709.35 dLeft 650.0 dRight 811.0 mean 730.5 reached True elapsed 900
+demo_square: segment 5 pivot target 142.62 dLeft -66.0  dRight 222.0 mean 144.0 reached True elapsed 300
+demo_square: segment 6 leg   target 709.35 dLeft 706.0 dRight 795.0 mean 750.5 reached True elapsed 950
+demo_square: segment 7 pivot target 142.62 dLeft -97.0  dRight 200.0 mean 148.5 reached True elapsed 300
+demo_square: tour complete
+```
+
+**Run 2** (repeated to confirm this was not a fluke, same command,
+fresh boot): all 8 segments again `reached True`, comparable
+magnitudes/timing (leg deltas 663-784 per wheel, pivot deltas
+-78..-117 left / 200-222 right). Both runs exited 0.
+
+**Observation, plainly stated**: the wheels visibly execute a
+square-ish tour — 4 legs, 4 left (CCW) pivots, rest-to-rest with a
+1.2 s settle between every segment, every segment's encoder evidence
+showing real, correctly-signed motion (pivots: negative `Δleft`,
+positive `Δright`, matching the kernel's own CCW-positive `twist`
+convention). Not survey-grade: RIGHT consistently outpaces LEFT on
+every leg (e.g. run 1's legs: 650-709 left vs. 742-811 right) and
+over-rotates on every pivot (e.g. run 1: 66-111 left vs. 200-236
+right) — the same per-wheel breakaway/response asymmetry this whole
+investigation surfaced (port 1/right is a notably freer-spinning wheel
+than port 2/left on this unit). This means the real path drifts
+somewhat rather than tracing a geometrically perfect square — expected
+and acceptable per this ticket's own acceptance criteria ("uncalibrated
+... square-ish", not precision-verified). No camera/vision access was
+available to this agent this session either, so "wheels visibly move"
+is evidenced here by encoder deltas exactly as ticket 001's own wiring
+verification was — the only observational channel available.
+
+**Post-run device state**: `diffdrive.neutral()` is the module's own
+last hardware call before `run()` returns (see `src/demo_square.py`).
+A separate `mpremote ... exec` after a `run()` session is a NEW raw-
+repl session (this port's own soft-reset-on-raw-repl-entry behaviour,
+matching ticket 001's own §7 process note) — so a stop-verify via a
+second `exec` call is not meaningful here; instead, REPL health was
+confirmed post-run (`import diffdrive` succeeds, `lastError()` reports
+`refused_unconfigured` — the expected fail-closed state of a fresh,
+unconfigured boot, exactly matching every prior session's own final
+state).
+
+## 16. Offline gate
+
+```
+$ python3 -m pytest tests/ -q
+204 passed, 518 subtests passed
+```
+195 (ticket 001 baseline) + 9 new `tests/test_demo_square.py` cases
+covering `build_square_tour()`'s pure segment-generation logic (shape,
+signs, tick-target arithmetic, parametrization) — the hardware-facing
+half (`run()`/`_run_segment()`) is not unit-testable without asserting
+something about timing this module never promises, per that test
+file's own docstring; verified on the bench instead (§15 above).
+`python3 -m py_compile src/demo_square.py` and
+`mpy-cross src/demo_square.py -o ...` both clean.
+`git diff --exit-code -- vendor/` clean — vendor/ untouched.
+`native/` also untouched (only `native/README.md`, a doc file, and
+`data/zetuv.json`'s note were edited alongside `src/demo_square.py`
+and `tests/test_demo_square.py`).
+
+`manifest.py` deliberately does NOT list `demo_square.py` — it is a
+bench demo script that drives motors as a side effect of being
+imported, not a framework module; freezing it would make a bare
+`import demo_square` from any REPL an accidental motor-drive trigger.
+`tests/test_manifest_freeze.py` was extended with a narrow, named
+`_BENCH_ONLY_MODULES` exclusion (documented in that file's own
+docstring) rather than weakened generally — the invariant still holds
+for every framework module.
+
+## Summary for future readers
+
+1. **Combined-drive anomaly: root-caused, resolved, no workaround
+   needed.** It was a `max_duty`/`driveDuty` PERCENT-vs-fraction units
+   bug in how `diffdrive.configure()` was being called (ticket 001's
+   own `max_duty=0.15` convention, inherited from
+   `docs/bench-acceptance-procedures.md`'s own A.4 example) — not an
+   I2C timing issue, not a vendor/native code fault, not power/
+   brownout, not watchdog/lease interaction. Both wheels drive
+   reliably, alone and simultaneously, once `max_duty`/`dutyLeft`/
+   `dutyRight` are passed as real percent values (0-100).
+2. `native/moddiffdrive.cpp`'s file header, `native/README.md`, and
+   `docs/bench-acceptance-procedures.md`'s A.4 example were all
+   corrected to state/use the real `[%]` convention.
+3. `src/demo_square.py` drives the full 8-segment square tour via
+   direct, encoder-terminated `diffdrive.driveDuty()` calls (not
+   `motion.MoveQueue`, which needs calibration zetuv deliberately does
+   not have) — run twice on zetuv, both runs completed all 8 segments
+   with real, correctly-signed encoder motion.
+4. `omega_max=2.4 rad/s` is NOT met and is disclosed as such — this
+   plant's breakaway-to-reliable-speed jump is too steep for raw duty
+   control to hit that ceiling without a real velocity loop.
+5. A separate, unrelated, NOT-root-caused finding this session: a
+   `TLM:0:0:0` USB-serial spew appeared before any of this ticket's
+   own probing began, blocking raw-REPL access; a hardware reset via
+   the debug probe did not clear it, but a full reflash of the
+   already-built hex did (§12). Flagged for whoever next investigates
+   the comms/transport wiring — not understood, only worked around.
