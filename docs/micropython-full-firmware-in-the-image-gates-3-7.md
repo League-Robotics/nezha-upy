@@ -1,6 +1,24 @@
 ---
 status: pending
+superseded: true
+superseded-by: docs/design/specification.md
 ---
+
+> **SUPERSEDED AS ARCHITECTURE (2026-08-19 stakeholder decision).**
+> This full-C++-firmware plan (Gates 3–7, approved 2026-08-15 on the
+> `micropython-vevov-handoff` branch) is no longer the governing
+> architecture for this project. `PLAN.md` and
+> `docs/design/specification.md` are authoritative — MicroPython is the
+> base firmware, not C++; see `docs/design/overview.md` for the
+> one-line summary. This document is kept as the historical record of
+> the plan it describes; its content below is unedited.
+>
+> A subset of this plan's constraints still applies and is carried
+> forward verbatim into the current architecture — see
+> `docs/design/specification.md` §8, "Constraints carried over from
+> the superseded Gates 3–7 plan" (v5-over-USB exclusion, config
+> persistence, watchdog retry/latch behavior, the gopiv wiring fix,
+> WiFi AT discipline).
 
 # MicroPython image: full firmware integration (Gates 3–7)
 
