@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # build.sh -- Set up and build micropython-microbit-v2 with our robot overlay.
 #
-# Run from this directory (micropython/).
+# Run from the repo root (this file's directory).
 # Produces: micropython-microbit-v2/src/MICROBIT.hex
 #
 # OPTIONS:
@@ -12,15 +12,23 @@
 # PREREQUISITES (macOS):
 #   brew install --cask gcc-arm-embedded   (arm-none-eabi-gcc in PATH)
 #   brew install cmake python3
-#   pip3 install intelhex                  (for addlayouttable.py)
+#   pip3 install --user --break-system-packages intelhex   (for
+#     addlayouttable.py -- Homebrew Python is PEP 668 externally-managed;
+#     plain `pip3 install intelhex` refuses. See README.md.)
 #
-# FIRST RUN: ~20-40 min (downloads CODAL libraries, builds from scratch)
+# micropython-microbit-v2/ is fetched by Step 0 below on first run (gitignored
+# here, never committed -- see .gitignore). No manual pre-clone needed.
+#
+# FIRST RUN: ~20-40 min (clones micropython-microbit-v2 + CODAL libraries,
+#            builds from scratch)
 # SUBSEQUENT RUNS: ~3-5 min incremental
 
 set -e
 cd "$(dirname "$0")"
 
 MP_DIR="micropython-microbit-v2"
+MP_UPSTREAM_URL="https://github.com/microbit-foundation/micropython-microbit-v2.git"
+MP_PIN_SHA="0697c6d5b035e9369d3f2142b1d7a4cbe2301b11"
 WITH_MODROBOT=0
 WITH_YIELD=0
 CLEAN=0
@@ -32,6 +40,29 @@ for arg in "$@"; do
     --clean)         CLEAN=1 ;;
   esac
 done
+
+echo "=== Step 0: Ensure micropython-microbit-v2 checkout exists at the pinned commit ==="
+# MP_DIR is gitignored here (vendored upstream checkout, fetched on demand --
+# see .gitignore) and was never present in a fresh clone of this repo
+# (confirmed absent, ticket 001/M0): Step 1's `git -C "$MP_DIR" submodule
+# update` has nothing to act on unless MP_DIR is already a git checkout.
+# Idempotent: skips the clone entirely if MP_DIR/.git already exists (does
+# not re-pin an existing checkout at a different commit -- if one is found,
+# it is reported, not overwritten, matching the ticket's "document the
+# substitution if 0697c6d becomes unreachable" allowance).
+if [ ! -d "$MP_DIR/.git" ]; then
+  echo "  $MP_DIR not present -- cloning $MP_UPSTREAM_URL @ $MP_PIN_SHA"
+  git clone -q "$MP_UPSTREAM_URL" "$MP_DIR"
+  git -C "$MP_DIR" checkout -q "$MP_PIN_SHA"
+  echo "  Cloned and checked out $MP_PIN_SHA."
+else
+  current="$(git -C "$MP_DIR" rev-parse HEAD)"
+  if [ "$current" = "$MP_PIN_SHA" ]; then
+    echo "  $MP_DIR already at $MP_PIN_SHA"
+  else
+    echo "  WARNING: $MP_DIR present at $current, expected $MP_PIN_SHA -- leaving as-is (a substituted pin; document why in the ticket/README if intentional)"
+  fi
+fi
 
 echo "=== Step 1: Initialise git submodules ==="
 git -C "$MP_DIR" submodule update --init --depth=1
@@ -46,15 +77,24 @@ fi
 echo "=== Step 1b: Upgrade vendored CODAL libraries to the standard build's SHAs ==="
 # Real Gate 2 execution (docs/handoff/micropython-full-firmware-integration.md
 # section 9's recommended path, superseding the reverted hand-relink):
-# the four libraries under $MP_DIR/lib/codal/libraries/ were vendored as
-# pinned ANCESTORS of src/libraries/* (pure fast-forward, no fork -- verified
-# via `git merge-base`). Fast-forward each to the exact standard-repo SHA so
-# this build shares codal with src/firm and gains its engineered no-SoftDevice
-# link (DEVICE_BLE=0 branch already set in codal_overlay.json; CMakeLists.txt
-# picks ld/nrf52833.ld over ld/nrf52833-softdevice.ld, and MicroBitConfig.h's
-# no-SD branch uses a FIXED MICROBIT_STORAGE_PAGE=0x7F000 instead of a
-# UICR-computed address -- the old pinned codal-microbit-v2 HardFaulted on
-# exactly that computed address during KeyValueStorage's static init).
+# fast-forward the four libraries under $MP_DIR/lib/codal/libraries/ to the
+# exact standard-build SHA so this build shares codal with radio-robot's
+# src/firm and gains its engineered no-SoftDevice link (DEVICE_BLE=0 branch
+# already set in codal_overlay.json; CMakeLists.txt picks ld/nrf52833.ld over
+# ld/nrf52833-softdevice.ld, and MicroBitConfig.h's no-SD branch uses a FIXED
+# MICROBIT_STORAGE_PAGE=0x7F000 instead of a UICR-computed address -- the old
+# pinned codal-microbit-v2 HardFaulted on exactly that computed address
+# during KeyValueStorage's static init).
+#
+# SOURCE: in the old radio-robot worktree this step fast-forwarded from a
+# local sibling checkout (src/libraries/<lib>, vendored ANCESTORS of these
+# same SHAs -- verified via `git merge-base`). That sibling directory does
+# not exist in this repo (nezha-upy has no src/libraries/ and no radio-robot
+# checkout alongside it -- confirmed absent, ticket 001/M0). Fetching by
+# exact SHA directly from each library's real public upstream (the same
+# URLs codal-microbit-v2's own target.json declares as dependencies) is
+# equivalent and has no local-sibling dependency; each SHA below was
+# confirmed fetchable from these URLs during ticket 001.
 #
 # MUST run before `make codal_cmake` (Step 14): codal's CMakeLists.txt
 # captures each library's source list via RECURSIVE_FIND_FILE (a
@@ -71,15 +111,15 @@ echo "=== Step 1b: Upgrade vendored CODAL libraries to the standard build's SHAs
 # is PRE-EXISTING behavior, not introduced here. Steps 2-13 below (including
 # Step 10, which edits codal-nrf52/asm/CortexContextSwitch.s directly) all
 # assume the libraries exist, so this step also handles the "directory is
-# missing entirely" case itself (a full local `git clone` from
-# src/libraries/<lib>, not a wait-for-cmake-to-do-it) rather than deferring
-# to cmake's INSTALL_DEPENDENCY -- deferring would clone from the OLD pinned
-# GitHub branch in codal.json's target field (unrelated to this upgrade) and
+# missing entirely" case itself (`git init` + fetch-by-SHA, not a
+# wait-for-cmake-to-do-it) rather than deferring to cmake's
+# INSTALL_DEPENDENCY -- deferring would clone from the OLD pinned GitHub
+# branch in codal.json's target field (unrelated to this upgrade) and
 # silently undo it. This makes the step self-sufficient across all three
 # cases build.sh can start from: already at the recorded SHA (no-op),
 # present at an older SHA (fetch + checkout -f), or entirely absent after
-# --clean or a true first-time checkout (clone + checkout -f) -- so a fresh
-# clone reproduces the exact same upgraded state in one build.sh run.
+# --clean or a true first-time checkout (init + fetch + checkout -f) -- so a
+# fresh clone reproduces the exact same upgraded state in one build.sh run.
 #
 # -f on the checkout: earlier steps in a from-scratch run may have already
 # left an old checkout locally modified (e.g. Step 10's own .thumb_func
@@ -90,6 +130,12 @@ echo "=== Step 1b: Upgrade vendored CODAL libraries to the standard build's SHAs
 # macOS ships bash 3.2 (no associative arrays -- `declare -A` is a bash 4+
 # feature); use parallel indexed arrays instead so this runs under either.
 CODAL_LIB_NAMES=(codal-core codal-nrf52 codal-microbit-nrf5sdk codal-microbit-v2)
+CODAL_LIB_URLS=(
+  https://github.com/lancaster-university/codal-core
+  https://github.com/lancaster-university/codal-nrf52
+  https://github.com/microbit-foundation/codal-microbit-nrf5sdk
+  https://github.com/lancaster-university/codal-microbit-v2
+)
 CODAL_LIB_SHAS=(
   3d485abe653cf0d4080cce66ac072c7f7096f200
   140d1be88bb0223d1d07b72ab11c7b3a809ed0d4
@@ -98,23 +144,34 @@ CODAL_LIB_SHAS=(
 )
 for idx in 0 1 2 3; do
   lib="${CODAL_LIB_NAMES[$idx]}"
+  url="${CODAL_LIB_URLS[$idx]}"
   sha="${CODAL_LIB_SHAS[$idx]}"
   libpath="$MP_DIR/lib/codal/libraries/$lib"
   if [ ! -d "$libpath/.git" ]; then
-    echo "  $lib: not present -- cloning from src/libraries/$lib"
+    echo "  $lib: not present -- initializing for fetch from $url"
     rm -rf "$libpath"
-    git clone -q "../src/libraries/$lib" "$libpath"
+    mkdir -p "$libpath"
+    git init -q "$libpath"
   fi
-  current="$(git -C "$libpath" rev-parse HEAD)"
+  # NOTE: `git rev-parse HEAD` on a freshly-`git init`'d repo (unborn
+  # branch, no commits) prints the literal string "HEAD" to stdout while
+  # still exiting non-zero -- `2>/dev/null || echo ""` alone does not catch
+  # that (the failing command's stdout already contains "HEAD" by the time
+  # the `||` fallback would run, and command substitution concatenates
+  # both). Reset explicitly via `|| current=""` on the assignment itself so
+  # a not-yet-cloned library reads as empty below, not as the literal
+  # string "HEAD" (cosmetic-only in practice -- "HEAD" also never equals a
+  # 40-char SHA -- but confusing in the build log; caught in ticket 001).
+  current="$(git -C "$libpath" rev-parse HEAD 2>/dev/null)" || current=""
   if [ "$current" = "$sha" ]; then
     echo "  $lib already at $sha"
   else
-    echo "  $lib: $current -> $sha"
-    git -C "$libpath" fetch -q "../src/libraries/$lib" HEAD
+    echo "  $lib: ${current:-<empty>} -> $sha"
+    git -C "$libpath" fetch -q "$url" "$sha"
     git -C "$libpath" checkout -qf FETCH_HEAD
     actual="$(git -C "$libpath" rev-parse HEAD)"
     if [ "$actual" != "$sha" ]; then
-      echo "ERROR: $lib checked out to $actual, expected $sha -- src/libraries/$lib has moved since this step's SHA was recorded; update CODAL_LIB_SHA in build.sh" >&2
+      echo "ERROR: $lib checked out to $actual, expected $sha -- $url has changed since this step's SHA was recorded; update CODAL_LIB_SHAS in build.sh" >&2
       exit 1
     fi
   fi

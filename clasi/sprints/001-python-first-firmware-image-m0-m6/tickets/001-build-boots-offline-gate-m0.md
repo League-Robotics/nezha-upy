@@ -1,8 +1,10 @@
 ---
 id: '001'
 title: Build boots offline gate (M0)
-status: open
-use-cases: [UC-001, UC-002]
+status: done
+use-cases:
+- UC-001
+- UC-002
 depends-on: []
 github-issue: ''
 issue: complete-gates-3-7-full-firmware-in-micropython-image.md
@@ -46,29 +48,29 @@ All criteria are offline. Flashing / USB REPL / `mbdeploy` verification
 (the hardware leg of UC-002) is explicitly **not** part of this
 ticket — it moves to ticket 009's documented stakeholder procedure.
 
-- [ ] `micropython-microbit-v2/` exists locally, checked out at commit
+- [x] `micropython-microbit-v2/` exists locally, checked out at commit
       `0697c6d` (or a newer commit if `0697c6d` is unreachable/removed
       upstream — document the substitution and why if so), and stays
       gitignored (untracked by this repo, per `.gitignore`).
-- [ ] `bash -n build.sh` passes.
-- [ ] `python3 -c "import intelhex"` succeeds (install via `pip3
+- [x] `bash -n build.sh` passes.
+- [x] `python3 -c "import intelhex"` succeeds (install via `pip3
       install intelhex` if missing; document the requirement in
       README.md if `build.sh` doesn't self-bootstrap it).
-- [ ] `./build.sh --clean` exits 0 and produces
+- [x] `./build.sh --clean` exits 0 and produces
       `micropython-microbit-v2/src/MICROBIT.hex`.
-- [ ] The build's flash-end address (from the generated `.map`) is <
+- [x] The build's flash-end address (from the generated `.map`) is <
       `_fs_start` (0x6D000) — verified by a small offline check
       (script or documented grep/awk against the map output).
-- [ ] `MICROPY_NLR_SETJMP` is `1` in the patched
+- [x] `MICROPY_NLR_SETJMP` is `1` in the patched
       `micropython-microbit-v2/src/codal_port/mpconfigport.h` (grep
       check) — the non-negotiable landmine-ledger item; a HardFault on
       any exception without it.
-- [ ] `codal_overlay.json`'s merged keys (`DEVICE_BLE=0`,
+- [x] `codal_overlay.json`'s merged keys (`DEVICE_BLE=0`,
       `MICROBIT_BLE_ENABLED=0`, `MICROBIT_BLE_PARTIAL_FLASHING=0`,
       `MICROBIT_BLE_SECURITY_MODE=0`, `MICROBIT_RADIO_MAX_PACKET_SIZE=250`,
       `DEVICE_STACK_SIZE=8192`) are present in the resulting
       `codal_app/codal.json` after `patches/apply_overlay.py` runs.
-- [ ] Re-running `./build.sh` (no `--clean`) exits 0 — sanity check
+- [x] Re-running `./build.sh` (no `--clean`) exits 0 — sanity check
       that the incremental path works, no hard timing assertion.
 
 ## Testing
