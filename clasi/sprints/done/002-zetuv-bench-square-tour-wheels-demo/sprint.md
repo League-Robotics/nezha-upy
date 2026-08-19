@@ -1,7 +1,7 @@
 ---
 id: '002'
 title: 'Zetuv bench: square tour wheels demo'
-status: executing
+status: closed
 branch: sprint/002-zetuv-bench-square-tour-wheels-demo
 worktree: false
 use-cases:
