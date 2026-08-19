@@ -28,7 +28,7 @@ import unittest
 
 DATA_DIR = pathlib.Path(__file__).resolve().parent.parent / "data"
 
-ROBOT_FILES = ["tovez.json", "tovez_nocal.json", "gopiv.json", "togov.json"]
+ROBOT_FILES = ["tovez.json", "tovez_nocal.json", "gopiv.json", "togov.json", "zetuv.json"]
 ALL_JSON_FILES = ROBOT_FILES + ["robot_config.schema.json", "active_robot.json"]
 
 
@@ -137,6 +137,34 @@ class TestTovezRadioChannel(unittest.TestCase):
     def test_tovez_radio_channel_3(self):
         connection = load("tovez.json")["connection"]
         self.assertEqual(connection["radio_channel"], 3)
+
+
+class TestZetuvRadioChannel(unittest.TestCase):
+    """Acceptance criterion: zetuv.json specifies radio channel 3
+    (sprint 002 ticket 001 -- ticket-directed bench channel, matching
+    tovez's own bench convention)."""
+
+    def test_zetuv_radio_channel_3(self):
+        connection = load("zetuv.json")["connection"]
+        self.assertEqual(connection["radio_channel"], 3)
+
+
+class TestZetuvWiring(unittest.TestCase):
+    """Acceptance criterion (sprint 002 ticket 001): zetuv.json's motors
+    block reflects the BENCH-MEASURED left_port/right_port/fwd_sign_left/
+    fwd_sign_right values, not tovez_nocal.json's inherited placeholders
+    -- see docs/bench-log-zetuv-2026-08-19.md for the pulse-by-pulse
+    observation log this determination rests on."""
+
+    def test_zetuv_motors_wiring_measured(self):
+        motors = load("zetuv.json")["motors"]
+        self.assertIn("left_port", motors, "left_port must be a measured, not omitted, field")
+        self.assertIn("right_port", motors, "right_port must be a measured, not omitted, field")
+        self.assertIn(motors["left_port"], (1, 2, 3, 4))
+        self.assertIn(motors["right_port"], (1, 2, 3, 4))
+        self.assertNotEqual(motors["left_port"], motors["right_port"])
+        self.assertIn(motors["fwd_sign_left"], (-1, 1))
+        self.assertIn(motors["fwd_sign_right"], (-1, 1))
 
 
 class TestNoWifiCredentials(unittest.TestCase):

@@ -53,6 +53,16 @@ default is fail-closed** (`max_duty=0.0`, `full_duty_velocity=0.0`,
 matching `DiffDrive::Config`'s own "EVERY DEFAULT IS FAIL-CLOSED"
 contract) — a bare `configure(left_port=2, right_port=1)` still refuses
 every drive/driveDuty call until real authority values are supplied.
+**`max_duty` is PERCENT (0-100), matching the vendored kernel's own
+`Config.maxDuty` field comment (`vendor/differential_drive.h`: `// [%]
+authority rail`) — not a `[-1,1]` fraction.** A value like `0.15`
+(intended as "15%") is a genuine, easy-to-make units bug: it collapses
+the authority rail to ~0.15%, below the write path's own 3% output-
+deadband floor, so every nonzero commanded duty silently boosts to
+that floor regardless of what was requested — bench-discovered and
+root-caused on zetuv, sprint 002 ticket 002
+(`docs/bench-log-zetuv-2026-08-19.md`; see that ticket's own demo
+module, `src/demo_square.py`, for a corrected, bench-verified example).
 
 ```
 diffdrive.begin() -> status:str
@@ -64,8 +74,12 @@ launches the kernel fiber. Both return `"refused_unconfigured"` if
 
 ```
 diffdrive.drive(velocity, twist, lease_ms) -> status:str      # [counts/s] [counts/s] [ms]
-diffdrive.driveDuty(dutyLeft, dutyRight, lease_ms) -> status:str  # [-1,1] [-1,1] [ms]
+diffdrive.driveDuty(dutyLeft, dutyRight, lease_ms) -> status:str  # [%] [%] [ms]
 ```
+`dutyLeft`/`dutyRight` are PERCENT (0-100), matching `Command.dutyLeft`/
+`dutyRight`'s own field comments in `vendor/differential_drive.h` —
+same correction as `max_duty` above, previously mis-annotated here as
+`[-1,1]`.
 `lease_ms` is a **duration**, not an absolute time. **5000 ms binding
 ceiling, enforced by rejection, never clamping**: `lease_ms > 5000`
 returns `"refused_lease_ceiling"` immediately, without calling into the

@@ -1,8 +1,20 @@
-"""M5 gate: `manifest.py` (repo root) lists every `src/*.py` module --
-nothing is silently left on the filesystem-only path (spec Sec 7.4).
-See `clasi/sprints/001-python-first-firmware-image-m0-m6/tickets/
-007-python-firmware-layer-config-telemetry-motion-otos-line-m5.md`'s
-acceptance criterion this file encodes."""
+"""M5 gate: `manifest.py` (repo root) lists every FRAMEWORK `src/*.py`
+module -- nothing is silently left on the filesystem-only path (spec
+Sec 7.4). See `clasi/sprints/001-python-first-firmware-image-m0-m6/
+tickets/007-python-firmware-layer-config-telemetry-motion-otos-line-
+m5.md`'s acceptance criterion this file encodes.
+
+`_BENCH_ONLY_MODULES` (sprint 002 ticket 002) carves out a narrow,
+named exception for demo/bench SCRIPTS that are deliberately never
+frozen -- `src/demo_square.py` is the first: it drives motors as a
+side effect of being imported (`if _ON_DEVICE: run()`, its own module
+docstring), so freezing it into ROM would make a bare `import
+demo_square` from any REPL session an accidental motor-drive trigger,
+and it is documented as run via `mpremote run` (source upload +
+execute), never `import demo_square` on-device -- see that module's
+own docstring. This does not weaken the invariant for FRAMEWORK
+modules (config.py, motion.py, comms.py, ...), which must still be
+frozen and still fail this test if they drift out of manifest.py."""
 
 import re
 from pathlib import Path
@@ -11,9 +23,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_PATH = REPO_ROOT / "manifest.py"
 SRC_DIR = REPO_ROOT / "src"
 
+# Bench/demo scripts, never frozen -- see this module's own docstring.
+_BENCH_ONLY_MODULES = {"demo_square.py"}
+
 
 def _actual_src_modules():
-    return sorted(p.name for p in SRC_DIR.glob("*.py"))
+    return sorted(
+        p.name for p in SRC_DIR.glob("*.py") if p.name not in _BENCH_ONLY_MODULES
+    )
 
 
 def _manifest_listed_modules():
