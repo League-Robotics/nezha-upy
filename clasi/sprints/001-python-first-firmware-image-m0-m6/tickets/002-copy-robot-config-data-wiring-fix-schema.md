@@ -1,8 +1,10 @@
 ---
 id: '002'
 title: Copy robot config data + wiring fix + schema
-status: open
-use-cases: [UC-011, UC-002]
+status: done
+use-cases:
+- UC-011
+- UC-002
 depends-on: []
 github-issue: ''
 issue:
@@ -45,25 +47,25 @@ source file doesn't already, and note why in `data/README.md`.
 
 ## Acceptance Criteria
 
-- [ ] `data/robot_config.schema.json`, `data/tovez.json`,
+- [x] `data/robot_config.schema.json`, `data/tovez.json`,
       `data/tovez_nocal.json`, `data/gopiv.json`, `data/togov.json`,
       `data/active_robot.json` exist, copied from
       `radio-robot-elite/data/robots`.
-- [ ] Every copied JSON file parses cleanly (`python3 -m json.tool
+- [x] Every copied JSON file parses cleanly (`python3 -m json.tool
       data/<file>.json` for each, or an equivalent batch check).
-- [ ] Every per-robot JSON file (`tovez.json`, `tovez_nocal.json`,
+- [x] Every per-robot JSON file (`tovez.json`, `tovez_nocal.json`,
       `gopiv.json`, `togov.json`) validates against
       `data/robot_config.schema.json` (an offline validator test using
       `jsonschema` if available, or a hand-rolled required-key check if
       not).
-- [ ] `data/gopiv.json` contains `left_port: 2, right_port: 1,
+- [x] `data/gopiv.json` contains `left_port: 2, right_port: 1,
       fwd_sign_left: 1, fwd_sign_right: -1` (asserted, not just
       eyeballed).
-- [ ] `data/tovez.json` specifies radio channel 3.
-- [ ] `data/README.md` documents the one-time-copy provenance and any
+- [x] `data/tovez.json` specifies radio channel 3.
+- [x] `data/README.md` documents the one-time-copy provenance and any
       deviations applied (wiring fix, channel designation) from the
       radio-robot-elite source.
-- [ ] `git diff --exit-code -- vendor/` remains empty (this ticket
+- [x] `git diff --exit-code -- vendor/` remains empty (this ticket
       touches only `data/`).
 
 ## Testing
