@@ -1,7 +1,7 @@
 ---
 id: '001'
 title: Fix square tour travel units + bench re-verify
-status: in-progress
+status: done
 use-cases:
 - UC-003
 - UC-014
@@ -62,26 +62,24 @@ exception:
   surface: user-visible
   resolved: true
   resolved_at: '2026-08-19T20:20:00.000000+00:00'
-  resolution: 'Stakeholder resolved directly: "the robot has plenty of power,
-    but I completely reset it, so have at it." Power explicitly ruled out; a
-    full physical robot reset plausibly cleared the wedged Nezha motor board
-    (the exception''s own zero-motion signature -- duty applied, I2C connected,
-    encoders frozen -- is consistent with a board-level wedge a physical reset
-    would clear). Re-verified the connection (mbdeploy list, same port/UID),
-    confirmed the filesystem survived (robot.json/main.py/demo_square.py all
-    present, unchanged sizes), then did a cautious single-wheel re-probe
-    (modest duty, short lease) BEFORE trusting a full tour again -- motion
-    confirmed alive on both wheels. Running the full corrected tour then
-    surfaced a SECOND, separate, unrelated issue: SEGMENT_LEASE_MS/
-    SEGMENT_TIMEOUT_MS (3000 ms) were sized for the OLD, much-shorter leg
-    targets and were too short for the corrected ~4.74x-longer ones (legs
-    hit the timeout at ~70-74% of target). Fixed by refreshing driveDuty()''s
-    lease periodically (every 400 ms) instead of holding one lease for the
-    whole segment, decoupling the per-segment timeout (raised to 6000 ms)
-    from the native binding''s 5000 ms single-lease ceiling. Re-deployed and
-    re-ran: all 8 segments reached target (legs ~3373-3390 vs target 3362.069,
-    pivots ~691-710 vs target 675.984), clean stop-verify (delta 0,0 over
-    2 s). Full evidence: docs/bench-log-zetuv-2026-08-19.md Sec 32-36.'
+  resolution: 'Stakeholder resolved directly: "the robot has plenty of power, but
+    I completely reset it, so have at it." Power explicitly ruled out; a full physical
+    robot reset plausibly cleared the wedged Nezha motor board (the exception''s own
+    zero-motion signature -- duty applied, I2C connected, encoders frozen -- is consistent
+    with a board-level wedge a physical reset would clear). Re-verified the connection
+    (mbdeploy list, same port/UID), confirmed the filesystem survived (robot.json/main.py/demo_square.py
+    all present, unchanged sizes), then did a cautious single-wheel re-probe (modest
+    duty, short lease) BEFORE trusting a full tour again -- motion confirmed alive
+    on both wheels. Running the full corrected tour then surfaced a SECOND, separate,
+    unrelated issue: SEGMENT_LEASE_MS/ SEGMENT_TIMEOUT_MS (3000 ms) were sized for
+    the OLD, much-shorter leg targets and were too short for the corrected ~4.74x-longer
+    ones (legs hit the timeout at ~70-74% of target). Fixed by refreshing driveDuty()''s
+    lease periodically (every 400 ms) instead of holding one lease for the whole segment,
+    decoupling the per-segment timeout (raised to 6000 ms) from the native binding''s
+    5000 ms single-lease ceiling. Re-deployed and re-ran: all 8 segments reached target
+    (legs ~3373-3390 vs target 3362.069, pivots ~691-710 vs target 675.984), clean
+    stop-verify (delta 0,0 over 2 s). Full evidence: docs/bench-log-zetuv-2026-08-19.md
+    Sec 32-36.'
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
 
