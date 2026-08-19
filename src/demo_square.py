@@ -161,6 +161,65 @@ independently verifiable number in this file," and pivots scale
 correctly off it (bench-re-verified, the same ~4.74x factor as legs --
 see the bench log).
 
+**Geometry -- SUPERSEDED sprint 005 ticket 001, 2026-08-19**
+(stakeholder correction, live at the bench, ``clasi/sprints/
+005-zetuv-wheel-diameter-rescale/``, UC-003/UC-014): the sprint 004
+fix above got ``EMPIRICAL_COUNTS_PER_REV`` (975, ticks per WHEEL
+REVOLUTION) right -- that number is UNCHANGED and PRESERVED below --
+but it divided by the wrong wheel CIRCUMFERENCE. Sprint 004's
+``WHEEL_CIRCUMFERENCE_MM = 145.0`` was itself the issue's own *stated*
+figure, never independently camera/tape-measured. The stakeholder has
+now directly confirmed (2026-08-19): "Tovez does in fact have the
+correct wheel diameter... You need to set the wheel size for this
+Micro:bit to be the same as Tovez's." ``data/tovez.json``'s own
+``wheels.wheel_diameter_mm = 80.77`` (circumference = pi * 80.77 =
+253.7464 mm) is therefore the corrected, config-derived source for
+this constant -- NOT a re-guess, a stakeholder-blessed value carried
+from the sibling robot that shares this same physical wheel.
+
+**Net effect of the 145 mm assumption alone**: sprint 004's legs were
+right in REVOLUTIONS (~2 rev was always the intent for a 500 mm leg)
+but wrong in MM, because the wrong circumference converted that
+revolution count to the wrong distance. Sprint 004's own leg target
+(3362.069 ticks) is 3362.069 / 975.0 = 3.448 wheel revolutions -- at
+the NOW-corrected 253.7464 mm circumference that is
+3.448 * 253.7464 = 874.9 mm of real travel, 1.75x the 500 mm the
+stakeholder actually intended.
+
+**Fix**: ``WHEEL_DIAMETER_MM = 80.77`` (mirrors ``data/zetuv.json``'s
+own corrected ``wheels.wheel_diameter_mm``, provenance:
+stakeholder-confirmed 2026-08-19, same wheels as tovez),
+``WHEEL_CIRCUMFERENCE_MM = PI * WHEEL_DIAMETER_MM`` ~= 253.7464 mm
+(now DERIVED rather than a separately-stated magic number),
+``EMPIRICAL_COUNTS_PER_REV = 975.0`` UNCHANGED, giving
+``TICKS_PER_MM = 975.0 / 253.7464`` ~= 3.8424 (was ~6.7241) -- a
+~0.5715x correction (3.8424 / 6.7241), the inverse of sprint 004's own
+~4.74x correction, since this ticket corrects the SAME arithmetic's
+other input in the opposite direction. 500 mm legs now target
+``500.0 * 3.8424`` ~= 1921 ticks (was 3362.069) -- ~1.97 wheel
+revolutions, matching the stakeholder's own intended ~2-revolution,
+~500 mm leg. Pivot targets fall out of the SAME ``TICKS_PER_MM``
+correction applied through the unchanged ``TRACKWIDTH_MM = 128.0``
+geometry (``_pivot_ticks()`` below is untouched code, just fed the new
+constant) -- a 90-degree pivot's arc length stays
+``(pi/2) * 64.0`` ~= 100.53 mm (the same physical arc sprint 004 also
+used), so the new pivot target is ``100.53 * 3.8424`` ~= 386 ticks
+(was 675.984). ``TRACKWIDTH_MM`` remains untouched -- it was never
+part of either the sprint 004 or this ticket's bug (caliper-measured,
+independent of wheel diameter).
+
+Still NOT independently camera/tape-verified on zetuv's own physical
+wheel beyond the stakeholder's own verbal bench confirmation that it
+matches tovez's -- disclosed, not hidden, same caveat this file has
+carried through every prior correction. Segment lease/timeout
+constants (``SEGMENT_LEASE_MS``/``SEGMENT_TIMEOUT_MS``/
+``LEASE_REFRESH_MS``) are UNCHANGED -- the sprint 004 lease-refresh
+mechanism itself is out of this ticket's scope, and the shorter
+~1921-tick leg targets only need LESS time than the ~3362-tick targets
+those budgets were already sized for, so the existing margin only
+grows (see the constants' own updated comments below for the
+recomputed expected timing).
+
 **Termination is encoder-closed-loop, not a blind timer.** Each
 segment polls ``diffdrive.output()`` and stops (commands neutral) once
 the mean of ``|delta positionLeft|``/``|delta positionRight|`` reaches
@@ -182,24 +241,39 @@ except ImportError:  # pragma: no cover -- exercised only off-device (CPython)
     _ON_DEVICE = False
 
 # ---------------------------------------------------------------------
-# Geometry -- CORRECTED sprint 004 ticket 001, 2026-08-19 (root-cause
-# units fix). See module docstring's "Geometry" section for the full
-# derivation, the tovez.json travel_calib cross-check, and why the
-# empirical bench anchor governs. Mirrors data/zetuv.json's own
-# wheels block (kept in sync, same derivation/provenance note there).
+# Geometry -- SUPERSEDED sprint 005 ticket 001, 2026-08-19 (stakeholder
+# correction: zetuv shares tovez's wheel, wheel_diameter_mm=80.77 -- was
+# a bare, issue-stated 145 mm circumference guess). See module
+# docstring's "Geometry" section for the full derivation, the
+# tovez.json travel_calib cross-check, and why EMPIRICAL_COUNTS_PER_REV
+# (sprint 004's own bench anchor) is preserved unchanged below -- only
+# the circumference it divides by changed. Mirrors data/zetuv.json's
+# own wheels block (kept in sync, same derivation/provenance note
+# there).
 # ---------------------------------------------------------------------
-WHEEL_CIRCUMFERENCE_MM = 145.0     # [mm] issue's own stated figure --
-                                    # not independently re-measured this
-                                    # ticket (no camera/caliper access
-                                    # available to this agent)
-EMPIRICAL_COUNTS_PER_REV = 975.0   # [counts/rev] stakeholder's own
-                                    # golden-measurement anchor -- see
-                                    # module docstring for the full
-                                    # sprint-002-run-1-derived math
-TICKS_PER_MM = EMPIRICAL_COUNTS_PER_REV / WHEEL_CIRCUMFERENCE_MM  # ~6.7241
-TRACKWIDTH_MM = 128.0               # [mm] UNCHANGED -- caliper-measured,
-                                    # not part of this bug (see docstring)
 PI = 3.14159265358979323846
+
+WHEEL_DIAMETER_MM = 80.77          # [mm] tovez's own wheel_diameter_mm --
+                                    # stakeholder-confirmed 2026-08-19,
+                                    # zetuv shares the same physical wheel
+                                    # (mirrors data/zetuv.json's wheels
+                                    # .wheel_diameter_mm)
+WHEEL_CIRCUMFERENCE_MM = PI * WHEEL_DIAMETER_MM  # ~253.7464 mm -- now
+                                    # DERIVED from the diameter above,
+                                    # not a separately-stated magic
+                                    # number (was a bare 145.0 literal)
+EMPIRICAL_COUNTS_PER_REV = 975.0   # [counts/rev] UNCHANGED -- stakeholder's
+                                    # own golden-measurement anchor (sprint
+                                    # 004), preserved per this ticket's own
+                                    # instruction -- see module docstring
+                                    # for the full sprint-002-run-1-derived
+                                    # math; only the circumference input
+                                    # above changed this ticket
+TICKS_PER_MM = EMPIRICAL_COUNTS_PER_REV / WHEEL_CIRCUMFERENCE_MM  # ~3.8424
+                                    # (was ~6.7241 under the old 145 mm
+                                    # circumference assumption)
+TRACKWIDTH_MM = 128.0               # [mm] UNCHANGED -- caliper-measured,
+                                    # not part of this or the sprint 004 bug
 
 LEG_DISTANCE_MM = 500.0
 PIVOT_ANGLE_RAD = PI / 2.0  # 90 degrees, LEFT (CCW)
@@ -224,21 +298,26 @@ SEGMENT_LEASE_MS = 600        # per-driveDuty() safety lease -- REFRESHED
                                # whole segment. CORRECTED sprint 004 ticket
                                # 001: the old single-shot 3000 ms lease was
                                # sized for the old, wrong (~4-5x too short)
-                               # leg targets; the corrected ~3362-tick leg
-                               # target needs ~4.2-4.9 s of continuous drive
-                               # at SEGMENT_DUTY_PERCENT (bench-measured,
-                               # docs/bench-log-zetuv-2026-08-19.md), which
-                               # would sit right at (or over) the native
-                               # binding's own hard 5000 ms single-lease
-                               # ceiling (refused outright above it, never
-                               # clamped) if held as one long lease. A
-                               # short, frequently-renewed lease reaches the
-                               # same total drive duration while keeping the
-                               # lease's own fail-safe intent tight (a
-                               # polling loop that itself hangs still loses
-                               # the wheels within one lease period, not
-                               # within whatever the segment's full budget
-                               # is).
+                               # leg targets. UNCHANGED sprint 005 ticket
+                               # 001: the mechanism itself is out of this
+                               # ticket's scope, and the now-corrected
+                               # ~1921-tick leg target (was ~3362) needs
+                               # only ~2.4-2.8 s of continuous drive at
+                               # SEGMENT_DUTY_PERCENT (scaled from sprint
+                               # 004's own ~4.2-4.9 s bench measurement by
+                               # the same ~0.5715x TICKS_PER_MM ratio,
+                               # 3.8424/6.7241) -- well clear of the native
+                               # binding's hard 5000 ms single-lease ceiling
+                               # (refused outright above it, never clamped)
+                               # even without refreshing, so this mechanism
+                               # keeps working with growing margin, not
+                               # tighter margin. A short, frequently-renewed
+                               # lease reaches the same total drive duration
+                               # while keeping the lease's own fail-safe
+                               # intent tight (a polling loop that itself
+                               # hangs still loses the wheels within one
+                               # lease period, not within whatever the
+                               # segment's full budget is).
 LEASE_REFRESH_MS = 400        # reissue driveDuty() this often while still
                                # driving -- comfortably inside
                                # SEGMENT_LEASE_MS so the lease never
@@ -248,10 +327,13 @@ SEGMENT_TIMEOUT_MS = 6000     # CORRECTED sprint 004 ticket 001: overall
                                # per-segment safety bound, decoupled from
                                # the native binding's 5000 ms single-lease
                                # ceiling now that driveDuty() is reissued
-                               # (see SEGMENT_LEASE_MS above). Sized with
-                               # real margin over the corrected leg
-                               # target's bench-measured ~4.2-4.9 s typical
-                               # completion time; pivots finish in ~1 s and
+                               # (see SEGMENT_LEASE_MS above). UNCHANGED
+                               # sprint 005 ticket 001: the ~1921-tick leg
+                               # target (was ~3362) now needs only
+                               # ~2.4-2.8 s typical completion time (see
+                               # SEGMENT_LEASE_MS's own comment for the
+                               # scaling), so this bound's margin only
+                               # grows; pivots finish in well under 1 s and
                                # exit this bound long before it matters.
 POLL_INTERVAL_MS = 50
 SETTLE_MS = 1200              # TOUR_SQUARE's own rest-to-rest settle

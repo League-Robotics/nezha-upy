@@ -35,14 +35,18 @@ def test_run_refuses_off_device():
 
 
 def test_leg_ticks_matches_distance_times_ticks_per_mm():
-    # sprint 004 ticket 001: TICKS_PER_MM is now the empirically-derived
-    # ~6.7241 (see demo_square's own module docstring/root-cause note),
-    # not the old, unverified-template 1.4187 -- tied to the live
-    # constant rather than a hand-copied literal so a future correction
-    # cannot leave this test silently re-asserting a stale value.
+    # sprint 005 ticket 001: TICKS_PER_MM is now the stakeholder-confirmed
+    # ~3.8424 (975 empirical counts/rev over tovez's own 80.77mm wheel
+    # diameter -- see demo_square's own module docstring/"Geometry --
+    # SUPERSEDED sprint 005 ticket 001" note), superseding sprint 004's
+    # own ~6.7241 (that ticket's EMPIRICAL_COUNTS_PER_REV anchor was
+    # right; only the assumed 145mm circumference was wrong). Tied to the
+    # live constant rather than a hand-copied literal so a future
+    # correction cannot leave this test silently re-asserting a stale
+    # value.
     assert demo_square._leg_ticks(500.0, demo_square.TICKS_PER_MM) == pytest.approx(
         500.0 * demo_square.TICKS_PER_MM)
-    assert demo_square.TICKS_PER_MM == pytest.approx(6.7241, abs=0.001)
+    assert demo_square.TICKS_PER_MM == pytest.approx(3.8424, abs=0.001)
 
 
 def test_pivot_ticks_matches_arc_length_times_ticks_per_mm():
@@ -51,7 +55,9 @@ def test_pivot_ticks_matches_arc_length_times_ticks_per_mm():
                                       demo_square.TICKS_PER_MM)
     assert ticks == pytest.approx(
         (demo_square.PI / 2.0) * 64.0 * demo_square.TICKS_PER_MM)
-    assert ticks == pytest.approx(676.03, abs=0.5)
+    # sprint 005 ticket 001: ~386 ticks (was ~676.03 under sprint 004's
+    # own now-superseded TICKS_PER_MM ~6.7241).
+    assert ticks == pytest.approx(386.28, abs=0.5)
 
 
 def test_build_square_tour_shape_is_leg_pivot_interleaved_four_of_each():

@@ -1,8 +1,10 @@
 ---
 id: '001'
-title: 'Set zetuv wheel diameter to 80.77 mm and rescale square tour'
-status: open
-use-cases: [UC-003, UC-014]
+title: Set zetuv wheel diameter to 80.77 mm and rescale square tour
+status: in-progress
+use-cases:
+- UC-003
+- UC-014
 depends-on: []
 github-issue: ''
 issue: zetuv-wheel-diameter-from-tovez.md
@@ -89,34 +91,44 @@ scope.
 
 ## Acceptance Criteria
 
-- [ ] `data/zetuv.json`'s `wheel_diameter_mm` is `80.77`, with a
+- [x] `data/zetuv.json`'s `wheel_diameter_mm` is `80.77`, with a
       provenance note (stakeholder-confirmed, same wheels as tovez).
-- [ ] `data/zetuv.json`'s empirical ~975 ticks-per-wheel-revolution
+- [x] `data/zetuv.json`'s empirical ~975 ticks-per-wheel-revolution
       value (from sprint 004) is preserved, not reverted to the
       template default.
-- [ ] `data/zetuv.json` still validates against
+- [x] `data/zetuv.json` still validates against
       `data/robot_config.schema.json`.
-- [ ] `demo_square.py`'s `TICKS_PER_MM` and pivot tick targets are
+- [x] `demo_square.py`'s `TICKS_PER_MM` and pivot tick targets are
       recomputed from the updated config-derived numbers, with the
       derivation stated in code comments.
-- [ ] `data/tovez.json` is byte-for-byte untouched by this ticket
+- [x] `data/tovez.json` is byte-for-byte untouched by this ticket
       (`git diff` confirms no changes to it).
-- [ ] The `tovez.json` `ticks_per_rev: 360` inconsistency is noted in
+- [x] The `tovez.json` `ticks_per_rev: 360` inconsistency is noted in
       this ticket (or a follow-up issue reference), not fixed here.
-- [ ] Any test hardcoding a stale tick constant is updated to follow
+- [x] Any test hardcoding a stale tick constant is updated to follow
       the live/recomputed constant (confirm sprint 004's tests already
       do this; fix any that don't).
-- [ ] Bench re-run (REPL-triggered) shows leg deltas ≈1922 ticks
-      (≈2 wheel revolutions, visibly ~50 cm), pivots ≈90°, and a clean
-      stop-verify.
-- [ ] Bench log updated with this run's results and the note that
-      sprint 004 was right in revolutions but wrong in mm due to the
-      circumference assumption.
-- [ ] Device left armed (`main.py` idle prompt live) for the
-      stakeholder's physical A press — hand back promptly once the
-      REPL-triggered check passes.
-- [ ] `python3 -m pytest tests/` stays green at the 204 baseline.
-- [ ] `python3 -m py_compile` passes on every changed file; `mpy-cross`
+- [ ] **BLOCKED, hardware not connected**: Bench re-run (REPL-triggered)
+      shows leg deltas ≈1922 ticks (≈2 wheel revolutions, visibly
+      ~50 cm), pivots ≈90°, and a clean stop-verify. `zetuv` is not
+      physically connected to the bench machine this session (confirmed
+      via `mbdeploy list`/`probe` and independently via `pyocd list` —
+      two separate USB interfaces, both agree, re-checked 3x — see
+      `docs/bench-log-zetuv-2026-08-19.md` Sec 39). Escalated via
+      `throw_ticket_exception`.
+- [x] Bench log updated with the root-cause note (sprint 004 was right
+      in revolutions but wrong in mm due to the circumference
+      assumption) and with this session's hardware-blocker finding
+      (Sec 37-40). Bench *results* (leg/pivot deltas) could not be
+      recorded — blocked, see above.
+- [ ] **BLOCKED, hardware not connected**: Device left armed (`main.py`
+      idle prompt live) for the stakeholder's physical A press —
+      unverifiable this session since `zetuv` was never reachable; its
+      last-known state (armed, from the end of sprint 004's own
+      session) was not disturbed, as no device command was issued this
+      session.
+- [x] `python3 -m pytest tests/` stays green at the 204 baseline.
+- [x] `python3 -m py_compile` passes on every changed file; `mpy-cross`
       lints `demo_square.py` clean.
 
 ## Testing
