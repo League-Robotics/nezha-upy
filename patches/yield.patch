@@ -1,22 +1,45 @@
+CORRECTED, 2026-08-19 (ticket 004, M1). This file previously recorded the
+old MicroPython exploration's yield fix verbatim
+(reference/FINDINGS.md Section 3b): adding `schedule()` inside
+`microbit_hal_background_processing()`. That function is also called from
+this port's STOCK (unpatched) `MICROPY_VM_HOOK_POLL` in mpconfigport.h --
+confirmed by diffing a fresh checkout against its own git HEAD, the
+MICROPY_VM_HOOK_COUNT/INIT/POLL/LOOP/RETURN block is upstream default
+behavior, not one of this project's own patches. Applying the old diff
+therefore put a fiber-switching `schedule()` call on a path reachable
+from INSIDE VM bytecode dispatch -- the exact heap-corruption landmine
+docs/nezha-upy-review.md Section 1 / docs/design/specification.md
+Section 7.1 describe, and the most likely mechanism behind the observed
+gopiv 2026-08-14 HardFault this ledger already attributes to
+"fiber switches from VM/GC hooks."
+
+The diff below is the CORRECTED version: it touches ONLY
+microbit_hal_idle(), never microbit_hal_background_processing(). See
+patches/apply_yield.py's own module docstring for the full reasoning --
+that script is what actually applies this (idempotent Python text
+replace, not `git apply`, matching every other build.sh patch step's
+convention); this file is kept as the documented, reviewable diff, not as
+something `patch`/`git apply` is run against directly.
+
 --- a/src/codal_app/microbithal.cpp
 +++ b/src/codal_app/microbithal.cpp
-@@ -85,10 +85,22 @@ void microbit_hal_background_processing(void) {
--    // This call takes about 200us.
-+    // Fire the idle event (~200 us) then actually yield CPU to other fibers.
-+    // Without the schedule() call the robot-kernel fiber gets ZERO CPU while
-+    // Python runs -- the event fires handlers registered on the message bus
-+    // but never does a CODAL context switch.
-     Event(DEVICE_ID_SCHEDULER, DEVICE_SCHEDULER_EVT_IDLE);
-+    schedule();
+@@ -89,7 +89,14 @@ void microbit_hal_background_processing(void) {
  }
- 
+
  void microbit_hal_idle(void) {
 -    microbit_hal_background_processing();
 -    __WFI();
-+    // Replace the busy-wait (WFI) with a fiber_sleep so Python's sleep()
-+    // and any blocking in mp_hal_delay_ms() cooperatively yields to the
-+    // kernel fiber.  fiber_sleep(1) is the minimum; it yields for at least
-+    // one scheduler tick (~1 ms) and returns after the fiber is woken.
-+    fiber_sleep(1);
++    // Cooperative yield to the kernel fiber (native/platform_ports.h's
++    // FiberLauncher/Sleeper) -- the ONLY yield point in this image; see
++    // this file's own module docstring for why it is scoped to exactly
++    // this function and not to microbit_hal_background_processing()
++    // (which the stock MICROPY_VM_HOOK_POLL also calls, and which must
++    // therefore stay fiber-switch-free).
++    codal::fiber_sleep(1);
 +    microbit_hal_background_processing();
  }
+
+Deliberately NOT part of this patch, permanently: a MICROPY_GC_HOOK_LOOP
+addition to mpconfigport.h. Nothing in this design needs the kernel fiber
+woken from inside a GC sweep -- only from main-context idle() -- so no
+corrected version of that half exists to apply.

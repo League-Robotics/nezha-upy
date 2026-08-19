@@ -1,9 +1,17 @@
 ---
 id: '004'
 title: moddiffdrive native module (M1)
-status: open
-use-cases: [UC-002, UC-003, UC-004, UC-005, UC-008, UC-012, UC-015]
-depends-on: ['001']
+status: done
+use-cases:
+- UC-002
+- UC-003
+- UC-004
+- UC-005
+- UC-008
+- UC-012
+- UC-015
+depends-on:
+- '001'
 github-issue: ''
 issue: complete-gates-3-7-full-firmware-in-micropython-image.md
 completes_issue:
@@ -75,29 +83,29 @@ documented stakeholder procedure. Leg (1)'s radio-robot-side
 by radio-robot's own suite); this ticket owns leg (1)'s vendor
 sync-diff-clean half.
 
-- [ ] `./build.sh --clean` with the native module wired in (a new
+- [x] `./build.sh --clean` with the native module wired in (a new
       `--with-diffdrive` flag, mirroring the existing
       `--with-modrobot` flag) exits 0 and links `moddiffdrive` into
       the hex; flash end still < `_fs_start`.
-- [ ] `git diff --exit-code -- vendor/` is empty — confirms no local
+- [x] `git diff --exit-code -- vendor/` is empty — confirms no local
       kernel edits (the sync-diff-clean gate leg owned by this repo).
-- [ ] Source review confirms the full API surface is bound:
+- [x] Source review confirms the full API surface is bound:
       `configure`, `begin`, `start`, `drive`, `driveDuty`, `neutral`,
       `estop`, `output`, `lastError`, each registered in the module's
       method table.
-- [ ] Source review confirms the boot zero-write executes before
+- [x] Source review confirms the boot zero-write executes before
       `mp_init`/VM start (trace the init ordering in `native/`).
-- [ ] Source review confirms the VM-hook watchdog path calls no
+- [x] Source review confirms the VM-hook watchdog path calls no
       yield/fiber-switch primitive (consistent with review §1's "no
       point inside VM execution where the stack is not load-bearing"
       finding), and that its design/comments explicitly cover both the
       busy-wait and the `radio.receive()`-polling trigger shapes — the
       250 ms-stall timing itself is hardware-verified (ticket 009), not
       asserted here.
-- [ ] Source review confirms the 5000 ms lease ceiling constant is
+- [x] Source review confirms the 5000 ms lease ceiling constant is
       present and **enforced** (rejects, doesn't clamp, a longer
       lease) in the binding.
-- [ ] `cycleOverrunCount_` is incrementing and readable from Python
+- [x] `cycleOverrunCount_` is incrementing and readable from Python
       (at minimum via a raw accessor on the `diffdrive` module — full
       telemetry-frame integration is ticket 007's job, but the counter
       itself must exist and be exposed here).

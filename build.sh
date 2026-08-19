@@ -6,7 +6,25 @@
 #
 # OPTIONS:
 #   --with-modrobot   Wire in the modrobot C module (builtin `import robot`)
-#   --with-yield      Apply the yield+GC-hook patch (required for kernel fiber)
+#                     -- dead by directive (kept under reference/ as a
+#                     pattern reference only); its own Makefile block
+#                     reaches for ../../../../src/firm, which does not
+#                     exist in this repo, so this flag is not expected to
+#                     produce a working build here.
+#   --with-diffdrive  Wire in the moddiffdrive native module (builtin
+#                     `import diffdrive` / `import robotio`) -- compiles
+#                     vendor/differential_drive.{h,cpp} +
+#                     vendor/nezha_motor.{h,cpp} + vendor/motor_armor.h
+#                     (unedited) against native/'s platform ports.
+#                     Implies --with-yield (the kernel fiber cannot be
+#                     scheduled without it).
+#   --with-yield      Apply the corrected microbit_hal_idle() yield patch
+#                     (required for the diffdrive kernel fiber). NOTE:
+#                     this is NOT a literal application of
+#                     patches/yield.patch's historical diff -- see
+#                     patches/apply_yield.py's own header for why that
+#                     exact diff is unsafe against this port's stock
+#                     MICROPY_VM_HOOK_POLL wiring.
 #   --clean           Delete build directories before building
 #
 # PREREQUISITES (macOS):
@@ -30,14 +48,16 @@ MP_DIR="micropython-microbit-v2"
 MP_UPSTREAM_URL="https://github.com/microbit-foundation/micropython-microbit-v2.git"
 MP_PIN_SHA="0697c6d5b035e9369d3f2142b1d7a4cbe2301b11"
 WITH_MODROBOT=0
+WITH_DIFFDRIVE=0
 WITH_YIELD=0
 CLEAN=0
 
 for arg in "$@"; do
   case "$arg" in
-    --with-modrobot) WITH_MODROBOT=1 ;;
-    --with-yield)    WITH_YIELD=1 ;;
-    --clean)         CLEAN=1 ;;
+    --with-modrobot)  WITH_MODROBOT=1 ;;
+    --with-diffdrive) WITH_DIFFDRIVE=1; WITH_YIELD=1 ;;
+    --with-yield)     WITH_YIELD=1 ;;
+    --clean)          CLEAN=1 ;;
   esac
 done
 
@@ -649,6 +669,255 @@ void microbit_hal_reset(void) {""")
     print("  microbit_hal_poll_ctrl_c added")
 else:
     print("  microbit_hal_poll_ctrl_c already present")
+PYEOF
+fi
+
+if [ "$WITH_DIFFDRIVE" -eq 1 ]; then
+  echo "=== Step 6b: Wire in moddiffdrive native module ==="
+  # No cp step: unlike --with-modrobot, native/ and vendor/ sources are
+  # referenced IN PLACE via $(abspath ../../../...) from
+  # micropython-microbit-v2/src/codal_port/ (3 levels up = this repo's
+  # root) -- editing native/ takes effect on the next build without a
+  # re-copy, and vendor/ is never touched at all (git diff --exit-code --
+  # vendor/ stays clean by construction).
+  python3 - << 'PYEOF'
+path = "micropython-microbit-v2/src/codal_port/Makefile"
+with open(path) as f:
+    src = f.read()
+
+changed = False
+
+# 1. Include path for native/hal/*.h, native/hardware/nezha/*.h (the
+#    minimal Hal:: contract vendor/nezha_motor.h and vendor/motor_armor.h
+#    need -- see native/README.md for why this is authored in native/
+#    rather than vendor/).
+if "-I$(abspath ../../../native)" not in src:
+    src = src.replace(
+        "INC += -I$(TOP)\n",
+        "INC += -I$(TOP)\nINC += -I$(abspath ../../../native)\n"
+    )
+    changed = True
+
+# 2. CXXFLAGS + the SRC_CXX -> OBJ pattern (shared scaffolding with
+#    --with-modrobot's own block; guarded so passing both flags together
+#    never double-defines it).
+if "CXXFLAGS =" not in src:
+    src = src.replace(
+        "OBJ = $(PY_O)\n",
+        "CXXFLAGS = $(INC) -std=gnu++20 $(CFLAGS_ARCH) $(COPT) $(CFLAGS_EXTRA) -fno-rtti -fno-exceptions -Wno-register -Wno-deprecated\nOBJ = $(PY_O)\n"
+    )
+    changed = True
+if "$(SRC_CXX:.cpp=.o)" not in src:
+    src = src.replace(
+        "OBJ += $(addprefix $(BUILD)/, $(LIB_SRC_C:.c=.o))\n",
+        "OBJ += $(addprefix $(BUILD)/, $(LIB_SRC_C:.c=.o))\nOBJ += $(addprefix $(BUILD)/, $(SRC_CXX:.cpp=.o))\n"
+    )
+    changed = True
+
+# 3. Sources: moddiffdrive_glue.c (C) into SRC_C; the vendored kernel
+#    (compiled unedited, in place) + native/'s own .cpp files into
+#    SRC_CXX. MUST land textually BEFORE `include $(TOP)/py/mkrules.mk`
+#    (further down this same Makefile) -- GNU Make expands a rule's
+#    PREREQUISITE list (unlike a recipe body) at the point the rule is
+#    PARSED, not deferred to build time. mkrules.mk's
+#    `$(LIBMICROPYTHON): $(OBJ)` rule is parsed when the `include` line
+#    is reached, so an `SRC_CXX +=` appended anywhere after that point
+#    (e.g. at end-of-file) is invisible to that rule's already-expanded
+#    prerequisite list -- confirmed the hard way (ticket 004: `make -p`
+#    showed libmicropython.a's prerequisites ending at
+#    moddiffdrive_glue.o, silently missing every .cpp, only caught at the
+#    final link's "undefined reference" errors). Anchoring both this
+#    ticket's SRC_C and SRC_CXX additions to the SAME
+#    pre-include anchor --with-modrobot's own (also pre-include) block
+#    uses is what makes this safe, not the recursive-variable reasoning
+#    that would apply to a plain variable reference.
+if "moddiffdrive_glue.c" not in src:
+    # abspath, NOT a bare filename: unlike --with-modrobot's own
+    # modrobot_glue.c (cp'd into codal_port/ so a bare relative name
+    # resolves), native/moddiffdrive_glue.c is referenced in place -- see
+    # this step's own top-of-block comment.
+    diffdrive_sources = (
+        "$(abspath $(LOCAL_LIB_DIR)/sam/debug.c) \\\n"
+        "\t$(abspath ../../../native/moddiffdrive_glue.c) \\\n"
+        "\n"
+        "SRC_CXX += \\\n"
+        "\t$(abspath ../../../vendor/differential_drive.cpp) \\\n"
+        "\t$(abspath ../../../vendor/nezha_motor.cpp) \\\n"
+        "\t$(abspath ../../../native/moddiffdrive.cpp) \\\n"
+        "\t$(abspath ../../../native/i2c_broker.cpp) \\\n"
+        "\t$(abspath ../../../native/platform_ports.cpp) \\\n"
+        "\t$(abspath ../../../native/watchdog.cpp) \\\n"
+        "\n"
+    )
+    src = src.replace(
+        "$(abspath $(LOCAL_LIB_DIR)/sam/debug.c) \\\n\n",
+        diffdrive_sources,
+    )
+    changed = True
+
+# 4. QSTR_DEFS: append qstrdefs_diffdrive.h to whatever the variable
+#    already lists (robust to --with-modrobot having already appended
+#    qstrdefs_robot.h ahead of us).
+if "qstrdefs_diffdrive.h" not in src:
+    import re
+    new_src, n = re.subn(
+        r"^(QSTR_DEFS\s*=.*)$",
+        r"\1 qstrdefs_diffdrive.h",
+        src,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if n == 1:
+        src = new_src
+        changed = True
+
+with open(path, 'w') as f:
+    f.write(src)
+if changed:
+    print("  Makefile patched for moddiffdrive C++ build")
+else:
+    print("  codal_port/Makefile already patched for diffdrive")
+PYEOF
+
+  # Write qstrdefs_diffdrive.h with the diffdrive/robotio modules' qstr
+  # identifiers (manual, matching qstrdefs_robot.h's own established
+  # pattern -- redundant with automatic qstr extraction where it also
+  # applies, harmless where it overlaps: qstrs dedupe by string value).
+  cat > "$MP_DIR/src/codal_port/qstrdefs_diffdrive.h" << 'QEOF'
+// qstrdefs_diffdrive.h -- qstrs for the built-in diffdrive/robotio modules
+Q(diffdrive)
+Q(robotio)
+Q(configure)
+Q(begin)
+Q(start)
+Q(drive)
+Q(driveDuty)
+Q(neutral)
+Q(estop)
+Q(output)
+Q(lastError)
+Q(cycleOverrunCount)
+Q(i2c_xfer)
+Q(left_port)
+Q(right_port)
+Q(fwd_sign_left)
+Q(fwd_sign_right)
+Q(max_duty)
+Q(full_duty_velocity)
+Q(cycle_period_ms)
+Q(address)
+Q(write_data)
+Q(read_len)
+Q(repeated)
+Q(pre_clear)
+Q(post_clear)
+Q(cycleCount)
+Q(cycleBusy)
+Q(cyclePeriodMeasured)
+Q(positionLeft)
+Q(positionRight)
+Q(velocityLeft)
+Q(velocityRight)
+Q(velocity)
+Q(twist)
+Q(appliedDutyLeft)
+Q(appliedDutyRight)
+Q(ready)
+Q(estopped)
+Q(leaseExpired)
+Q(stallHalted)
+Q(connectedLeft)
+Q(connectedRight)
+Q(watchdogFault)
+Q(watchdogTripCount)
+QEOF
+  echo "  qstrdefs_diffdrive.h refreshed"
+
+  python3 - << 'PYEOF'
+# Patch mpconfigport.h: register diffdrive_module/robotio_module, and
+# extend the EXISTING stock MICROPY_VM_HOOK_POLL to also call the
+# starvation watchdog. Deliberately reuses this hook rather than adding a
+# new one -- docs/nezha-upy-review.md Section 1 / spec Section 7.1 close
+# the "find a better hook point" question permanently. The watchdog call
+# itself never yields/schedules (native/watchdog.h's own safety
+# argument), so extending this existing, already-safe-to-call-from-VM
+# hook is sound; UNLIKE the yield patch, nothing here adds a schedule()
+# call reachable from this hook.
+path = "micropython-microbit-v2/src/codal_port/mpconfigport.h"
+with open(path) as f:
+    src = f.read()
+changed = False
+
+if "diffdrive_module" not in src:
+    src = src.replace(
+        "extern const struct _mp_obj_module_t utime_module;",
+        "extern const struct _mp_obj_module_t diffdrive_module;\n"
+        "extern const struct _mp_obj_module_t robotio_module;\n"
+        "extern const struct _mp_obj_module_t utime_module;"
+    )
+    src = src.replace(
+        "#define MICROPY_PORT_BUILTIN_MODULES \\\n",
+        "#define MICROPY_PORT_BUILTIN_MODULES \\\n"
+        "    { MP_ROM_QSTR(MP_QSTR_diffdrive), MP_ROM_PTR(&diffdrive_module) }, \\\n"
+        "    { MP_ROM_QSTR(MP_QSTR_robotio), MP_ROM_PTR(&robotio_module) }, \\\n"
+    )
+    changed = True
+
+old_hook_poll = """#define MICROPY_VM_HOOK_POLL \\
+    if (--vm_hook_divisor == 0) { \\
+        vm_hook_divisor = MICROPY_VM_HOOK_COUNT; \\
+        extern void microbit_hal_background_processing(void); \\
+        microbit_hal_background_processing(); \\
+    }"""
+new_hook_poll = """#define MICROPY_VM_HOOK_POLL \\
+    if (--vm_hook_divisor == 0) { \\
+        vm_hook_divisor = MICROPY_VM_HOOK_COUNT; \\
+        extern void microbit_hal_background_processing(void); \\
+        microbit_hal_background_processing(); \\
+        extern void moddiffdrive_vm_hook(void); \\
+        moddiffdrive_vm_hook(); \\
+    }"""
+if "moddiffdrive_vm_hook" not in src:
+    if old_hook_poll in src:
+        src = src.replace(old_hook_poll, new_hook_poll)
+        changed = True
+    else:
+        print("  WARNING: MICROPY_VM_HOOK_POLL text did not match expected stock form -- watchdog NOT wired, patch this by hand")
+
+with open(path, 'w') as f:
+    f.write(src)
+if changed:
+    print("  diffdrive_module/robotio_module + VM-hook watchdog wired in mpconfigport.h")
+else:
+    print("  mpconfigport.h already patched for diffdrive")
+PYEOF
+
+  python3 - << 'PYEOF'
+# Patch codal_port/main.c: boot zero-write BEFORE gc_init()/mp_init(), so
+# a reset mid-drive is silenced before any Python (including a student's
+# own boot code) can run. This ticket's acceptance criteria requires the
+# ordering to be traceable by source review.
+path = "micropython-microbit-v2/src/codal_port/main.c"
+with open(path) as f:
+    src = f.read()
+if "moddiffdrive_boot_zero_write" not in src:
+    old = "        gc_init(heap, heap + sizeof(heap));\n        mp_init();"
+    new = (
+        "        extern void moddiffdrive_boot_zero_write(void);\n"
+        "        moddiffdrive_boot_zero_write();\n"
+        "\n"
+        "        gc_init(heap, heap + sizeof(heap));\n"
+        "        mp_init();"
+    )
+    if old in src:
+        src = src.replace(old, new)
+        with open(path, 'w') as f:
+            f.write(src)
+        print("  moddiffdrive_boot_zero_write() wired in before mp_init() in main.c")
+    else:
+        print("  WARNING: main.c's gc_init()/mp_init() sequence did not match expected form -- boot zero-write NOT wired, patch this by hand")
+else:
+    print("  main.c already patched for boot zero-write")
 PYEOF
 fi
 
