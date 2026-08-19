@@ -52,13 +52,17 @@
 #
 # `src/demo_square.py` (sprint 002 ticket 002) is DELIBERATELY ABSENT
 # from the list below -- it is a bench demo SCRIPT, not a framework
-# module: it drives motors as a side effect of being imported (its own
-# module docstring's `if _ON_DEVICE: run()`), so freezing it would make
-# a bare `import demo_square` from any REPL session an accidental
-# motor-drive trigger. It is run via `mpremote run src/demo_square.py`
-# (source upload + execute), which needs no freezing at all. See that
-# module's own docstring and `tests/test_manifest_freeze.py`'s
-# `_BENCH_ONLY_MODULES` for the same reasoning encoded as a test.
+# module. As of sprint 006 ticket 001, a bare `import demo_square` no
+# longer auto-runs anything by itself (its own module docstring's
+# "Auto-run trigger" section) -- production callers (src/
+# main_zetuv_demo.py) call `demo_square.run()`/`run_single_leg()`
+# explicitly. It remains off this freeze list regardless: freezing
+# would need a full `--clean` rebuild+reflash unrelated to this
+# ticket's own scope, and its standalone bench-debug entry point
+# (`mpremote run src/demo_square.py`, source upload + execute) still
+# needs no freezing at all. See that module's own docstring and
+# `tests/test_manifest_freeze.py`'s `_BENCH_ONLY_MODULES` for the same
+# reasoning encoded as a test.
 
 freeze(
     "../../../src",

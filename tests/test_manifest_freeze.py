@@ -6,15 +6,17 @@ m5.md`'s acceptance criterion this file encodes.
 
 `_BENCH_ONLY_MODULES` (sprint 002 ticket 002) carves out a narrow,
 named exception for demo/bench SCRIPTS that are deliberately never
-frozen -- `src/demo_square.py` is the first: it drives motors as a
-side effect of being imported (`if _ON_DEVICE: run()`, its own module
-docstring), so freezing it into ROM would make a bare `import
-demo_square` from any REPL session an accidental motor-drive trigger,
-and it is documented as run via `mpremote run` (source upload +
-execute), never `import demo_square` on-device -- see that module's
-own docstring. This does not weaken the invariant for FRAMEWORK
-modules (config.py, motion.py, comms.py, ...), which must still be
-frozen and still fail this test if they drift out of manifest.py.
+frozen -- `src/demo_square.py` is the first: it is a bench demo
+script, not a framework module, run via `mpremote run` (source upload
++ execute) or, on-device, imported explicitly by `src/
+main_zetuv_demo.py`'s own `run_tour()`/`run_straight_drive()` (sprint
+006 ticket 001: a bare `import demo_square` no longer auto-runs
+anything by itself -- see that module's own docstring's "Auto-run
+trigger" section). It stays off the freeze list regardless: freezing
+would need a full rebuild+reflash unrelated to any single ticket's own
+scope. This does not weaken the invariant for FRAMEWORK modules
+(config.py, motion.py, comms.py, ...), which must still be frozen and
+still fail this test if they drift out of manifest.py.
 
 `src/main_zetuv_demo.py` (sprint 003 ticket 001) is the second entry:
 it is the version-controlled copy of zetuv's on-device `main.py` (the

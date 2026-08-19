@@ -220,6 +220,145 @@ those budgets were already sized for, so the existing margin only
 grows (see the constants' own updated comments below for the
 recomputed expected timing).
 
+**Geometry -- SUPERSEDED sprint 006 ticket 001, 2026-08-19** (stakeholder
+directive, live at the bench, ``clasi/sprints/
+006-zetuv-90mm-wheels-and-button-b-50cm-drive/``, UC-003/UC-014):
+"set up its wheels to be 90 mm" -- an explicit calibration ITERATION
+POINT, not a claim that 90 mm is more correct than sprint 005's own
+stakeholder-confirmed 80.77 mm; the stakeholder is dialing this in by
+direct measurement and expects to revise it again. ``WHEEL_DIAMETER_MM
+= 90.0`` (fallback default; see "Config-driven geometry" below for the
+now-live override path), ``EMPIRICAL_COUNTS_PER_REV = 975.0``
+UNCHANGED (sprint 004's own bench-proven counts/wheel-revolution
+anchor -- only the diameter input changed this ticket),
+``TICKS_PER_MM = 975.0 / (pi * 90.0)`` ~= 3.4484 (was ~3.8424). A 500
+mm leg (this ticket's own button-B distance, see below) now targets
+``500.0 * 3.4484`` ~= 1724 ticks (~1.77 wheel revolutions); pivot arcs
+keep the SAME ~100.53 mm physical arc (``TRACKWIDTH_MM = 128.0``,
+caliper-measured, untouched by any wheel-diameter correction) ->
+``100.53 * 3.4484`` ~= 347 ticks (was ~386). Mirrors
+``data/zetuv.json``'s own ``wheels`` block (same derivation, same
+provenance note, same calibration-formula instruction for future
+iterations: ``new_diameter_mm = 90 x (measured_travel_mm / 500)``).
+
+**Config-driven geometry -- new this ticket, why NOT
+``config.load_robot_config()``** (grounded in this file's own bench
+history, ``docs/bench-log-zetuv-2026-08-19.md``, not assumed): the
+ticket's own acceptance criteria explicitly offer two paths --
+``config.load_robot_config()`` OR "an equivalent lightweight parse".
+This module uses the LATTER, for two independent, concrete,
+bench-established reasons, either of which alone would already be
+disqualifying:
+
+  1. Sprint 003's own bench pass (``docs/bench-log-zetuv-2026-08-19.md``
+     Sec 17) found zetuv's resident FROZEN ``config`` module is a STALE
+     STUB on the currently-deployed firmware image -- ``dir(config)``
+     is only ``['__class__', '__name__']``; ``config.load_robot_config``
+     does not exist as an attribute at all (``AttributeError``). No
+     rebuild/reflash happened in any session since (sprints 004/005 both
+     explicitly note "no source files changed" / filesystem-copy-only
+     deploys) -- this remains true as of this ticket, unverified fresh
+     this session only because zetuv was not physically connected to
+     the bench at all (see the bench log's own sprint 006 section) --
+     `import config; config.load_robot_config` would raise
+     ``AttributeError`` on THIS resident image regardless.
+  2. EVEN ON A REBUILT, CURRENT ``config`` module, ``load_robot_config()``
+     would still be structurally unusable for zetuv's own
+     ``data/zetuv.json``/``robot.json``: ``config.REQUIRED_KEYS`` demands
+     ``motors.travel_calib_left``/``travel_calib_right`` and all 15
+     ``wheel_control`` fields as a whole-document fail-CLOSED
+     precondition (``config.parse_robot_config()`` raises
+     ``ConfigError`` if ANY required key anywhere in the document is
+     missing) -- and zetuv's own config deliberately omits
+     ``travel_calib_left``/``right`` (sprint 002's own no-calibration
+     scope decision, unchanged and out of THIS ticket's scope to
+     revisit). So gating a read of the ``wheels`` group's two geometry
+     fields behind ``load_robot_config()``'s full required-key gate
+     would make that read ALWAYS fail on zetuv's own config, defeating
+     this ticket's own stated goal ("each future calibration iteration
+     = re-copy robot.json ONLY") before it could ever help.
+
+Given both, this module implements a narrow, dedicated
+``geometry_from_robot_config()`` below: reads ONLY
+``wheels.wheel_diameter_mm``/``wheels.ticks_per_rev`` from the robot
+config JSON, fail-SOFT (returns ``None`` on ANY problem -- missing
+file, invalid JSON, missing group/field, non-numeric, non-positive --
+NEVER raises). This is a deliberately different contract from
+``config.ConfigError``'s fail-CLOSED posture: a wrong/missing geometry
+constant should fall back to a safe hardcoded default and keep the
+demo working (this module's own long-established "never brick the
+demo" posture, e.g. ``run()``'s own off-device ``RuntimeError`` aside),
+not refuse motion outright the way a missing safety-relevant
+``wheel_control``/``travel_calib`` key correctly does in ``config.py``.
+The read happens at every fresh (re-)import of this module -- which,
+per ``main.py``'s own ``sys.modules.pop(...) + import demo_square``
+per-press pattern (unchanged this ticket), means EVERY button press (A
+or B alike) re-reads ``/robot.json`` fresh. This is a STRONGER
+guarantee than a literal one-time "at boot" read: a stakeholder can
+re-copy a freshly edited ``robot.json`` onto the device and see the new
+geometry take effect on the VERY NEXT press, with no reset/redeploy
+needed -- directly satisfying this ticket's own "re-copy robot.json
+ONLY" iteration goal. ``TRACKWIDTH_MM`` remains a plain hardcoded
+constant (caliper-measured, not named in this ticket's scope) -- only
+``wheel_diameter_mm``/``ticks_per_rev`` are config-driven this ticket.
+
+**Single-leg entry point (button B) -- reuses, does not reimplement**:
+``run_single_leg()`` below is the "straight-drive primitive"
+``main.py``'s own new button-B handler (this ticket, sprint 006 ticket
+001) reuses (per this ticket's explicit instruction not to reimplement
+straight-line driving). It
+shares the SAME ``_configure_and_start()``/``_leg_ticks()``/
+``_run_segment()`` pieces ``run()``'s own square tour already uses for
+every leg -- the only new code is the thin wrapper that builds ONE leg
+segment and drives it, mirroring ``run()``'s own leg-segment shape
+exactly (same duty, same lease-refresh discipline, same
+encoder-termination convention).
+
+**Auto-run trigger changed from ``_ON_DEVICE`` to a ``__name__`` guard
+-- why, disclosed plainly**: prior to this ticket, this module's ONLY
+callable behaviour was the full square tour, so "importing this module
+runs the one thing it does" (``if _ON_DEVICE: run()``, unconditional)
+was a reasonable, minimal design. This ticket adds a SECOND, distinct
+behaviour (``run_single_leg()``) that must be selectable per press --
+but MicroPython's ``import`` statement takes no arguments, so an
+unconditional "import always runs the (now ambiguous) one thing" no
+longer has a well-defined meaning. Rather than invent an out-of-band
+signalling mechanism (e.g. stashing a flag on a shared module) this
+ticket instead makes the two production entry points EXPLICIT:
+``main.py``'s ``run_tour()``/``run_straight_drive()`` both call
+``demo_square.run()``/``demo_square.run_single_leg(...)`` directly
+after their own ``sys.modules.pop(...) + import demo_square`` (see
+``src/main_zetuv_demo.py``) -- production behaviour therefore no longer
+depends AT ALL on what a bare ``import demo_square`` does by itself.
+The bottom of this file keeps a convenience auto-run for the
+STANDALONE bench-debug entry point this project has used throughout
+(``mpremote connect PORT run src/demo_square.py``, documented at the
+top of this docstring) -- but now gated on ``__name__ == "__main__"``
+rather than ``_ON_DEVICE`` alone, since Python's own `import` statement
+GUARANTEES ``__name__`` is set to the module's own dotted name
+(``"demo_square"``) for every ``import`` call, on any Python
+implementation -- so this guard is PROVABLY never true for
+``main.py``'s own import-based invocations, with no port-specific
+assumption needed there. The one genuinely NEW assumption this
+introduces is whether ``mpremote ... run <file>.py`` executes with
+``__name__ == "__main__"`` -- reasoned, not yet independently
+bench-verified THIS ticket (zetuv was not physically connected to the
+bench for the whole of this session; see the bench log's own sprint
+006 section), from EXISTING bench evidence: ``main.py``'s own REPL
+verification scripts (``docs/bench-log-zetuv-2026-08-19.md``, sprint
+003 Sec 21 onward) had to explicitly override ``__name__`` to
+``"verify"`` specifically BECAUSE the REPL's own default execution
+namespace already has ``__name__ == "__main__"`` -- and ``mpremote
+... run`` sends a file's source to be executed through that SAME raw-REPL
+mechanism, not a distinct one. If this reasoning turns out wrong, the
+ONLY failure mode is the STANDALONE bench-debug convenience silently
+doing nothing (non-destructive, easily diagnosed with a one-line
+``print(__name__)`` probe, the same technique already used to verify
+``main.py``'s own ``__name__`` semantics) -- button A/B production
+behaviour is unaffected either way, since both call their target
+function explicitly. Flagged here for whoever next has bench access to
+zetuv to confirm directly.
+
 **Termination is encoder-closed-loop, not a blind timer.** Each
 segment polls ``diffdrive.output()`` and stops (commands neutral) once
 the mean of ``|delta positionLeft|``/``|delta positionRight|`` reaches
@@ -240,40 +379,115 @@ try:
 except ImportError:  # pragma: no cover -- exercised only off-device (CPython)
     _ON_DEVICE = False
 
+# No JSON parser import: this build's firmware ships NEITHER ujson NOR
+# json (bench-confirmed 2026-08-19, help('modules') on zetuv -- the
+# frozen config module's own ujson import can never have worked on this
+# image). The geometry read below is a dependency-free two-key scan of
+# the compact deployed /robot.json instead.
+
 # ---------------------------------------------------------------------
-# Geometry -- SUPERSEDED sprint 005 ticket 001, 2026-08-19 (stakeholder
-# correction: zetuv shares tovez's wheel, wheel_diameter_mm=80.77 -- was
-# a bare, issue-stated 145 mm circumference guess). See module
-# docstring's "Geometry" section for the full derivation, the
-# tovez.json travel_calib cross-check, and why EMPIRICAL_COUNTS_PER_REV
-# (sprint 004's own bench anchor) is preserved unchanged below -- only
-# the circumference it divides by changed. Mirrors data/zetuv.json's
-# own wheels block (kept in sync, same derivation/provenance note
-# there).
+# Geometry -- SUPERSEDED sprint 006 ticket 001, 2026-08-19 (stakeholder
+# directive: "set up its wheels to be 90 mm" -- an explicit calibration
+# iteration point). See module docstring's "Geometry" and "Config-driven
+# geometry" sections for the full derivation/rationale. Mirrors
+# data/zetuv.json's own wheels block (kept in sync, same derivation/
+# provenance note there).
 # ---------------------------------------------------------------------
 PI = 3.14159265358979323846
 
-WHEEL_DIAMETER_MM = 80.77          # [mm] tovez's own wheel_diameter_mm --
-                                    # stakeholder-confirmed 2026-08-19,
-                                    # zetuv shares the same physical wheel
-                                    # (mirrors data/zetuv.json's wheels
-                                    # .wheel_diameter_mm)
-WHEEL_CIRCUMFERENCE_MM = PI * WHEEL_DIAMETER_MM  # ~253.7464 mm -- now
-                                    # DERIVED from the diameter above,
-                                    # not a separately-stated magic
-                                    # number (was a bare 145.0 literal)
-EMPIRICAL_COUNTS_PER_REV = 975.0   # [counts/rev] UNCHANGED -- stakeholder's
-                                    # own golden-measurement anchor (sprint
-                                    # 004), preserved per this ticket's own
-                                    # instruction -- see module docstring
-                                    # for the full sprint-002-run-1-derived
-                                    # math; only the circumference input
-                                    # above changed this ticket
-TICKS_PER_MM = EMPIRICAL_COUNTS_PER_REV / WHEEL_CIRCUMFERENCE_MM  # ~3.8424
-                                    # (was ~6.7241 under the old 145 mm
-                                    # circumference assumption)
+ROBOT_CONFIG_PATH = "robot.json"   # bare, no leading slash -- mirrors
+                                    # main.py's own bench-confirmed "Path
+                                    # convention" (leading-slash ENOENTs
+                                    # on this port even though the same
+                                    # file opens fine under the bare form)
+
+
+def _scan_number(text, key):
+    """Return the numeric value following ``"key":`` in ``text``, or
+    ``None`` if the key is absent or its value does not parse as a
+    float. Whitespace after the colon is tolerated; the value ends at
+    the first ``,``, ``}``, or ``]``."""
+    i = text.find('"' + key + '"')
+    if i < 0:
+        return None
+    i = text.find(":", i)
+    if i < 0:
+        return None
+    j = i + 1
+    while j < len(text) and text[j] in " \t\r\n":
+        j += 1
+    k = j
+    while k < len(text) and text[k] not in ",}]":
+        k += 1
+    try:
+        return float(text[j:k])
+    except ValueError:
+        return None
+
+
+def geometry_from_robot_config(path=ROBOT_CONFIG_PATH):
+    """Sprint 006 ticket 001: narrow, fail-SOFT read of ONLY
+    ``wheels.wheel_diameter_mm``/``wheels.ticks_per_rev`` from the robot
+    config JSON at ``path`` -- see module docstring's "Config-driven
+    geometry" section for why this is a dedicated lightweight parse
+    rather than ``config.load_robot_config()`` (two independent,
+    bench-grounded, concrete reasons stated there). Returns
+    ``(wheel_diameter_mm, ticks_per_rev)`` as floats on success;
+    ``None`` on ANY problem -- missing/unreadable file, either key not
+    found, non-numeric value, or non-positive. NEVER raises; the caller
+    falls back to the hardcoded constants below.
+
+    Implementation is a dependency-free string scan, not a JSON parse:
+    this image ships no json/ujson module (bench-confirmed), and both
+    keys appear exactly once in the deployed compact config (their only
+    JSON home is the wheels group)."""
+    try:
+        with open(path, "r") as f:
+            text = f.read()
+        wheel_diameter_mm = _scan_number(text, "wheel_diameter_mm")
+        ticks_per_rev = _scan_number(text, "ticks_per_rev")
+    except OSError:
+        return None
+    if wheel_diameter_mm is None or ticks_per_rev is None:
+        return None
+    if wheel_diameter_mm <= 0.0 or ticks_per_rev <= 0.0:
+        return None
+    return wheel_diameter_mm, ticks_per_rev
+
+
+# Config-driven, with a hardcoded fallback -- see module docstring's
+# "Config-driven geometry" section. Only attempted on-device: under
+# CPython (offline tests) there is no real /robot.json to read and no
+# reason to depend on the test runner's own cwd, so the fallback
+# constants are used directly, deterministically, every time.
+_CONFIG_GEOMETRY = geometry_from_robot_config() if _ON_DEVICE else None
+GEOMETRY_SOURCE = "robot.json" if _CONFIG_GEOMETRY is not None else "hardcoded fallback"
+
+if _CONFIG_GEOMETRY is not None:
+    WHEEL_DIAMETER_MM, EMPIRICAL_COUNTS_PER_REV = _CONFIG_GEOMETRY
+else:
+    WHEEL_DIAMETER_MM = 90.0            # [mm] fallback -- mirrors
+                                        # data/zetuv.json's own
+                                        # wheels.wheel_diameter_mm
+                                        # (stakeholder-directed
+                                        # calibration starting point,
+                                        # 2026-08-19 -- an explicit
+                                        # iteration point, not a claimed
+                                        # final value)
+    EMPIRICAL_COUNTS_PER_REV = 975.0   # [counts/rev] fallback --
+                                        # UNCHANGED empirical bench
+                                        # anchor (sprint 004), mirrors
+                                        # data/zetuv.json
+
+WHEEL_CIRCUMFERENCE_MM = PI * WHEEL_DIAMETER_MM  # ~282.7433 mm at the
+                                    # fallback 90.0 mm diameter -- DERIVED,
+                                    # not a separately-stated magic number
+TICKS_PER_MM = EMPIRICAL_COUNTS_PER_REV / WHEEL_CIRCUMFERENCE_MM  # ~3.4484
+                                    # at the fallback values (was ~3.8424
+                                    # under the old 80.77 mm diameter)
 TRACKWIDTH_MM = 128.0               # [mm] UNCHANGED -- caliper-measured,
-                                    # not part of this or the sprint 004 bug
+                                    # NOT config-driven this ticket (only
+                                    # wheel_diameter_mm/ticks_per_rev are)
 
 LEG_DISTANCE_MM = 500.0
 PIVOT_ANGLE_RAD = PI / 2.0  # 90 degrees, LEFT (CCW)
@@ -335,6 +549,11 @@ SEGMENT_TIMEOUT_MS = 6000     # CORRECTED sprint 004 ticket 001: overall
                                # scaling), so this bound's margin only
                                # grows; pivots finish in well under 1 s and
                                # exit this bound long before it matters.
+                               # UNCHANGED sprint 006 ticket 001: the
+                               # 90 mm-diameter leg target (~1724 ticks,
+                               # was ~1921) is smaller still (~0.90x) --
+                               # margin only grows again, no adjustment
+                               # needed.
 POLL_INTERVAL_MS = 50
 SETTLE_MS = 1200              # TOUR_SQUARE's own rest-to-rest settle
 
@@ -447,25 +666,37 @@ def _run_segment(index, segment):
     }
 
 
-def run():
-    """The demo's single entry point. Configures diffdrive directly
-    (bypassing config.py/boot.py -- see module docstring for why),
-    then drives the 8-segment square tour, printing per-segment
-    encoder evidence as it goes."""
+def _require_on_device(caller_name):
     if not _ON_DEVICE:
         raise RuntimeError(
-            "demo_square.run() requires the diffdrive native module "
-            "(run this on zetuv via mpremote, not under CPython)")
+            "demo_square.%s() requires the diffdrive native module "
+            "(run this on zetuv via mpremote, not under CPython)" % (caller_name,))
 
+
+def _configure_and_start(caller_name):
+    """Shared ``diffdrive.configure()``/``begin()``/``start()``
+    bracketing -- ``run()`` (button A, full tour) and ``run_single_leg()``
+    (button B, sprint 006 ticket 001) both call this identically, so the
+    wiring facts (ports/signs/duty rail) can never drift between the two
+    entry points. Bypasses config.py/boot.py -- see module docstring for
+    why."""
     cfg = diffdrive.configure(
         left_port=LEFT_PORT, right_port=RIGHT_PORT,
         fwd_sign_left=FWD_SIGN_LEFT, fwd_sign_right=FWD_SIGN_RIGHT,
         max_duty=MAX_DUTY_PERCENT, full_duty_velocity=0.0,
         cycle_period_ms=CYCLE_PERIOD_MS)
-    print("demo_square: configure", cfg)
-    print("demo_square: begin", diffdrive.begin())
-    print("demo_square: start", diffdrive.start())
+    print("demo_square: %s configure" % (caller_name,), cfg)
+    print("demo_square: %s begin" % (caller_name,), diffdrive.begin())
+    print("demo_square: %s start" % (caller_name,), diffdrive.start())
     time.sleep_ms(100)
+
+
+def run():
+    """The square tour entry point (button A). Configures diffdrive
+    directly, then drives the 8-segment square tour, printing
+    per-segment encoder evidence as it goes."""
+    _require_on_device("run")
+    _configure_and_start("run")
 
     segments = build_square_tour()
     print("demo_square: tour has", len(segments), "segments")
@@ -485,5 +716,49 @@ def run():
     print("demo_square: tour complete")
 
 
-if _ON_DEVICE:
+def run_single_leg(distance_mm=LEG_DISTANCE_MM, ticks_per_mm=TICKS_PER_MM):
+    """Sprint 006 ticket 001: button B's straight-drive entry point --
+    drives ONE leg segment of ``distance_mm`` (default 500 mm, the
+    ticket's own commanded distance) via the SAME
+    ``_configure_and_start()``/``_leg_ticks()``/``_run_segment()``
+    pieces ``run()``'s own square-tour legs already use -- reused, not
+    reimplemented (see module docstring's "Single-leg entry point"
+    section). Same duty, same encoder-termination convention, same
+    lease-refresh discipline (``_run_segment()`` itself, unchanged).
+    Returns the single segment's result dict (see ``_run_segment()``)
+    for the caller to inspect/log."""
+    _require_on_device("run_single_leg")
+    _configure_and_start("run_single_leg")
+
+    segment = {
+        "kind": "leg",
+        "target_ticks": _leg_ticks(distance_mm, ticks_per_mm),
+        "duty_left": SEGMENT_DUTY_PERCENT,
+        "duty_right": SEGMENT_DUTY_PERCENT,
+    }
+    result = _run_segment(0, segment)
+    print("demo_square: run_single_leg segment", result["kind"],
+          "status", result["status"],
+          "target_ticks", result["target_ticks"],
+          "delta_left", result["delta_left"],
+          "delta_right", result["delta_right"],
+          "mean_delta", result["mean_delta"],
+          "reached", result["reached"],
+          "elapsed_ms", result["elapsed_ms"])
+
+    diffdrive.neutral()
+    print("demo_square: run_single_leg complete")
+    return result
+
+
+# ---------------------------------------------------------------------
+# Standalone bench-debug entry point ONLY -- see module docstring's
+# "Auto-run trigger changed from _ON_DEVICE to a __name__ guard" section
+# for why this changed this ticket, and for the one new, disclosed,
+# not-yet-bench-verified assumption it carries (mpremote's own `run`
+# execution context). Production button A/B behaviour (src/
+# main_zetuv_demo.py) calls run()/run_single_leg() explicitly and does
+# NOT depend on this guard at all.
+# ---------------------------------------------------------------------
+if __name__ == "__main__":
     run()

@@ -105,9 +105,12 @@ first, and the outer loop's own guard does the same.
 the filesystem ``main.py`` as a bare function (``mp_call_function_0``),
 not through the normal module-import path -- so whether ``__name__``
 reads ``"__main__"`` in that context was not safe to assume (and
-``src/demo_square.py``'s own precedent of using an explicit
-``_ON_DEVICE`` flag rather than a ``__name__`` guard suggests this was
-an open question before too). Verified directly this session: a
+``src/demo_square.py``'s own ORIGINAL precedent -- before sprint 006
+ticket 001 -- of using an explicit ``_ON_DEVICE`` flag rather than a
+``__name__`` guard suggests this was an open question before too; that
+module now uses a ``__name__`` guard of its own for a different reason
+-- see its own module docstring's "Auto-run trigger" section). Verified
+directly this session: a
 throwaway diagnostic ``main.py`` that wrote ``__name__`` to a file on
 boot confirmed ``__name__ == "__main__"`` in exactly this execution
 context (bench log). ``run()`` below is therefore gated on
@@ -118,22 +121,83 @@ REPL-driven verification (see the bench log's own verification
 commands), so a verification exec of this whole file never re-enters
 the infinite idle loop; the individual functions (``on_button_a()``
 in particular) remain directly callable either way.
+
+**Button B / 50 cm straight drive -- sprint 006 ticket 001**
+(``clasi/sprints/006-zetuv-90mm-wheels-and-button-b-50cm-drive/``,
+UC-003/UC-014), stakeholder directive live at the bench: "set the B
+button to cause it to drive forward 50 cm". ``on_button_b()`` mirrors
+``on_button_a()`` exactly (distinct display feedback -> drive ->
+fault-guarded -> ``display.clear()``), except it shows ``Image.ARROW_E``
+(a **distinct** indicator from button A's ``Image.HEART``, per this
+ticket's own acceptance criteria) and calls ``run_straight_drive()``
+instead of ``run_tour()``. ``run_straight_drive()`` uses the SAME
+``sys.modules.pop(TOUR_MODULE_NAME, None) + import demo_square``
+reload pattern ``run_tour()`` already uses (repeatable presses, same
+reasoning as above), then explicitly calls
+``demo_square.run_single_leg(STRAIGHT_DRIVE_DISTANCE_MM)`` -- the SAME
+encoder-terminated, lease-refreshed straight-drive primitive
+(``demo_square._run_segment()``) the square tour's own legs use,
+reused rather than reimplemented (this ticket's own explicit
+instruction; see ``src/demo_square.py``'s own module docstring,
+"Single-leg entry point (button B)" section, for the shared
+``_configure_and_start()``/``_leg_ticks()``/``_run_segment()`` pieces).
+
+**Why ``run_tour()``/``run_straight_drive()`` now call
+``demo_square.run()``/``demo_square.run_single_leg()`` EXPLICITLY,
+rather than relying on import's own side effect** (this changed this
+ticket, from the "import itself runs the tour" design described above
+under "Why demo_square is deployed..."): ``demo_square`` now exposes
+TWO distinct behaviours (the full tour, and a single leg), and a plain
+``import`` statement cannot select between them -- see
+``src/demo_square.py``'s own docstring, "Auto-run trigger changed"
+section, for the full reasoning. Both functions below therefore import
+then call their target function directly; this also means production
+button behaviour does not depend on ``demo_square``'s own bottom
+``__name__`` guard at all.
+
+**Config-driven geometry -- both buttons automatically rescale, no
+separate edit needed**: ``demo_square.py``'s own fresh per-press
+re-import (unchanged mechanism, described above) now ALSO re-reads
+``wheels.wheel_diameter_mm``/``wheels.ticks_per_rev`` from
+``robot.json`` at each such reload (see that module's own "Config-driven
+geometry" docstring section for the full rationale, including why this
+does NOT go through ``config.load_robot_config()``) -- so both
+``run_tour()``'s square-tour legs and ``run_straight_drive()``'s single
+leg source the SAME geometry, automatically, on every press. This file
+(``main.py``) itself reads no geometry -- ``robot_ready()``'s own
+fail-closed probe (above) only checks ``robot.json`` presence/
+non-emptiness, unchanged.
+
+**Distance, bench-derived**: ``STRAIGHT_DRIVE_DISTANCE_MM = 500.0``
+mirrors ``demo_square.LEG_DISTANCE_MM`` (also 500.0, unchanged since
+sprint 002) -- at the fallback 90 mm wheel diameter this targets
+``500.0 * demo_square.TICKS_PER_MM`` ~= 1724 ticks per wheel (~1.77
+wheel revolutions; see ``data/zetuv.json``'s own updated ``_wheels_note``
+for the derivation and the stakeholder's own calibration formula for
+future iterations).
 """
 
 import os
 import sys
 
-from microbit import Image, button_a, display, sleep
+from microbit import Image, button_a, button_b, display, sleep
 
 # See module docstring "Path convention" -- bare, no leading slash;
 # the leading-slash form fails ENOENT on this port even though the
 # same file opens fine under the bare form.
 ROBOT_CONFIG_PATH = "robot.json"
 
-# Deployed as a precompiled demo_square.mpy, not raw .py source -- see
-# module docstring's own section on why (raw-source exec() ran this
-# device out of heap during on-device compilation, bench-verified).
+# Deployed as docstring-stripped raw .py source, NOT a precompiled
+# .mpy -- this firmware's MICROPY_PERSISTENT_CODE_LOAD is off, so it
+# cannot load .mpy from the filesystem at all (sprint 003's own
+# Constraint B finding, bench log); sprint 004's own deploy session
+# (bench log Sec 27) independently confirmed the actually-deployed copy
+# is stripped raw source, not the .mpy this comment originally claimed.
 TOUR_MODULE_NAME = "demo_square"
+
+# Sprint 006 ticket 001: exactly 500 mm commanded for button B -- see
+# module docstring's "Button B / 50 cm straight drive" section.
+STRAIGHT_DRIVE_DISTANCE_MM = 500.0
 
 IDLE_POLL_MS = 150
 FAULT_SHOW_MS = 1000
@@ -163,16 +227,36 @@ def robot_ready():
 
 
 def run_tour():
-    """Fresh (re)import of the precompiled ``demo_square`` module on
-    every call -- see module docstring for why a precompiled
-    ``.mpy`` + ``sys.modules.pop`` and not raw-source ``exec()``.
-    Popping first forces MicroPython to reload it (cheap: bytecode,
-    not source) so ``demo_square``'s own top-level ``if _ON_DEVICE:
-    run()`` fires again on every press, not just the first. Raises
-    whatever that top-level code raises; the caller (``on_button_a``)
-    handles that."""
+    """Fresh (re)import of ``demo_square`` on every call, then an
+    EXPLICIT ``demo_square.run()`` call -- see module docstring's "Why
+    ...  call ... EXPLICITLY" section for why this is no longer a bare
+    ``import`` relying on its own auto-run side effect (sprint 006
+    ticket 001: ``demo_square`` now exposes two behaviours, so the
+    caller must say which one it wants). Popping first forces
+    MicroPython to reload the module fresh (source, not bytecode --
+    see ``TOUR_MODULE_NAME``'s own comment) so this also re-reads
+    ``robot.json``'s current geometry every press (``demo_square.py``'s
+    own "Config-driven geometry" docstring section). Raises whatever
+    ``demo_square.run()`` raises; the caller (``on_button_a``) handles
+    that."""
     sys.modules.pop(TOUR_MODULE_NAME, None)
-    import demo_square  # noqa: F401 -- import itself runs the tour
+    import demo_square
+    demo_square.run()
+
+
+def run_straight_drive():
+    """Sprint 006 ticket 001: button B's entry point -- same fresh-
+    reload pattern as ``run_tour()`` (repeatable presses, current
+    config-driven geometry every time), but calls
+    ``demo_square.run_single_leg()`` instead of ``demo_square.run()`` --
+    the SAME encoder-terminated, lease-refreshed straight-drive
+    primitive the square tour's own legs use, reused rather than
+    reimplemented (see module docstring's "Button B / 50 cm straight
+    drive" section). Raises whatever ``demo_square.run_single_leg()``
+    raises; the caller (``on_button_b``) handles that."""
+    sys.modules.pop(TOUR_MODULE_NAME, None)
+    import demo_square
+    demo_square.run_single_leg(STRAIGHT_DRIVE_DISTANCE_MM)
 
 
 def on_button_a():
@@ -200,6 +284,27 @@ def on_button_a():
     display.clear()
 
 
+def on_button_b():
+    """Sprint 006 ticket 001: the button-B handler -- same shape as
+    ``on_button_a()`` (distinct feedback -> drive -> fault-guarded ->
+    clear), except it shows ``Image.ARROW_E`` (a display indicator
+    **distinct** from button A's ``Image.HEART``, per this ticket's own
+    acceptance criteria) and drives ``run_straight_drive()`` (a single
+    500 mm leg) instead of the full square tour. ``KeyboardInterrupt``
+    is always re-raised, never swallowed, same as ``on_button_a()``."""
+    display.show(Image.ARROW_E)
+    try:
+        run_straight_drive()
+    except KeyboardInterrupt:
+        raise
+    except Exception as exc:  # noqa: BLE001 -- deliberate broad catch;
+        # see on_button_a()'s own comment -- same reasoning applies here.
+        print("main: straight-drive fault:", exc)
+        display.show(Image.SAD)
+        sleep(FAULT_SHOW_MS)
+    display.clear()
+
+
 def _idle_frame(tick, ready):
     """One frame of the idle display -- NO (fail-closed) when the
     robot isn't ready, otherwise one step of the breathing pulse."""
@@ -210,11 +315,16 @@ def _idle_frame(tick, ready):
 
 
 def run():
-    """Main-context loop: poll ``button_a.was_pressed()`` + sleep,
-    never a callback -- see module docstring's "Main-context
-    discipline". ``robot_ready()`` is evaluated once at start (the
-    filesystem/native-module state it checks does not change while
-    this loop runs)."""
+    """Main-context loop: poll ``button_a.was_pressed()`` /
+    ``button_b.was_pressed()`` + sleep, never a callback -- see module
+    docstring's "Main-context discipline". ``robot_ready()`` is
+    evaluated once at start (the filesystem/native-module state it
+    checks does not change while this loop runs). Sprint 006 ticket
+    001: button B polled the same way as button A, same
+    ready/not-ready gating -- both checked every tick, both consume
+    their own ``was_pressed()`` latch independently (microbit's own
+    button API), so a same-tick double-press runs both handlers in
+    sequence (A then B), not either being dropped."""
     ready = robot_ready()
     if not ready:
         print("main: robot not ready (no robot.json, or it's empty, "
@@ -226,6 +336,12 @@ def run():
             if button_a.was_pressed():
                 if ready:
                     on_button_a()
+                else:
+                    display.show(Image.NO)
+                    sleep(REFUSED_SHOW_MS)
+            if button_b.was_pressed():
+                if ready:
+                    on_button_b()
                 else:
                     display.show(Image.NO)
                     sleep(REFUSED_SHOW_MS)

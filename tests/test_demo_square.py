@@ -35,18 +35,18 @@ def test_run_refuses_off_device():
 
 
 def test_leg_ticks_matches_distance_times_ticks_per_mm():
-    # sprint 005 ticket 001: TICKS_PER_MM is now the stakeholder-confirmed
-    # ~3.8424 (975 empirical counts/rev over tovez's own 80.77mm wheel
-    # diameter -- see demo_square's own module docstring/"Geometry --
-    # SUPERSEDED sprint 005 ticket 001" note), superseding sprint 004's
-    # own ~6.7241 (that ticket's EMPIRICAL_COUNTS_PER_REV anchor was
-    # right; only the assumed 145mm circumference was wrong). Tied to the
+    # sprint 006 ticket 001: TICKS_PER_MM is now derived from the
+    # stakeholder-directed 90 mm wheel diameter (a calibration ITERATION
+    # point, not a claimed-final value -- see demo_square's own module
+    # docstring/"Geometry -- SUPERSEDED sprint 006 ticket 001" note),
+    # superseding sprint 005's own ~3.8424 (80.77 mm, tovez's wheel).
+    # EMPIRICAL_COUNTS_PER_REV (975) is UNCHANGED throughout. Tied to the
     # live constant rather than a hand-copied literal so a future
     # correction cannot leave this test silently re-asserting a stale
     # value.
     assert demo_square._leg_ticks(500.0, demo_square.TICKS_PER_MM) == pytest.approx(
         500.0 * demo_square.TICKS_PER_MM)
-    assert demo_square.TICKS_PER_MM == pytest.approx(3.8424, abs=0.001)
+    assert demo_square.TICKS_PER_MM == pytest.approx(3.4484, abs=0.001)
 
 
 def test_pivot_ticks_matches_arc_length_times_ticks_per_mm():
@@ -55,9 +55,9 @@ def test_pivot_ticks_matches_arc_length_times_ticks_per_mm():
                                       demo_square.TICKS_PER_MM)
     assert ticks == pytest.approx(
         (demo_square.PI / 2.0) * 64.0 * demo_square.TICKS_PER_MM)
-    # sprint 005 ticket 001: ~386 ticks (was ~676.03 under sprint 004's
-    # own now-superseded TICKS_PER_MM ~6.7241).
-    assert ticks == pytest.approx(386.28, abs=0.5)
+    # sprint 006 ticket 001: ~347 ticks (was ~386.28 under sprint 005's
+    # own now-superseded TICKS_PER_MM ~3.8424).
+    assert ticks == pytest.approx(346.67, abs=0.5)
 
 
 def test_build_square_tour_shape_is_leg_pivot_interleaved_four_of_each():
@@ -117,3 +117,99 @@ def test_mean_abs_delta_averages_both_wheels():
     assert delta_left == 10.0
     assert delta_right == -6.0
     assert mean_delta == pytest.approx((10.0 + 6.0) / 2.0)
+
+
+# --- sprint 006 ticket 001: config-driven geometry -----------------------
+
+def test_geometry_from_robot_config_happy_path(tmp_path):
+    config_path = tmp_path / "robot.json"
+    config_path.write_text('{"wheels": {"wheel_diameter_mm": 100.0, '
+                            '"ticks_per_rev": 1000.0}}')
+    result = demo_square.geometry_from_robot_config(str(config_path))
+    assert result == (100.0, 1000.0)
+
+
+def test_geometry_from_robot_config_missing_file():
+    assert demo_square.geometry_from_robot_config(
+        "/does/not/exist/robot.json") is None
+
+
+def test_geometry_from_robot_config_malformed_json(tmp_path):
+    config_path = tmp_path / "robot.json"
+    config_path.write_text("not valid json {{{")
+    assert demo_square.geometry_from_robot_config(str(config_path)) is None
+
+
+def test_geometry_from_robot_config_missing_wheels_group(tmp_path):
+    config_path = tmp_path / "robot.json"
+    config_path.write_text('{"identity": {"robot_name": "x"}}')
+    assert demo_square.geometry_from_robot_config(str(config_path)) is None
+
+
+def test_geometry_from_robot_config_missing_field(tmp_path):
+    config_path = tmp_path / "robot.json"
+    config_path.write_text('{"wheels": {"wheel_diameter_mm": 90.0}}')
+    assert demo_square.geometry_from_robot_config(str(config_path)) is None
+
+
+def test_geometry_from_robot_config_non_numeric_field(tmp_path):
+    config_path = tmp_path / "robot.json"
+    config_path.write_text('{"wheels": {"wheel_diameter_mm": "ninety", '
+                            '"ticks_per_rev": 975.0}}')
+    assert demo_square.geometry_from_robot_config(str(config_path)) is None
+
+
+def test_geometry_from_robot_config_non_positive_diameter_rejected(tmp_path):
+    config_path = tmp_path / "robot.json"
+    config_path.write_text('{"wheels": {"wheel_diameter_mm": 0.0, '
+                            '"ticks_per_rev": 975.0}}')
+    assert demo_square.geometry_from_robot_config(str(config_path)) is None
+
+
+def test_geometry_from_robot_config_negative_ticks_per_rev_rejected(tmp_path):
+    config_path = tmp_path / "robot.json"
+    config_path.write_text('{"wheels": {"wheel_diameter_mm": 90.0, '
+                            '"ticks_per_rev": -1.0}}')
+    assert demo_square.geometry_from_robot_config(str(config_path)) is None
+
+
+def test_module_level_geometry_falls_back_off_device():
+    # Under CPython, _ON_DEVICE is False, so the module never attempts
+    # a real filesystem read at import time -- the fallback constants
+    # (mirroring data/zetuv.json's own stakeholder-directed 90.0 mm
+    # starting point) are used deterministically.
+    assert demo_square.GEOMETRY_SOURCE == "hardcoded fallback"
+    assert demo_square.WHEEL_DIAMETER_MM == 90.0
+    assert demo_square.EMPIRICAL_COUNTS_PER_REV == 975.0
+
+
+# --- sprint 006 ticket 001: button B single-leg entry point --------------
+
+def test_run_single_leg_refuses_off_device():
+    with pytest.raises(RuntimeError):
+        demo_square.run_single_leg()
+
+
+def test_run_single_leg_default_distance_matches_leg_distance():
+    # Button B commands the same 500 mm the square tour's own legs use
+    # (data/zetuv.json's own _wheels_note / this ticket's own acceptance
+    # criteria: "exactly 500 mm commanded").
+    import inspect
+    sig = inspect.signature(demo_square.run_single_leg)
+    assert sig.parameters["distance_mm"].default == demo_square.LEG_DISTANCE_MM
+    assert demo_square.LEG_DISTANCE_MM == 500.0
+
+
+# --- sprint 006 ticket 001: auto-run trigger ------------------------------
+
+def test_module_does_not_auto_run_on_plain_import():
+    # A plain `import demo_square` (this test file's own top-level
+    # import, and main.py's own sys.modules.pop(...) + import pattern)
+    # must never itself invoke run()/run_single_leg() -- __name__ is
+    # "demo_square" for any import, never "__main__", by Python's own
+    # guaranteed import semantics. This module has no diffdrive
+    # available off-device anyway, so an accidental auto-run would have
+    # raised RuntimeError at import time and this whole test file would
+    # already have failed to collect -- this test makes that guarantee
+    # explicit rather than relying on it being an accidental side effect.
+    assert demo_square.__name__ == "demo_square"

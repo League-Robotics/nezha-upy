@@ -1887,3 +1887,346 @@ documentation. `python3 -m pytest tests/`, `py_compile`, and
    stakeholder's own physical A press. No source changes were needed
    this session — commit `c62f4b4`'s software fix stood as-is; only
    the deploy and bench documentation happened here.
+
+---
+
+# Sprint 006 ticket 001 session: 90 mm wheels, button B 50 cm drive,
+# config-driven geometry — software complete and gated; bench
+# re-verify BLOCKED, zetuv not physically connected
+
+Sprint 006, ticket 001 (`clasi/sprints/
+006-zetuv-90mm-wheels-and-button-b-50cm-drive/tickets/
+001-90-mm-wheels-button-b-50-cm-drive-config-driven-geometry.md`),
+issue `clasi/issues/zetuv-90mm-wheels-button-b-50cm-calibration.md`.
+Stakeholder, live at the bench, on branch
+`sprint/006-zetuv-90mm-wheels-and-button-b-50cm-drive`: "set up its
+wheels to be 90 mm... set the B button to cause it to drive forward
+50 cm" — an explicit measure-and-adjust calibration loop.
+
+## 45. Fleet check — zetuv NOT connected, verified BEFORE any deploy
+## step (this project's own hard rule)
+
+Per this ticket's own explicit instruction ("verify enumeration BEFORE
+deploying anything") and this project's established hardware-fault
+discipline (sprint 005 Sec 39/41's own precedent), the fleet was
+checked FIRST, before touching any source file's on-device copy:
+
+```
+$ mbdeploy list
+```
+`getez` (`/dev/cu.usbmodem214102`, RADIOBRIDGE relay), `zavaz`
+(`/dev/cu.usbmodem2121302`, RADIOBRIDGE relay), `tovez`
+(`/dev/cu.usbmodem2121102`, NEZHA2), `vevov` (`/dev/cu.usbmodem2121202`,
+NEZHA2) all connected. **`zetuv` (UID
+`9906360200052820312bde85515a72e6000000006e052820`) shows `CONN: no`,
+no port.**
+
+Not treated as a transient glitch — re-checked with independent
+evidence, matching sprint 005's own precedent exactly:
+1. `mbdeploy list` re-run 3 s later: identical result.
+2. `mbdeploy probe` (a full live re-scan, not a registry read):
+   identical result — zetuv still not connected.
+3. Raw OS-level serial enumeration (`ls -la /dev/cu.usbmodem*`): exactly
+   4 ports, matching getez/zavaz/tovez/vevov 1:1 — no 5th port for
+   zetuv.
+4. Independent cross-check via a completely different USB interface
+   (`pyocd list`, the CMSIS-DAP debug probe, not the CDC serial console
+   `mbdeploy`/`mpremote` use): exactly 4 debug probes, UIDs matching
+   getez/tovez/vevov/zavaz exactly. Zetuv's UID does not appear.
+
+Two independent USB interfaces (serial CDC and CMSIS-DAP) both agree:
+**zetuv's physical micro:bit is not connected to this machine at all
+this session.** Not a stale registry, not an `mbdeploy`-level bug, not
+resolved by re-probing. `getez`/`zavaz`/`tovez`/`vevov` were never
+touched at any point this session beyond these read-only enumeration
+commands — no deploy, no reset, no REPL session, no motor command was
+ever issued against ANY device this session.
+
+**No further recovery attempted**, per this project's own hard rule for
+hardware faults (STOP, record, throw an exception) and its "never touch
+getez/zavaz" / "zetuv ONLY" discipline. Per this same project's own
+established precedent for this exact "software complete, hardware
+blocked" situation (sprint 004 Sec 29-31, sprint 005 Sec 37-40), the
+offline-verifiable software work below was completed, tested, and
+committed in full — nothing about it depends on bench access, and
+completing it now means the remaining bench-verification-only steps are
+the ONLY thing blocked once zetuv is reconnected.
+
+## 46. Software work — `data/zetuv.json` wheel diameter
+
+`wheels.wheel_diameter_mm`: 80.77 → 90.0 (stakeholder-directed
+calibration starting point, 2026-08-19 — an explicit ITERATION POINT,
+not a claimed-final value, per the ticket's own framing). `ticks_per_rev`
+UNCHANGED at 975.0 (sprint 004's own bench-proven empirical
+counts/wheel-revolution anchor). `ticks_per_mm` recomputed:
+`975.0 / (pi * 90.0) ≈ 3.4484` (was 3.8424). Full provenance note
+updated in place, prior (sprint 005) text preserved for history inside
+the new note, per this file's own established append-don't-rewrite
+convention. Calibration formula recorded directly in the JSON's own
+note AND here, per the ticket's explicit instruction:
+
+    new_diameter_mm = 90 x (measured_travel_mm / 500)
+
+`python3 -c "import json; json.load(open('data/zetuv.json'))"` confirms
+the file stays valid JSON. Per `tests/test_robot_config_data.py`'s own
+documented schema-validation note (`data/robot_config.schema.json`
+doesn't model the `wheels` group at all — a pre-existing "known gap",
+not something this ticket changed), the hand-rolled
+`test_robot_files_match_schema_field_constraints` check (the actual
+"validates against schema" acceptance criterion this repo enforces, NOT
+a whole-document `jsonschema.validate()`) does not even inspect
+`wheels` — this change is trivially outside its scope and cannot break
+it; confirmed by the full suite passing (Sec 49 below).
+
+## 47. Software work — config-driven geometry: why NOT
+## `config.load_robot_config()`, concretely
+
+Read `src/config.py` and `data/zetuv.json` closely before choosing an
+approach, per this ticket's own "ground feasibility in what actually
+works" instruction. Two independent, concrete, bench-grounded reasons
+rule out gating the geometry read behind
+`config.load_robot_config()`, either of which alone would already be
+disqualifying:
+
+1. Sprint 003's own bench pass (Sec 17 above) found zetuv's resident
+   FROZEN `config` module is a STALE STUB on the currently-deployed
+   firmware image — `config.load_robot_config` does not exist as an
+   attribute at all (`AttributeError`). No rebuild/reflash has happened
+   in any session since (sprints 004/005 both explicitly note
+   filesystem-copy-only deploys, no `build.sh` step) — this remains the
+   resident image's state; not re-probed fresh this session only
+   because zetuv was not connected at all (Sec 45).
+2. Even on a hypothetically rebuilt, current `config` module,
+   `load_robot_config()` would STILL be structurally unusable for
+   zetuv's own config: `config.REQUIRED_KEYS` demands
+   `motors.travel_calib_left`/`travel_calib_right` and all 15
+   `wheel_control` fields as a whole-document fail-closed precondition,
+   and zetuv's config deliberately omits `travel_calib_left`/`right`
+   (sprint 002's own no-calibration scope decision, unchanged and out
+   of this ticket's scope to revisit). Gating the `wheels` group's
+   two-field read behind that whole-document gate would make the read
+   ALWAYS fail on zetuv's own config specifically — defeating this
+   ticket's own stated goal ("each future calibration iteration =
+   re-copy robot.json ONLY") before it could ever help.
+
+This ticket's own acceptance criteria explicitly offer an alternative
+for exactly this situation ("via `config.load_robot_config()` **or an
+equivalent lightweight parse**"). Implemented: `src/demo_square.py`'s
+new `geometry_from_robot_config()` — a narrow, fail-SOFT (never raises,
+returns `None` on any problem) parse of ONLY
+`wheels.wheel_diameter_mm`/`wheels.ticks_per_rev`, with a hardcoded
+fallback (90.0 mm / 975.0 counts/rev, mirroring `data/zetuv.json`'s own
+updated values) on any failure. Full reasoning recorded in
+`src/demo_square.py`'s own module docstring ("Config-driven geometry"
+section) for future readers, not just here.
+
+**Where the read happens, and why**: inside `demo_square.py` itself,
+re-executed at every fresh `sys.modules.pop("demo_square", None) +
+import demo_square` `main.py` already does on EVERY button press
+(unchanged mechanism from sprint 003). This means both button A (square
+tour) and the new button B (single leg) re-read `/robot.json`'s current
+geometry on every press, not just once at boot — a STRONGER guarantee
+than a literal one-time "at startup" read, and the one that actually
+delivers the ticket's own "re-copy robot.json ONLY" iteration goal: a
+stakeholder edits `data/zetuv.json`, regenerates the stripped
+`robot.json`, copies it to the device, and the very next press (either
+button) picks it up with no redeploy/reset needed.
+
+## 48. Software work — button B handler, single-leg primitive reuse,
+## and the auto-run trigger redesign this required
+
+`src/demo_square.py`: added `run_single_leg(distance_mm=LEG_DISTANCE_MM,
+ticks_per_mm=TICKS_PER_MM)` — reuses the SAME
+`_configure_and_start()`/`_leg_ticks()`/`_run_segment()` pieces `run()`
+already uses for every leg (factored `_configure_and_start()` out of
+`run()` so both entry points share the identical
+configure/begin/start bracketing, byte-for-byte, rather than risking
+drift between two copies). No new drive logic — this ticket's own
+explicit "reuse, don't reimplement" instruction, satisfied literally.
+
+**A real design problem surfaced implementing this, worked through
+methodically, not guessed at**: `demo_square.py`'s existing bottom
+trigger (`if _ON_DEVICE: run()`, unconditional) meant ANY import —
+fresh or not — ran the FULL square tour as a side effect. Adding a
+second, distinct behavior (`run_single_leg()`) that must be selectable
+PER PRESS broke this premise: MicroPython's `import` statement takes no
+arguments, so there is no way to tell a bare `import demo_square` which
+behavior to run. Considered and rejected: stashing a mode flag on a
+shared module (e.g. `sys`) before each import — works, but is an
+unusual, harder-to-read idiom for a problem with a cleaner fix.
+**Chosen fix**: stop relying on import's own side effect entirely.
+`main.py`'s `run_tour()`/`run_straight_drive()` now call
+`demo_square.run()`/`demo_square.run_single_leg()` EXPLICITLY after
+their own `sys.modules.pop(...) + import demo_square` — production
+button A/B behavior therefore does not depend on what a bare import
+does by itself AT ALL. The bottom of `demo_square.py` keeps a
+convenience auto-run for the STANDALONE bench-debug entry point this
+project has used throughout (`mpremote ... run src/demo_square.py`),
+now gated `if __name__ == "__main__":` rather than `_ON_DEVICE` alone —
+this guard is PROVABLY never true for `main.py`'s own import-based
+calls (Python's `import` statement guarantees `__name__` is set to the
+module's own name, `"demo_square"`, for every import, on any Python
+implementation — confirmed directly, not assumed, via
+`tests/test_demo_square.py::test_module_does_not_auto_run_on_plain_import`
+and by the simple fact that this test file's own top-level `import
+demo_square` would already have raised `RuntimeError` at collection
+time — no `diffdrive` off-device — if the old unconditional trigger
+were still in place; the full suite collecting and passing (Sec 49) is
+itself evidence the guard change works as intended for the import
+path).
+
+**Disclosed, not bench-verified this session**: whether `mpremote ...
+run <file>.py` itself executes with `__name__ == "__main__"` — needed
+only for the STANDALONE bench-debug convenience path, NOT for
+production button A/B behavior (which never depends on it). Reasoned
+from existing bench evidence already in this file (sprint 003's own
+Sec 20-21: the REPL verification scripts had to explicitly override
+`__name__` to `"verify"` specifically because the REPL's own default
+execution namespace already has `__name__ == "__main__"`, and
+`mpremote ... run` sends a file's source through that same raw-REPL
+execution mechanism) but genuinely not independently confirmed this
+session — zetuv was not connected at all (Sec 45). If this reasoning
+turns out wrong, the only failure mode is the standalone
+`mpremote run src/demo_square.py` convenience silently doing nothing
+(non-destructive, trivially diagnosed with a one-line `print(__name__)`
+probe, the same technique already used for `main.py`'s own `__name__`
+verification) — flagged plainly here and in `src/demo_square.py`'s own
+module docstring for whoever next has bench access to confirm directly,
+before or as part of the bench-verification steps below.
+
+`src/main_zetuv_demo.py`: added `button_b` import, `Image.ARROW_E` as
+the button-B display indicator (distinct from button A's `Image.HEART`,
+per the acceptance criteria), `STRAIGHT_DRIVE_DISTANCE_MM = 500.0`,
+`run_straight_drive()`, `on_button_b()` (mirrors `on_button_a()`'s
+shape exactly — indicator, drive, fault-guarded, clear,
+`KeyboardInterrupt` always re-raised), and `run()`'s idle loop now polls
+`button_b.was_pressed()` alongside `button_a.was_pressed()`, same
+ready/not-ready gating. `run_tour()` updated to call
+`demo_square.run()` explicitly (see above); its own docstring and two
+other stale-comment sites (`manifest.py`, `tests/test_manifest_freeze.py`)
+were updated to stop describing the old "bare import auto-runs the
+tour" mechanism as current, since it no longer is.
+
+## 49. Offline gate
+
+```
+$ python3 -m pytest tests/ -q
+216 passed, 518 subtests passed in 0.21s
+```
+204 baseline + 12 new tests: 8 covering `geometry_from_robot_config()`'s
+happy path and every disclosed failure mode (missing file, malformed
+JSON, missing group, missing field, non-numeric, non-positive diameter,
+negative ticks_per_rev) per this ticket's own Testing section
+suggestion; 1 confirming the off-device fallback constants
+(`GEOMETRY_SOURCE == "hardcoded fallback"`, 90.0/975.0); 1 confirming
+`run_single_leg()`'s own off-device `RuntimeError` contract (mirrors
+`run()`'s own existing test); 1 confirming `run_single_leg()`'s default
+distance matches `LEG_DISTANCE_MM` (500.0); 1 confirming the `__name__`
+guard's import-path behavior directly. Two existing tests
+(`test_leg_ticks_matches_distance_times_ticks_per_mm`,
+`test_pivot_ticks_matches_arc_length_times_ticks_per_mm`) updated to the
+new live `TICKS_PER_MM`/pivot-tick values (~3.4484/~346.67, was
+~3.8424/~386.28), per this ticket's own instruction that stale
+constant-dependent tests follow the live value.
+
+```
+$ python3 -m py_compile src/demo_square.py src/main_zetuv_demo.py manifest.py tests/test_demo_square.py tests/test_manifest_freeze.py
+```
+Clean.
+
+```
+$ micropython-microbit-v2/lib/micropython/mpy-cross/mpy-cross -o /tmp/demo_square.mpy src/demo_square.py
+$ micropython-microbit-v2/lib/micropython/mpy-cross/mpy-cross -o /tmp/main_zetuv_demo.mpy src/main_zetuv_demo.py
+```
+Both clean (mpy-cross located directly under
+`micropython-microbit-v2/lib/micropython/mpy-cross/mpy-cross`, not on
+`$PATH` this session, matching sprint 005's own precedent).
+
+```
+$ git diff --exit-code -- vendor/
+```
+Clean — `vendor/` untouched.
+
+## 50. Device state — unchanged (no device touched this session)
+
+No `mpremote`/`pyocd` command was ever issued against `zetuv`, `tovez`,
+`vevov`, `getez`, or `zavaz` this session beyond the read-only
+enumeration commands in Sec 45 — no deploy, no reset, no REPL session,
+no motor command. zetuv's own last-known-good state (armed idle loop,
+end of sprint 005's own session, Sec 43) is exactly as this session
+found it — still not physically connected to this machine.
+
+## Summary for future readers / whoever picks up the bench-verify
+
+1. **Software complete, tested, and committed**: `data/zetuv.json`'s
+   `wheel_diameter_mm` → 90.0 (stakeholder-directed iteration point);
+   `src/demo_square.py` gets config-driven geometry
+   (`geometry_from_robot_config()`, fail-soft, narrow parse — NOT
+   `config.load_robot_config()`, for two concrete, disclosed reasons)
+   and a new `run_single_leg()` entry point reusing the existing
+   encoder-terminated, lease-refreshed primitive; `src/
+   main_zetuv_demo.py` gets a button-B handler
+   (`Image.ARROW_E` → 500 mm straight → idle) built on top of it.
+   `python3 -m pytest tests/` green (216, up from 204 baseline);
+   `py_compile`/`mpy-cross` clean; `vendor/` untouched.
+2. **Bench re-verification BLOCKED**: zetuv is not physically connected
+   to this machine — confirmed via two independent USB interfaces
+   (serial CDC and CMSIS-DAP), re-checked twice, not a transient
+   glitch, matching sprint 005's own exact precedent. `getez`/`zavaz`/
+   `tovez`/`vevov` present and untouched.
+3. **One disclosed, not-yet-bench-verified design assumption**: whether
+   `mpremote ... run <file>.py` executes with `__name__ == "__main__"`
+   (affects ONLY the standalone bench-debug convenience path for
+   `demo_square.py`, not production button A/B behavior, which calls
+   its target function explicitly either way) — reasoned from existing
+   bench evidence, flagged for direct confirmation once bench access is
+   restored.
+4. Escalated via `throw_ticket_exception` for the stakeholder (at the
+   bench) to reconnect zetuv — the remaining acceptance criteria
+   (REPL-invoked bench re-run of both handlers: B's ≈1724-tick delta and
+   straightness, A's legs also ≈1724 ticks/pivots ≈347, clean
+   stop-verify, device left armed) can be completed in a follow-up pass
+   without repeating any of the software work above.
+
+## 51. OOP session (sprint 006 nuked): deploy + bench-verify of the 90 mm / button-B work
+
+Stakeholder ended sprint 006 mid-flight ("this is ridiculous") and opted
+out of process (`clasi oop on`, 8 h). The interrupted programmer's
+software work (Secs 46–50) was recovered from the working tree intact —
+216 tests green — and finished out-of-process by the team-lead directly.
+
+**New on-device finding**: this image ships NEITHER `json` NOR `ujson`
+(`help('modules')` on zetuv) — the deployed `demo_square.py`'s
+`import ujson`/`json` fallback chain raised `ImportError` at first
+on-device import. This also means the frozen `config` module's own
+`ujson` import path has never been executable on this image (consistent
+with Sec 17's stale-frozen-modules finding). Fix (committed):
+`geometry_from_robot_config()` now uses a dependency-free two-key string
+scan (`_scan_number()`) of the compact deployed `/robot.json` — no JSON
+parser needed; both keys appear exactly once in the deployed config.
+All 8 geometry tests pass unchanged (216 total).
+
+**Deploy**: stripped copies of `robot.json` (2414 B), `demo_square.py`
+(6858 B), `main.py` (2350 B) → zetuv at `/dev/cu.usbmodem2121402`
+(UID-verified; the USB drop Secs 45/50 recorded was transient —
+third flake today).
+
+**On-device geometry verification**: `GEOMETRY_SOURCE: robot.json`,
+`TICKS_PER_MM: 3.448357`, 500 mm → 1724.179 ticks. Config-driven read
+is LIVE: future calibration iterations are a robot.json re-copy only.
+
+**Button-B drive verification** (REPL-invoked `main.on_button_b()` —
+the exact production path): target 1724.2 ticks → delta_left 1600.0,
+delta_right 1936.0, mean 1768.0 (+2.5%), reached True, 2250 ms, clean
+stop (appliedDuty 0/0, velocity 0/0, no watchdog fault). Known
+right-outpaces-left asymmetry visible (±10% per wheel around the mean):
+the run will veer slightly left — stakeholder should measure distance
+along the robot's actual path.
+
+**Device state**: reset, re-armed at the idle breathing prompt.
+A = square tour (legs now also 1724 ticks), B = 50 cm straight.
+
+**Calibration loop reminder**: after a button-B run, measure actual
+travel X mm; next `wheel_diameter_mm = 90 × (X / 500)`. Edit
+`data/zetuv.json`, re-strip + re-copy `/robot.json`, reset. No code
+changes needed.
