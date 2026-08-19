@@ -73,46 +73,64 @@ Per stakeholder decision 2026-08-19 (`docs/design/specification.md`
   only**, never by copying to a mounted drive letter (radio-robot bench
   convention; a UID-targeted deploy is unambiguous about which micro:bit
   on the bench gets flashed).
+- **On-device robot JSON** (ticket 010): copy `data/tovez.json`'s
+  content onto the device filesystem as `/robot.json` — this is a
+  filesystem-content step, separate from flashing the hex (the built
+  image is robot-agnostic; `boot.py` reads whichever robot's JSON is
+  present at this one fixed path — see `src/boot.py`'s own module
+  docstring). Without it, boot still completes (fail-closed: comms/
+  banner/READY still come up, motion is refused) but every step below
+  that needs real motion (A.4 onward) will not move.
 - **Settle**: wait **~5 s** after `mbdeploy` reports success before
   opening a REPL or expecting a radio/WiFi response.
 - **WiFi module**: **power-cycle it** before any step that touches the
   WiFi transport (step A.7 below) — its AT state persists across nRF
   reflashes, so a fresh flash of the micro:bit does **not** reset it.
 
-### A.3 Known gap: no on-device boot script ships yet
+### A.3 Boot wiring assembles the engine automatically at power-on
 
-Flagging this here, once, rather than silently discovering it partway
-through the ladder: **this repo does not yet ship a `main.py`/`boot.py`
-that assembles the pieces into a running image at power-on.** Each
-piece is built and independently tested, but nothing currently wires
-them together on the device:
+Ticket 010 closed the gap this section used to document (the section
+below is what replaced it — kept at the same heading number since every
+later step in this document cross-references "A.3"). The image now
+boots directly into the v5 engine: a frozen `src/boot.py` (grounded
+against `micropython-microbit-v2/src/codal_port/main.c`'s actual boot
+sequence, not assumed to be a conventional `main.py` — see that
+module's own docstring for the full mechanism) runs automatically on
+every power-on, before the REPL loop starts:
 
-- `config.load_robot_config("/tovez.json")` +
-  `config.diffdrive_configure_kwargs(robot_config)` →
-  `diffdrive.configure(**kwargs)` (the composition `config.py`'s own
-  docstring names as "boot code does...", but no boot code exists in
-  this repo yet to do it).
-- `comms.PumpTimer.__init__(self, comms, now_fn)`'s own docstring:
-  the periodic source that drives `tick()` is "deliberately NOT
-  hard-coded to a specific peripheral API here ... whichever a later
-  ticket wires up" — no ticket has wired it up yet.
-- `motion.RobotDispatch`'s own docstring names it "the single composite
-  object wired as `comms.Comms(..., dispatch=...)`" — again, describing
-  the intended composition, not a file that performs it.
+1. Loads the robot's JSON config, fail-closed.
+2. `diffdrive.configure/begin/start` — only if the config loaded
+   successfully.
+3. Brings up `comms.Comms` + the radio transport unconditionally; brings
+   up the WiFi transport only when `wifi_secrets.json` is present.
+   Also wires `motion.RobotDispatch` (`motion.MoveQueue` +
+   `config.ConfigDispatch`) as the dispatch, so MOVE/WHEELS/STOP/ESTOP/
+   GO_TO/CALIBRATE verbs reach the kernel directly, with no manual
+   step — replacing `NullDispatch`, which used to leave every wire
+   client's motion commands acked-never/dropped until someone typed the
+   composition at the REPL.
+4. Starts the scheduled pump, wired to `microbit.run_every()` (the
+   port's own periodic-callback mechanism — no native timer change was
+   needed; see `boot.py`'s own docstring for why this hook is safe:
+   `PumpTimer.tick()` only ever queues work via
+   `micropython.schedule()`, matching the landmine ledger's
+   never-run-Python-from-an-IRQ-directly rule).
+5. Emits banner/boot/READY.
 
-**Practical effect**: step A.4 (REPL wheel spin) and the busy-wait leg
-of step A.5 (safety triple) need only the `diffdrive`/`robotio` native
-modules, which are always present — unaffected by this gap. Steps A.6
-onward (`rogo repl ... ping` through the relay, `wifi_bench_gate`,
-`move_protocol_bench`, the M6 sweep) need the v5 engine
-(`comms.Comms` + a transport + a pump) actually running on the device,
-which today means typing the composition above at the REPL each bench
-session (or writing a bench-local `main.py` on the device filesystem —
-the filesystem is reserved for exactly this, per spec §7.4 — which is
-outside this doc-only ticket's scope to author). This is flagged, not
-fixed, here; it is a reasonable candidate for a follow-on ticket, since
-PLAN.md's M3–M6 gates assume an image that reaches this state on its
-own.
+**Practical effect on this ladder**: every step below (A.4 onward) now
+just requires power-on-and-verify — **no REPL assembly step, and no
+bench-local `main.py`, is needed any more.** The one remaining bench
+precondition (not a wiring gap, a data precondition — see A.2's own
+bullet) is that the bench robot's JSON content is present on the
+device filesystem at `/robot.json` before power-on; `boot.py`'s own
+module docstring records why that path is fixed and robot-agnostic
+(the built hex itself carries no per-robot data — `build.sh` has no
+per-robot flag — so per-robot specialization is entirely a filesystem
+concern, decided at bench-flash time). Absent or invalid `/robot.json`
+does not brick the bench: boot falls back to its fail-closed path
+(comms/banner/READY still come up, radio still registers, motion is
+simply refused) — exercised directly by A.5's own safety cases, not a
+new hardware step this document adds.
 
 ### A.4 Step 1 — REPL wheel spin (smallest-visible-pulse first)
 
@@ -143,7 +161,13 @@ that same file (`travel_calib_left`/`travel_calib_right` = 0.7837).
 *first* pulse — raise it once motion direction/sign is confirmed sane.
 (For the real per-robot config-driven values, `diffdrive_configure_kwargs()`
 in `src/config.py` computes exactly this dict from
-`config.load_robot_config()` — see A.3's gap note; the values above are
+`config.load_robot_config()` — `boot.py` already runs this exact
+composition automatically at power-on (A.3), so a freshly-booted device
+with `/robot.json` present has already been configured/begun/started
+before you ever open a REPL; the manual commands below are still useful
+as a from-scratch REPL-only smoke test that deliberately bypasses
+config.py/boot.py, e.g. after a bare `diffdrive.estop()` or to try
+values other than the baked config's own. The values above are
 hand-derived from `data/tovez.json` for this first manual check.)
 
 **Expected observation**: both wheels turn slowly and briefly (the
@@ -158,9 +182,11 @@ gradually (per PLAN.md's verification note: smallest-visible-pulse
 first), and confirm **encoder counts advance with the correct sign**
 per wheel — `diffdrive.output()`'s per-wheel position fields, read
 independently of the REPL command that issued the drive (i.e. via a
-transport other than the one that issued the command, once A.3's
-wiring is up — for this REPL-only step, reading `output()` right after
-the drive call from the same session is the practical minimum).
+transport other than the one that issued the command, e.g. a `rogo
+repl ... ping`/`STATUS` read over the radio transport A.3's boot
+wiring already registers — for this REPL-only step, reading `output()`
+right after the drive call from the same session is the practical
+minimum).
 **Explicit stop-verify**: after the lease expires, re-read
 `diffdrive.output()`'s position fields twice, 2 s apart, and confirm
 Δposition = 0 both wheels.
@@ -248,10 +274,11 @@ own error-flows line is explicit: "none tolerated."
 
 ### A.6 Step 3 — `rogo repl <robot> ping` through the relay, unchanged host tooling
 
-**Preconditions**: A.3's wiring gap addressed for this session (v5
-engine running on the device with a radio transport registered); relay
-running on the host per radio-robot's own bench conventions; robot JSON
-channel matches A.2 (3).
+**Preconditions**: none beyond A.2's fixture (`/robot.json` present,
+power-on-and-settle done) — the v5 engine with a radio transport
+registered is already running by the time you reach this step, per
+A.3's boot wiring; relay running on the host per radio-robot's own
+bench conventions; robot JSON channel matches A.2 (3).
 
 **Command** (run from the host, in radio-robot, completely unchanged
 tooling): `rogo repl tovez ping`
@@ -270,12 +297,16 @@ lookup failed (unexpected line framing) rather than a radio problem.
 ### A.7 Step 4 — `wifi_bench_gate.py --port wifi: --skip-drive` 9/9
 
 **Preconditions**: A.2's WiFi power-cycle discipline done *first*;
-`wifi_secrets.json` present locally (gitignored, per CLAUDE.md); A.3's
-wiring extended to also register a `wifi_at.WifiAtLink` transport on
-the UDP v5 plane, per `src/wifi_at.py`'s own module docstring (single-
-context module access — `WifiAtLink.service()`/the module-level
-`pump()` called only from the same scheduled-pump context `comms.py`'s
-`PumpTimer` uses, never from an IRQ/VM hook).
+`wifi_secrets.json` present **on the device filesystem** at bench time
+(gitignored, per CLAUDE.md — this is the on-device copy `boot.py`'s
+own step 3 checks for, distinct from a local copy on your dev machine).
+Its presence at power-on is what `boot.py` uses to decide whether to
+register a `wifi_at.WifiAtLink` transport on the UDP v5 plane at all
+(A.3) — no separate registration step is needed here. `WifiAtLink`'s
+own single-context-module-access discipline
+(`service()`/the module-level `pump()` called only from the scheduled-
+pump context, never an IRQ/VM hook) is what `boot.py`'s `_BootPumpTimer`
+composes on top of `comms.PumpTimer`'s own tick.
 
 **Command** (host tooling, radio-robot): `wifi_bench_gate.py --port
 wifi: --skip-drive`, with a live `nc` REPL session (the TCP stdio-REPL
@@ -297,12 +328,14 @@ capturing precisely if seen).
 
 ### A.8 Step 5 — `move_protocol_bench.py` full pass over the radio path
 
-**Preconditions**: A.6's radio path already confirmed live; A.3's
-wiring includes `motion.RobotDispatch` (backed by a real
-`motion.MoveQueue(diffdrive)` and `config.ConfigDispatch`) as the
-`comms.Comms(..., dispatch=...)` argument, so MOVE/WHEELS/STOP/ESTOP/
-GO_TO/CALIBRATE verbs actually reach the kernel rather than falling
-through to `NullDispatch`.
+**Preconditions**: A.6's radio path already confirmed live. `boot.py`
+already wires `motion.RobotDispatch` (a real `motion.MoveQueue(diffdrive)`
++ `config.ConfigDispatch`) as `comms.Comms`'s dispatch whenever
+`/robot.json` loaded successfully (A.3), so MOVE/WHEELS/STOP/ESTOP/
+GO_TO/CALIBRATE verbs already reach the kernel — falling through to
+`NullDispatch` at this point in the ladder would mean `/robot.json` was
+missing or invalid; re-check A.2's fixture step if this stage's motion
+commands ack but nothing moves.
 
 **Command** (host tooling, radio-robot): `move_protocol_bench.py`, full
 pass, over the radio path (not WiFi — this is the primary-transport
@@ -557,8 +590,16 @@ client drives):
 - `comms.py`/`radio_shim.py`/`wifi_at.py` — the v5 protocol engine, the
   radio transport, and the WiFi AT state machine + UDP v5 plane. These
   are what a wire client (rogo, the relay, the bench-gate scripts)
-  actually talks to; see Part A §A.3 for the current on-device-wiring
-  gap.
+  actually talks to; `src/boot.py` assembles all three (plus the
+  scheduled pump) into a running image automatically at power-on — see
+  Part A §A.3.
+- `boot.py` (sprint 001 ticket 010) — the frozen boot module that
+  performs this assembly: fail-closed config load, diffdrive arm,
+  comms/transport/dispatch wiring, scheduled-pump start, banner/READY.
+  Not directly "called" by a student or a wire client at all — it runs
+  once, automatically, before the REPL loop starts. See its own module
+  docstring for the full six-step sequence and the grounding evidence
+  for why it is a plain frozen module (not a `main.py`).
 
 ### B.5 One fact that changes how you iterate
 

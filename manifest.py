@@ -41,10 +41,19 @@
 # (grepped, confirmed), and every byte of frozen ROM is scarce on this
 # build (MICROBIT_HEAP_SIZE is cut to 40 KB, spec Sec 7.4, to buy CODAL
 # headroom) -- freezing unused stock example code has no upside here.
+#
+# `boot.py` (sprint 001 ticket 010) is frozen here like every other
+# module -- NOT run automatically by virtue of being frozen (see its own
+# module docstring: `micropython-microbit-v2`'s `mp_main()` only
+# auto-execs a FILESYSTEM `main.py`, never a frozen one). `build.sh`'s
+# own "Wire the frozen boot module into main.c's power-on sequence" step
+# patches `main.c` to `mp_import_name()` this module and call its
+# `run()` explicitly.
 
 freeze(
     "../../../src",
     (
+        "boot.py",
         "comms.py",
         "config.py",
         "line.py",

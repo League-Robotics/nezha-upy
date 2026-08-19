@@ -1408,6 +1408,67 @@ echo "=== Step 13c: Freeze this repo's src/*.py modules (manifest.py, M5 stabili
 cp manifest.py "$MP_DIR/src/codal_port/manifest.py"
 echo "  codal_port/manifest.py replaced with this repo's own freeze list"
 
+echo "=== Step 13d: Wire the frozen boot module into main.c's power-on sequence ==="
+# Sprint 001 ticket 010: mp_main()'s existing main.py hook
+# (mp_import_stat(main_py) == MP_IMPORT_STAT_FILE) is a direct,
+# unconditional call to uos_mbfs_import_stat() -- the on-device
+# FILESYSTEM stat, with no frozen-module fallback (verified by reading
+# main.c/microbitfs.c directly, per this ticket's own instruction not to
+# assume main.py is correct by convention). A frozen main.py would
+# therefore never be found by that check. Instead, this step patches
+# main.c to explicitly mp_import_name() the frozen `boot` module and
+# call its run() -- placed right after mp_init() and BEFORE the existing
+# main.py-or-`from microbit import *` branch, so a student's own
+# filesystem main.py (the standard drag-and-drop workflow) still runs
+# afterward, on top of an already-assembled engine, unchanged. Own
+# nlr_push/nlr_pop pair (mirrors microbit_pyexec_file()'s own pattern in
+# this same file) is the last-resort safety net: boot.py's own run()
+# already catches its documented fail-closed case (a bad/missing robot
+# config) internally and never raises for it, but ANY other exception
+# here is caught, printed, and never blocks the REPL that starts right
+# after (this ticket's own "boot must not block" acceptance criterion).
+# Unconditional (not gated on --with-diffdrive/--with-wifi), matching
+# Step 13c's own manifest-freeze precedent: boot.py itself is import-
+# guarded against a missing diffdrive/microbit/wifiuart module, so it
+# degrades safely in any build variant.
+python3 - << 'PYEOF'
+path = "micropython-microbit-v2/src/codal_port/main.c"
+with open(path) as f:
+    src = f.read()
+if "MP_QSTR_boot" not in src:
+    old = "        gc_init(heap, heap + sizeof(heap));\n        mp_init();"
+    new = (
+        old + "\n"
+        "\n"
+        "        {\n"
+        "            // Boot Wiring (sprint 001 ticket 010): run the frozen\n"
+        "            // `boot` module before anything else -- assembles\n"
+        "            // config/diffdrive/comms/transports/pump into a running\n"
+        "            // image at power-on. See src/boot.py's own module\n"
+        "            // docstring for why this call site (not a frozen\n"
+        "            // main.py) is the correct hook.\n"
+        "            nlr_buf_t boot_nlr;\n"
+        "            if (nlr_push(&boot_nlr) == 0) {\n"
+        "                mp_obj_t boot_module = mp_import_name(MP_QSTR_boot, mp_const_empty_tuple, MP_OBJ_NEW_SMALL_INT(0));\n"
+        "                mp_obj_t boot_run = mp_load_attr(boot_module, MP_QSTR_run);\n"
+        "                mp_call_function_0(boot_run);\n"
+        "                nlr_pop();\n"
+        "            } else {\n"
+        "                mp_obj_print_exception(&mp_plat_print, MP_OBJ_FROM_PTR(boot_nlr.ret_val));\n"
+        "            }\n"
+        "        }"
+    )
+    if old in src:
+        src = src.replace(old, new)
+        with open(path, 'w') as f:
+            f.write(src)
+        print("  boot module wired in after mp_init() in main.c")
+    else:
+        print("  WARNING: main.c's gc_init()/mp_init() sequence did not match expected form -- boot module NOT wired, patch this by hand")
+else:
+    print("  main.c already patched for the boot module")
+PYEOF
+
 echo "=== Step 14: Build ==="
 # codal_cmake downloads CODAL libraries and configures cmake (first run only).
 # codal_build compiles everything and links with libmicropython.a -> MICROBIT.hex
