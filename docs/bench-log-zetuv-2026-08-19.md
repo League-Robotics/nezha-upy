@@ -662,3 +662,357 @@ for every framework module.
    the debug probe did not clear it, but a full reflash of the
    already-built hex did (§12). Flagged for whoever next investigates
    the comms/transport wiring — not understood, only worked around.
+
+---
+
+# Sprint 003 ticket 001 session: on-device `main.py`, button A → heart
+# → square tour
+
+Sprint 003, ticket 001
+(`clasi/sprints/003-button-a-square-tour-trigger-on-zetuv/tickets/
+001-on-device-main-py-button-a-heart-square-tour.md`). Same date, same
+physical device (`/dev/cu.usbmodem2121202`, UID
+`9906360200052820312bde85515a72e6000000006e052820`). `mbdeploy list`
+re-confirmed at the start of this session and again immediately before
+every deploy step: `getez`/`zavaz` both still `RADIOBRIDGE` relays
+(plus a fourth, unrelated device `vevov` now visible on the bus —
+never touched, never a deploy target, `--force-relay` never passed).
+
+## 17. Resident-image probe — `boot`/`config` found stale, `demo_square`
+## absence is expected (not stale), decision: NO REFLASH
+
+Per this ticket's own "probe first" discipline, checked the resident
+image directly before considering any rebuild:
+
+```
+$ mpremote ... exec "import boot; print(sorted(dir(boot)))"
+['__class__', '__name__', '_time', 'comms', 'diffdrive', 'microbit']
+$ mpremote ... exec "import config; print(sorted(dir(config)))"
+['__class__', '__name__']
+$ mpremote ... exec "import config; config.load_robot_config"
+AttributeError: 'module' object has no attribute 'load_robot_config'
+$ mpremote ... exec "import boot; boot.VERSION"
+AttributeError: 'module' object has no attribute 'VERSION'
+```
+
+**Finding**: the resident frozen `boot`/`config` Python modules are
+STALE STUBS relative to this repo's current `src/boot.py`/
+`src/config.py` — `config` in particular has essentially no content
+beyond `__name__`/`__class__`; `config.load_robot_config` (a function
+that exists in the current source) is simply not present on this
+image. Cross-checked that `dir()` itself is not the problem (i.e. this
+is real staleness, not a `dir()`-on-frozen-module quirk of this port):
+`dir(diffdrive)` (the native module, unrelated to this staleness)
+returned its full real surface (`begin`, `configure`, `drive`,
+`driveDuty`, `estop`, `lastError`, `neutral`, `output`, `start`) with
+no problem, and `microbit.display`/`microbit.button_a` are both
+present — so `dir()` faithfully reflects real module content on this
+build; `boot`/`config` really are old.
+
+**Separately**, `demo_square` does **not** appear in `help('modules')`
+— this is **expected, not evidence of staleness**: `demo_square.py` is
+deliberately never frozen (sprint 002 ticket 002's own bench log, §16:
+"a bench demo script that drives motors as a side effect of being
+imported... freezing it would make a bare `import demo_square` from
+any REPL an accidental motor-drive trigger"). This ticket's own dispatch
+text suggested checking "presence of frozen demo_square" as a
+staleness signal — that assumption was wrong (demo_square was never
+meant to be frozen); the real, grounded staleness signal turned out to
+be `boot`/`config`'s own missing attributes, found independently.
+
+**Decision: no rebuild/reflash this ticket.** This file's (`main.py`'s)
+actual requirements — `microbit` (stock, present), `demo_square` (a
+filesystem-deployed script, not frozen either way), and a fail-closed
+check — do **not** need a current `config`/`boot`. `demo_square` itself
+already bypasses both (drives `diffdrive` directly with hardcoded
+geometry, per its own module docstring), and `main.py`'s fail-closed
+probe (§19 below) was designed specifically to avoid depending on the
+stale `config` module. A `--clean` rebuild would fix `boot`/`config`'s
+staleness but was judged unnecessary for this ticket's own acceptance
+criteria, and not worth the real reflash risk this exact bench has
+already hit twice (locked-device mass-erase recovery, §3; the
+unexplained `TLM:0:0:0` spew, §12) — **flagged here, disclosed, for
+whoever next touches `boot.py`/`config.py`** on zetuv: the resident
+image needs a rebuild before `boot.run()`'s six-step sequence (comms/
+radio/WiFi/dispatch wiring) can be trusted as current on this unit.
+
+## 18. `/robot.json` — present and valid; `mpremote fs ls` size column
+## is unreliable on this port (new finding)
+
+`mpremote ... fs ls :` reported `0 robot.json` (and, later, `0` for
+every other file including a fresh `main.py`/`demo_square.py`) —
+**this is a display bug/limitation in `mpremote fs ls` on this port,
+not real**: direct on-device `os.stat('robot.json')[6]` (and
+`open('robot.json').read()`) both independently confirmed the file's
+real size, 2413 bytes — the exact same stripped copy sprint 002 ticket
+001 produced (`data/zetuv.json`, `_`-prefixed keys stripped, compact
+JSON), never wiped since. **No re-copy was needed** — flagged as a
+disclosed acceptance-criterion nuance: "presence confirmed" turned out
+to mean confirming `mpremote fs ls`'s size column cannot be trusted,
+not that the file was actually missing. Do not trust `fs ls`'s size
+column on this device/mpremote combination in future sessions; use
+on-device `os.stat`/`open` instead.
+
+**Separate, real finding**: `os.stat('/robot.json')` and
+`open('/robot.json')` (leading slash) both raise `OSError: ENOENT` on
+this port, while the bare form `os.stat('robot.json')`/
+`open('robot.json')` (no leading slash) both succeed against the exact
+same file. `src/boot.py`'s own `CONFIG_PATH` constant is
+`"/robot.json"` (leading slash) — meaning `config.load_robot_config
+(boot.CONFIG_PATH)` would ENOENT on this port even with a perfectly
+valid `robot.json` present and even on a current, non-stale `config`
+module. **Disclosed, not fixed** — `boot.py` is out of this ticket's
+file scope; flagged for whoever next touches it. `main.py` (this
+ticket) uses the bare, bench-confirmed-working form throughout.
+
+## 19. Filesystem-space and on-device compile-memory limits — two
+## distinct constraints, both hit and resolved this session
+
+**Constraint A (flash filesystem capacity)**: the raw filesystem
+region is 24576 bytes (sprint 002's own build layout table, unchanged
+— no rebuild this session). A fully-documented `main.py` (this
+ticket's first draft, matching this repo's own exhaustive-docstring
+convention throughout) was 9901 bytes; combined with `robot.json`
+(2413) and `demo_square.py`'s raw source (12947), the total (25261)
+exceeded the raw region outright — `mpremote fs cp` failed with "No
+space left on device" copying `main.py`.
+
+**Constraint B (on-device compile memory, a distinct problem, found
+after working around A)**: after precompiling `demo_square.py` to
+`.mpy` via `mpy-cross` (12947 → 2346 bytes) specifically to free flash
+space, `import demo_square` on-device failed: `ImportError: no module
+named 'demo_square'`, despite the file being present. Root-caused by
+reading `micropython-microbit-v2/src/codal_port/mpconfigport.h` and
+`lib/micropython/py/mpconfig.h` directly: `MICROPY_PERSISTENT_CODE_LOAD`
+is not defined in this port's config (defaults to `0`) — **this
+firmware build cannot load a `.mpy` file from the filesystem at
+runtime at all**; only FROZEN `.mpy` (baked in at build time,
+`MICROPY_MODULE_FROZEN_MPY=1`, already true for `boot`/`config`/etc.)
+or runtime-compiled `.py` source are supported filesystem-import
+paths. This is a genuine, grounded firmware-capability finding, not a
+mpy-cross version mismatch guess — confirmed by reading the actual
+config macros, not by trial and error alone.
+
+So `demo_square.py` had to go back to raw `.py` source on the
+filesystem — which hit a **third**, independent problem: `exec()`-ing
+(and equally, plain `import`-ing) the raw 12947-byte source blew the
+device's heap during on-device compilation:
+`MemoryError: memory allocation failed, allocating 6129 bytes`. This
+is a real constraint, not a fluke of a messy verification harness (a
+leaner, `gc.collect()`-instrumented harness was tried first and still
+failed identically at the same 6129-byte allocation).
+
+**Root-cause fix applied, mirroring sprint 002 ticket 001's own
+`data/zetuv.json`-stripping precedent exactly**: `src/demo_square.py`
+and `src/main_zetuv_demo.py` (this ticket's own file) both stay FULLY
+DOCUMENTED in the repo — neither was edited to shrink it. Only the
+**on-device deployment copies** are stripped (module docstring
+removed, deploy-time transform only, generated fresh each deploy, not
+committed):
+
+```
+$ python3 -c "
+src = open('src/demo_square.py').read()
+text = src.lstrip()
+end = text.find('\"\"\"', 3)   # after the opening triple-quote
+stripped = text[end+3:]        # drop the whole module docstring
+..."
+# demo_square.py: 12947 -> 6997 bytes (with a short pointer comment
+# added back in, crediting src/demo_square.py + this bench log as the
+# full source)
+# src/main_zetuv_demo.py: 9901 -> 2999 bytes, same treatment
+```
+
+**Verified this resolves constraint C directly**: `gc.mem_free()`
+immediately before the tour import showed ~29 KB free (device total
+heap is small; this was comfortably enough for the 6997-byte stripped
+source), and the tour ran end-to-end without error (§20 below).
+
+**Final on-device footprint**: `robot.json` (2413) + `main.py` (2999)
++ `demo_square.py` (6997) = 12409 bytes — well within the 24576-byte
+region, with real headroom remaining (unlike sprint 002 ticket 001's
+own JSON-stripping episode, which left almost no margin).
+
+## 20. `main.py` design decisions, bench-grounded
+
+- **`demo_square` invocation, repeatable**: `demo_square.py` is a
+  SCRIPT with an unconditional top-level `if _ON_DEVICE: run()` (no
+  reload-safe entry point). A plain one-time `import demo_square`
+  auto-runs the tour once on the first press but silently no-ops on
+  every later press (Python's own import cache) — **independently
+  verified this session** with a throwaway `probe_reload.py` module
+  (not committed): a bare second `import probe_reload` printed
+  nothing, while `sys.modules.pop("probe_reload", None)` before each
+  import made the module's top-level `print()` fire on a 3rd *and* a
+  4th "press" in the same session. `main.py`'s `run_tour()` uses
+  exactly that `sys.modules.pop(...) + import demo_square` pattern —
+  bench-verified to make every press independent, satisfying this
+  ticket's "repeatable presses" requirement, without needing to run
+  the full physical tour more than once to prove the mechanism.
+- **Fail-closed check does not use `config.load_robot_config()`** —
+  see §17: that module is a stale stub on this image. `main.py`'s own
+  `robot_ready()` instead checks `/robot.json` (bare path) is present
+  and non-empty via `os.stat`, and that `diffdrive` is importable —
+  the two conditions this ticket's acceptance criteria name directly
+  ("no /robot.json / diffdrive refuses"), with no dependency on
+  `config`'s currency.
+- **`__name__ == "__main__"` gating, bench-confirmed not assumed**:
+  `codal_port/main.c`'s `microbit_pyexec_file()` compiles and calls the
+  filesystem `main.py` as a bare function (`mp_call_function_0`), not
+  through the normal import path, so whether `__name__` reads
+  `"__main__"` there was not safe to assume by analogy with CPython. A
+  throwaway diagnostic `main.py` (written to `/name_probe.txt` on
+  boot, then read back after a reset) confirmed directly:
+  `__name__ == "__main__"` in exactly this execution context. `run()`
+  is gated on that check, which is what lets REPL-driven verification
+  (§21) load this file's definitions via `exec(source, ns)` with a
+  different `ns["__name__"]` without ever entering the infinite idle
+  loop.
+- **Main-context discipline**: the idle loop only ever polls
+  `button_a.was_pressed()` and sleeps (`IDLE_POLL_MS = 150`) — no
+  `microbit.run_every()`/callback registered anywhere in this file.
+  `KeyboardInterrupt` is re-raised, never swallowed, in both the tour
+  guard and the outer loop's own guard.
+- **Idle indicator**: a single-pixel "breathing" brightness pulse at
+  the display centre (not a static image) — chosen so the user can
+  tell the loop is alive, not merely showing a frozen picture.
+
+## 21. End-to-end REPL-driven verification of `on_button_a()` — the
+## exact handler `main.py` wires to button A
+
+Deployed `main.py` (stripped, 2999 bytes) and `demo_square.py`
+(stripped, 6997 bytes) to the device filesystem. One `mpremote run
+verify_button_a.py` session (a throwaway script, not committed):
+loads `main.py`'s definitions via `exec(source, {"__name__": "verify"})`
+(so `run()`'s infinite loop is never entered), confirms
+`robot_ready() -> True`, then calls `on_button_a()` — the *exact*
+function `main.py` wires to button A — directly:
+
+```
+VERIFY: mem_free before loading main: 32448
+VERIFY: mem_free after loading main: 29408
+VERIFY: robot_ready() -> True
+VERIFY: mem_free before on_button_a(): 29360
+VERIFY: calling on_button_a() directly (the exact handler main.py
+VERIFY: wires to button A) -- HEART -> demo_square tour -> idle
+demo_square: configure ok
+demo_square: begin ok
+demo_square: start ok
+demo_square: tour has 8 segments
+demo_square: segment 0 leg   status ok target_ticks 709.35   delta_left 611.0 delta_right 888.0 mean_delta 749.5 reached True elapsed_ms 1050
+demo_square: segment 1 pivot status ok target_ticks 142.6233 delta_left -75.0 delta_right 266.0 mean_delta 170.5 reached True elapsed_ms 350
+demo_square: segment 2 leg   status ok target_ticks 709.35   delta_left 622.0 delta_right 808.0 mean_delta 715.0 reached True elapsed_ms 950
+demo_square: segment 3 pivot status ok target_ticks 142.6233 delta_left -86.0 delta_right 200.0 mean_delta 143.0 reached True elapsed_ms 300
+demo_square: segment 4 leg   status ok target_ticks 709.35   delta_left 728.0 delta_right 778.0 mean_delta 753.0 reached True elapsed_ms 1000
+demo_square: segment 5 pivot status ok target_ticks 142.6233 delta_left -92.0 delta_right 197.0 mean_delta 144.5 reached True elapsed_ms 300
+demo_square: segment 6 leg   status ok target_ticks 709.35   delta_left 703.0 delta_right 811.0 mean_delta 757.0 reached True elapsed_ms 950
+demo_square: segment 7 pivot status ok target_ticks 142.6233 delta_left -91.0 delta_right 219.0 mean_delta 155.0 reached True elapsed_ms 300
+demo_square: tour complete
+VERIFY: on_button_a() returned
+VERIFY: stop-verify position before (2427.0, 4752.0) after 2s (2427.0, 4752.0)
+VERIFY: done
+```
+
+All 8 segments `reached True`, magnitudes comparable to sprint 002
+ticket 002's own bench runs (§15). **Stop-verify**: position held
+exactly steady (Δleft = 0, Δright = 0) over 2 s after `on_button_a()`
+returned — no drift, matching this ticket's own "encoder delta 0 over
+2 s" instruction. `demo_square.neutral()` (its own last hardware call)
+plus `main.py`'s `display.clear()` both ran cleanly — the sequence
+"HEART shown → tour runs to completion → display cleared" is directly
+evidenced end-to-end.
+
+**Idle-prompt visual state**: NOT independently confirmed visually —
+no camera/vision access was available to this agent this session
+either, consistent with every prior bench session in this file. Left
+for the stakeholder to observe directly on the physical press.
+
+## 22. Reset/auto-run verification and final handoff state
+
+```
+$ mpremote ... reset
+$ sleep 5
+$ mpremote ... exec "print('post-reset REPL alive')"
+post-reset REPL alive
+```
+
+REPL access remained responsive after a real hardware reset + 5 s
+settle — confirms `main.py`'s idle loop (poll + `sleep()`) correctly
+yields and does not lock up raw-REPL access, consistent with the
+`__name__ == "__main__"`-gated auto-run at boot (§20) actually firing.
+A **second, final** `reset` + 5 s settle was performed immediately
+before handoff, with **no further `exec`/`run` commands issued
+afterward** (each of those was independently observed this session to
+itself interrupt/re-trigger the boot sequence — matching sprint 002
+ticket 001's own §7 process note) — so the device is left genuinely in
+its armed idle loop, not mid-verification-session, for the
+stakeholder's physical press. `mbdeploy list` immediately after
+confirmed `zetuv` still connected and responsive at the same port/UID.
+
+**Process note, new this session**: intermittent `TransportError:
+could not enter raw repl` / `OSError: [Errno 6] Device not configured`
+failures occurred several times while deploying/verifying, always
+recovering on a plain retry within a few seconds (no reset, no
+recovery procedure needed beyond re-running the same command). This
+matches the same class of transient flakiness already documented in
+this file's own §12 (sprint 002 ticket 002) — not treated as a new,
+escalation-worthy hardware fault, consistent with that precedent.
+
+## 23. Offline gate
+
+```
+$ python3 -m pytest tests/ -q
+204 passed, 518 subtests passed
+```
+
+204 baseline, unchanged pass count. Adding `src/main_zetuv_demo.py`
+initially broke `tests/test_manifest_freeze.py::
+test_manifest_lists_exactly_the_src_py_modules` (every `src/*.py` file
+must appear in `manifest.py`'s freeze list, by design) — fixed by
+extending that test's own `_BENCH_ONLY_MODULES` exclusion set (already
+established by sprint 002 ticket 002 for `demo_square.py`) to also
+include `main_zetuv_demo.py`, with the reasoning recorded directly in
+that test file's own module docstring: a module literally named `main`
+must never be frozen (`src/boot.py`'s own docstring — a frozen `main`
+would never be found by `mp_main()`'s filesystem-only probe), so this
+exclusion is structural, not a workaround.
+
+`python3 -m py_compile src/main_zetuv_demo.py` and `mpy-cross
+src/main_zetuv_demo.py -o ...` both clean. `git diff --exit-code --
+vendor/` clean. `manifest.py` (repo root) untouched — confirmed via
+`git diff --exit-code -- manifest.py`.
+
+## Summary for future readers
+
+1. **`boot`/`config` frozen Python modules on zetuv are stale stubs**
+   relative to current `src/boot.py`/`src/config.py` (missing
+   `load_robot_config`, `VERSION`, etc. entirely) — disclosed, not
+   fixed this ticket (out of file scope; `main.py`/`demo_square` don't
+   need them). A future ticket touching `boot.py`/`config.py` on
+   zetuv should rebuild first.
+2. **`mpremote fs ls`'s size column is unreliable** on this device/
+   mpremote combination (always reports 0) — use on-device `os.stat`/
+   `open` instead.
+3. **Leading-slash filesystem paths ENOENT on this port** — bare
+   relative paths (`"robot.json"`, not `"/robot.json"`) are what
+   actually works. `src/boot.py`'s own `CONFIG_PATH = "/robot.json"`
+   is therefore unreachable as written — disclosed, out of scope here.
+4. **This firmware cannot load `.mpy` files from the filesystem at
+   runtime** (`MICROPY_PERSISTENT_CODE_LOAD` is off) — only frozen
+   `.mpy` or runtime-compiled `.py` source are valid filesystem-import
+   paths. Don't try precompiling a filesystem-deployed module again on
+   this build without freezing it.
+5. **On-device compilation of large (~13 KB) raw `.py` source can
+   exhaust this device's heap.** Root-caused and fixed by stripping
+   the module docstring from the *deployed* copy only (device-flash-
+   time transform, not a repo change) — mirrors sprint 002 ticket
+   001's own `data/zetuv.json`-stripping precedent exactly. Any future
+   ticket deploying a large filesystem module to zetuv should expect
+   to need the same treatment.
+6. `main.py` (button A → HEART → `demo_square` tour → idle, repeatable,
+   fail-closed on missing/empty `robot.json` or unavailable
+   `diffdrive`) is deployed and bench-verified end-to-end via direct
+   REPL invocation of `on_button_a()` — 8/8 tour segments reached,
+   clean stop-verify, main-context discipline preserved throughout.
+   The physical button press itself was left to the stakeholder, per
+   this ticket's own instruction.
