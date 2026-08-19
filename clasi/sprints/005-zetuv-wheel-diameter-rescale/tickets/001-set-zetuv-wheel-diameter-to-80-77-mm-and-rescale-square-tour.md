@@ -1,7 +1,7 @@
 ---
 id: '001'
 title: Set zetuv wheel diameter to 80.77 mm and rescale square tour
-status: in-progress
+status: exception
 use-cases:
 - UC-003
 - UC-014
@@ -9,6 +9,34 @@ depends-on: []
 github-issue: ''
 issue: zetuv-wheel-diameter-from-tovez.md
 completes_issue: true
+exception:
+  thrown_by: programmer
+  thrown_at: '2026-08-19T21:20:06.733823+00:00'
+  attempted: 'Ticket was reopened to in-progress on the coordinator''s report that
+    the stakeholder said "Zetuv has returned" (physically reconnected). Re-checked
+    zetuv''s connectivity immediately and four more times over the following ~15s
+    using the same four independent methods as the original exception: mbdeploy list
+    (x2), a fresh mbdeploy probe re-scan (x2), raw OS-level serial enumeration (ls
+    -la /dev/cu.usbmodem*), and pyocd list (the separate CMSIS-DAP interface, independent
+    of the CDC serial mbdeploy/mpremote use). All five checks agree: zetuv is still
+    not connected -- only getez (/dev/cu.usbmodem214102), zavaz (/dev/cu.usbmodem2121302),
+    tovez (/dev/cu.usbmodem2121202, still occupying zetuv''s former port), and vevov
+    (/dev/cu.usbmodem2121102) enumerate on either interface. Zetuv''s UID (9906360200052820312bde85515a72e6000000006e052820)
+    does not appear anywhere. No device command was issued against any board this
+    pass either -- only read-only enumeration calls. Findings recorded in docs/bench-log-zetuv-2026-08-19.md
+    Sec 41 and reported back to the coordinator directly rather than proceeding (deploy/REPL/motor
+    commands) on an unconfirmed hardware premise.'
+  conflict: Same underlying conflict as the original exception (ticket 001's Bench
+    re-verify section and Acceptance Criteria require a REPL-triggered bench re-run
+    and armed handoff on zetuv specifically) -- re-raised because the stakeholder-reported
+    resolution ("Zetuv has returned") does not match what this machine's hardware
+    enumeration shows. This is not a new architectural conflict, it is the same physical
+    bench precondition (zetuv not connected to this machine) persisting past the point
+    where it was reported fixed -- worth flagging explicitly rather than silently
+    treating the coordinator's report as ground truth, since this agent has no way
+    to reconcile a verbal/relayed report against three independent, repeatedly-checked
+    hardware enumeration sources that all disagree with it.
+  surface: user-visible
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
 

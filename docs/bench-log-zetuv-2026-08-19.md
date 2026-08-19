@@ -1682,3 +1682,35 @@ zetuv's own last-known-good armed idle state from the end of sprint
 3. Escalated via `throw_ticket_exception` for the stakeholder (at the
    bench) to reconnect zetuv and clear the block — the software fix
    itself needs no further changes once bench access is restored.
+
+## 41. Re-check after "Zetuv has returned" report — STILL not connected
+
+The stakeholder reported (relayed via the coordinator) that zetuv had
+been physically reconnected: "Zetuv has returned." The ticket was
+reopened to `in-progress` on that basis. Re-checked immediately, and
+again four more times over the following ~15 s, using the same four
+independent methods as Sec 39: `mbdeploy list` (x2), a fresh
+`mbdeploy probe` re-scan (x2), raw OS-level serial enumeration
+(`ls -la /dev/cu.usbmodem*`), and `pyocd list` (the separate CMSIS-DAP
+interface). **All five checks agree: zetuv is still not connected.**
+Only `getez` (`/dev/cu.usbmodem214102`), `zavaz`
+(`/dev/cu.usbmodem2121302`), `tovez`
+(`/dev/cu.usbmodem2121202` — still occupying zetuv's former port), and
+`vevov` (`/dev/cu.usbmodem2121102`) enumerate, on both the serial-CDC
+and CMSIS-DAP interfaces alike. Zetuv's UID
+(`9906360200052820312bde85515a72e6000000006e052820`) does not appear
+anywhere. One incidental observation, not itself diagnostic: the raw
+`/dev/cu.usbmodem*` device-file mtimes advanced between checks (e.g.
+`14:17` -> `14:18` across all four existing ports simultaneously),
+consistent with *something* happening on the USB bus around that time
+(a hub event, a replug of some device), but whatever that event was,
+it did not result in zetuv itself enumerating on this machine.
+
+No device command was issued against any board this pass either — only
+the same read-only enumeration calls as before. This finding was
+reported back to the coordinator directly rather than proceeding on
+the unconfirmed premise that bench access had been restored; the
+ticket's remaining bench-verification steps (deploy, single-wheel
+probe, `on_button_a()` full-tour run, stop-verify, exception
+resolution, `done` status) are all still blocked pending an
+independently-confirmed live connection.
