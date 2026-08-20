@@ -1,92 +1,55 @@
 """config -- per-robot JSON loader, fail-closed key validation, and the
-``wheel_control`` -> ``DiffDrive::Config`` mapping (PLAN.md M5 /
-``docs/design/specification.md`` Sec 6/8, UC-011).
+``wheel_control`` -> ``DiffDrive::Config`` mapping (spec Sec 6/8, UC-011).
 
-Loads one robot's JSON (``data/<robot>.json``, copied from
-radio-robot-elite by ticket 002, schema in
+Loads one robot's JSON (``data/<robot>.json``, schema in
 ``data/robot_config.schema.json``) and validates a MINIMAL required-key
 set fail-closed: any missing or non-numeric required key raises
 ``ConfigError`` rather than falling back to a substitute value. This is
-deliberately NOT a whole-document ``jsonschema.validate()`` pass --
-``data/README.md``'s own "Known gap" section records that the per-robot
-JSON does not yet validate against the full schema (extra groups/notes
-the schema's ``additionalProperties: false`` rejects), and ticket 002's
-acceptance criteria explicitly allow a hand-rolled required-key check as
-the alternative. ``REQUIRED_KEYS`` below is exactly the set THIS
-module's own mapping needs to produce a safe boot configuration -- not
-an attempt to validate the rest of the (much larger) per-robot document.
+deliberately NOT a whole-document ``jsonschema.validate()`` pass -- see
+``data/README.md``'s "Known gap" note. ``REQUIRED_KEYS`` below is
+exactly the set THIS module's own mapping needs to produce a safe boot
+configuration, not an attempt to validate the rest of the document.
 
-``wheel_control`` -> ``DiffDrive::Config`` mapping (PLAN.md/spec/
-usecases.md all cite this verbatim: "wheel_control -> DiffDrive::Config
-via travel_calib x10"):
+``wheel_control`` -> ``DiffDrive::Config`` mapping:
 
   - The per-robot JSON's ``wheel_control`` group maps FIELD-FOR-FIELD
     onto ``vendor/differential_drive.h``'s ``DiffDrive::Config`` Stage
-    A/B/C authority fields -- verified directly against that header,
-    field by field: ``v_min``/``bias_max``/``tau_adapt``/``a_steady``/
-    ``deficit_threshold``/``deficit_window``/``pid_kp``/``pid_ki``/
-    ``pid_i_max``/``pid_kaff``/``pid_max``/``pos_err_max``/
-    ``stall_speed``/``stall_demand``/``stall_window`` rename 1:1 onto
-    ``vMin``/``biasMax``/``tauAdapt``/``aSteady``/``deficitThreshold``/
-    ``deficitWindow``/``kp``/``ki``/``iMax``/``kaff``/``pidMax``/
-    ``posErrMax``/``stallSpeed``/``stallDemand``/``stallWindow`` -- 15
-    fields, no unit conversion, no scaling.
-  - ``fullDutyVelocity`` (``DiffDrive::Config``'s plant-gain calibration
-    field, "[counts/s] wheel rate at 100% duty; 0 = uncalibrated") has
-    NO direct source in ``wheel_control`` -- the one piece of arithmetic
-    every source document names is ``travel_calib x10``. This module
-    implements that literally: ``fullDutyVelocity = mean(travel_calib_
-    left, travel_calib_right) x 10`` (``motors`` group; averaged because
-    the kernel's ``fullDutyVelocity`` is ONE scalar, not a left/right
-    pair -- both robots copied into ``data/`` today carry equal left/
-    right values, so the average recovers the single figure exactly).
-    No document in this repo elaborates the multiplier's derivation
-    further than "x10" -- flagged here rather than silently
-    re-deriving a different constant.
+    A/B/C authority fields -- see ``WHEEL_CONTROL_FIELDS`` below for the
+    15-field rename table. No unit conversion, no scaling.
+  - ``fullDutyVelocity`` (plant-gain calibration, "[counts/s] wheel rate
+    at 100% duty; 0 = uncalibrated") has no direct JSON source; derived
+    as ``mean(travel_calib_left, travel_calib_right) x
+    _TRAVEL_CALIB_TO_FULL_DUTY_VELOCITY`` (see that constant's comment
+    for the multiplier's derivation and its single-bench-anchor caveat).
   - ``maxDuty`` (the authority-rail ceiling, NOT a calibration fact --
     ``vendor/differential_drive.h``: "authority rail (lambda scales to
-    this); 0 = ALL modes refused") has no JSON source anywhere in the
-    schema either. This module ships it as a fixed POLICY constant,
-    ``DEFAULT_MAX_DUTY`` (1.0 -- full authority): the real physical
-    safety bounds are already enforced elsewhere and do not go through
-    this field (the binding's 5000 ms lease ceiling, the VM-hook
-    watchdog, and the fixed slew/deadband/reversal-dwell shaping
-    ``moddiffdrive.cpp``'s own ``configure()`` already substitutes) --
-    see this module's own docstring note next to ``DEFAULT_MAX_DUTY``.
+    this); 0 = ALL modes refused") has no JSON source either. This
+    module ships it as a fixed POLICY constant, ``DEFAULT_MAX_DUTY``:
+    the real physical safety bounds are enforced elsewhere (lease
+    ceiling, VM-hook watchdog, slew/deadband/reversal-dwell shaping in
+    ``moddiffdrive.cpp``'s ``configure()``) -- see that constant's
+    comment.
 
-Native-binding scope note (flagged, not silently under-delivered):
-``native/README.md``'s own "Deliberately out of scope for this ticket"
-section (ticket 004) names exactly this gap: "Full per-robot config
-mapping (DiffDrive::Config's remaining ~15 fields ...) -- ticket 007."
-``diffdrive.configure()`` (ticket 004's binding) accepts only
+Native-binding scope note: ``diffdrive.configure()`` accepts only
 ``left_port``/``right_port``/``fwd_sign_left``/``fwd_sign_right``/
-``max_duty``/``full_duty_velocity``/``cycle_period_ms`` -- it has NO
-parameter for the 15 ``wheel_control`` fields this module maps. Wiring
-a new native call (e.g. a ``diffdrive.set_wheel_control(...)`` binding
-over the kernel's already-safe-to-call-post-construction
-``setConfig()``) is real, buildable, low-risk work -- but it is a
-``native/`` C++ change needing its own qstr/glue wiring and a verified
-``--clean`` rebuild, and is deliberately NOT done in this pass: this
-ticket's own acceptance criteria only ask for the MAPPING to be
-unit-tested against known input/output pairs (``tests/test_config.py``),
-not for a new native call. ``diffdrive_configure_kwargs()`` below
-targets the REAL, already-built ``configure()`` surface;
-``wheel_control_to_diffdrive_config()`` produces the full 15-field
-mapping for GET_CONFIG/SET_FIELD wire reporting and for whichever
-ticket adds the native call. Recorded here, not silently dropped, so a
-future ticket has a concrete pointer instead of rediscovering the gap.
+``max_duty``/``full_duty_velocity``/``cycle_period_ms`` -- no parameter
+for the 15 ``wheel_control`` fields this module maps (a future
+``diffdrive.set_wheel_control(...)`` binding is still open; see
+``native/README.md``'s "Deliberately out of scope" note).
+``diffdrive_configure_kwargs()`` targets the existing ``configure()``
+surface; ``wheel_control_to_diffdrive_config()`` produces the full
+15-field mapping for GET_CONFIG/SET_FIELD wire reporting and for
+whichever ticket adds the native call.
 
 CONFIG/SET_FIELD/GET_CONFIG wire wiring: see ``ConfigDispatch`` below.
-``msgs.py`` has no per-verb protobuf field tables yet (its own
-docstring), so this module hand-decodes a small, documented payload
-shape for exactly these three verbs -- group id conventions borrowed
-from radio-robot-elite's current ``ConfigGroupTarget`` enum
-(``src/protos/robot_config.proto``: ``WHEEL_CONTROL = 4``) since that
-enum is a stable, non-guessed source even though this port only wires
-the WHEEL_CONTROL group's fields this ticket.
+``msgs.py`` has no per-verb protobuf field tables yet, so this module
+hand-decodes a small, documented payload shape for exactly these three
+verbs -- group id convention borrowed from radio-robot-elite's
+``ConfigGroupTarget`` enum (``src/protos/robot_config.proto``:
+``WHEEL_CONTROL = 4``); only the WHEEL_CONTROL group is wired.
 
-MicroPython-only modules are import-guarded so this module imports and
-runs unmodified under CPython (this ticket's own offline gate).
+MicroPython-only imports are guarded so this module runs under CPython
+too.
 """
 
 try:
@@ -119,15 +82,14 @@ __all__ = [
 
 class ConfigError(ValueError):
     """Raised by ``parse_robot_config()``/``load_robot_config()`` on any
-    missing or invalid required key -- fail-closed per spec Sec 6/8 and
-    UC-011's own error flow ("missing/invalid key -> motion refused")."""
+    missing or invalid required key -- fail-closed (spec Sec 6/8,
+    UC-011: "missing/invalid key -> motion refused")."""
 
 
-# Minimal required-key set: exactly what THIS module's own mapping (the
-# native `configure()` call-arg kwargs plus the wheel_control -> kernel
-# Config mapping) needs to produce a safe boot configuration. Each entry
-# is (group, field, kind) where kind is "num" (int or float, not bool)
-# or "str" (non-empty string).
+# Minimal required-key set: what this module's own mapping (native
+# configure() kwargs plus the wheel_control -> kernel Config mapping)
+# needs for a safe boot configuration. Each entry is (group, field,
+# kind); kind is "num" (int/float, not bool) or "str" (non-empty).
 REQUIRED_KEYS = (
     ("identity", "robot_name", "str"),
     ("connection", "radio_channel", "num"),
@@ -154,10 +116,9 @@ REQUIRED_KEYS = (
     ("wheel_control", "stall_window", "num"),
 )
 
-# wheel_control JSON field name -> DiffDrive::Config field name, in the
-# group's own SET_FIELD/CFG wire field-index order (index 0..14) -- see
-# this module's docstring for the field-by-field verification against
-# vendor/differential_drive.h.
+# wheel_control JSON field name -> DiffDrive::Config field name, in
+# SET_FIELD/CFG wire field-index order (index 0..14). See
+# vendor/differential_drive.h for the kernel-side field names.
 WHEEL_CONTROL_FIELDS = (
     ("v_min", "vMin"),
     ("bias_max", "biasMax"),
@@ -176,34 +137,27 @@ WHEEL_CONTROL_FIELDS = (
     ("stall_window", "stallWindow"),
 )
 
-# Authority-rail policy default -- see this module's own docstring
-# ("maxDuty ... NOT a calibration fact").
-DEFAULT_MAX_DUTY = 25.0   # [%] kernel units are PERCENT (bench-established
-                          # sprint 002; the old 1.0 was a fraction-era value
-                          # that collapsed the rail below the 3% deadband floor)
+# Authority-rail policy default, NOT a calibration fact (see docstring).
+DEFAULT_MAX_DUTY = 25.0   # [%] kernel units are percent -- 1.0 here would
+                          # collapse the rail below the 3% deadband floor.
 
-# Matches DiffDrive::Config::cyclePeriod's own default (vendor/
-# differential_drive.h) and moddiffdrive.cpp's configure() default
-# (cycle_period_ms=24) -- no per-robot JSON field overrides this.
+# Matches DiffDrive::Config::cyclePeriod's default (vendor/
+# differential_drive.h) and moddiffdrive.cpp's configure() default; no
+# per-robot JSON field overrides this.
 DEFAULT_CYCLE_PERIOD_MS = 24
 
-# The "x10" travel_calib -> fullDutyVelocity multiplier -- see this
-# module's docstring; no source in this repo elaborates it further.
+# travel_calib -> fullDutyVelocity multiplier. Single bench anchor
+# (tovez); see docs/bench-log-zetuv-2026-08-19.md Sec 55. Needs a
+# proper multi-robot derivation; the old 10.0 was too small -- every
+# velocity command railed at max_duty.
 _TRAVEL_CALIB_TO_FULL_DUTY_VELOCITY = 10845.0   # [counts/s per mm/deg]
-# Derived from ONE bench anchor (tovez, 2026-08-19): travel_calib 0.7837
-# -> measured ~8500 counts/s at 100% duty (duty->speed extrapolation,
-# docs/bench-log-zetuv-2026-08-19.md Sec 55). Single data point -- needs a
-# proper multi-robot derivation ticket; the old 10.0 produced a
-# fullDutyVelocity so small every velocity command railed at max_duty.
 
-# ConfigGroupTarget group id this module wires (see docstring) --
-# borrowed from radio-robot-elite's current robot_config.proto enum
-# (WHEEL_CONTROL = 4) as a stable, non-guessed numbering convention.
+# ConfigGroupTarget group id this module wires -- borrowed from
+# radio-robot-elite's robot_config.proto enum (WHEEL_CONTROL = 4).
 CONFIG_GROUP_WHEEL_CONTROL = 4
 
-# Ack err codes this dispatch returns (small, local convention -- msgs.py
-# has no generated error-code table yet; kept to the two cases this
-# module's own dispatch can actually distinguish).
+# Ack err codes this dispatch returns (msgs.py has no generated
+# error-code table yet).
 ERR_OK = 0
 ERR_UNIMPLEMENTED = 1  # a config group other than WHEEL_CONTROL
 ERR_MALFORMED = 2  # wrong payload length / out-of-range field index
@@ -234,8 +188,8 @@ def parse_robot_config(text):
             groups[group] = _get_group(doc, group)
         value = groups[group].get(field)
         if kind == "num":
-            # bool is a subclass of int in Python -- explicitly excluded,
-            # a JSON `true`/`false` is never a valid numeric config value.
+            # bool is a subclass of int -- excluded explicitly, since a
+            # JSON true/false is never a valid numeric config value.
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ConfigError("missing or non-numeric key: %s.%s" % (group, field))
         else:
@@ -262,10 +216,9 @@ def wheel_control_to_diffdrive_config(robot_config):
     """Map ``robot_config`` (a parsed, validated document -- see
     ``load_robot_config()``) to a ``DiffDrive::Config``-shaped dict:
     the 15 ``wheel_control`` fields renamed per ``WHEEL_CONTROL_FIELDS``,
-    plus ``fullDutyVelocity`` (``travel_calib`` x10) and ``maxDuty``/
-    ``cyclePeriod`` (policy defaults -- see this module's docstring).
-    Pure function, no I/O -- this is what ``tests/test_config.py``'s
-    "known input/output pairs" acceptance criterion exercises directly."""
+    plus ``fullDutyVelocity`` (``travel_calib`` x multiplier) and
+    ``maxDuty``/``cyclePeriod`` (policy defaults -- see module
+    docstring). Pure function, no I/O."""
     wheel_control = _get_group(robot_config, "wheel_control")
     motors = _get_group(robot_config, "motors")
 
@@ -284,14 +237,13 @@ def wheel_control_to_diffdrive_config(robot_config):
 
 
 def diffdrive_configure_kwargs(robot_config):
-    """Build the kwargs dict for the REAL, already-built native
-    ``diffdrive.configure(left_port, right_port, fwd_sign_left,
-    fwd_sign_right, max_duty, full_duty_velocity, cycle_period_ms)``
-    call (``native/moddiffdrive.cpp``, ticket 004) -- boot code does
-    ``diffdrive.configure(**config.diffdrive_configure_kwargs(robot_config))``.
-    Sources ``max_duty``/``full_duty_velocity``/``cycle_period_ms`` from
-    ``wheel_control_to_diffdrive_config()`` so both call sites agree on
-    the same three shared fields."""
+    """Build the kwargs dict for the native ``diffdrive.configure(
+    left_port, right_port, fwd_sign_left, fwd_sign_right, max_duty,
+    full_duty_velocity, cycle_period_ms)`` call (``native/
+    moddiffdrive.cpp``) -- boot code does ``diffdrive.configure(
+    **config.diffdrive_configure_kwargs(robot_config))``. Sources
+    ``max_duty``/``full_duty_velocity``/``cycle_period_ms`` from
+    ``wheel_control_to_diffdrive_config()`` so both call sites agree."""
     motors = _get_group(robot_config, "motors")
     mapped = wheel_control_to_diffdrive_config(robot_config)
     return {
@@ -308,8 +260,7 @@ def diffdrive_configure_kwargs(robot_config):
 def radio_channel(robot_config):
     """``connection.radio_channel`` as an int -- boot code passes this to
     ``radio_shim.RadioLink(channel=config.radio_channel(robot_config))``
-    (``group`` is left at ``RadioLink``'s own fixed default, already
-    matching the relay -- see ``src/radio_shim.py``)."""
+    (``group`` is left at ``RadioLink``'s own fixed default)."""
     connection = _get_group(robot_config, "connection")
     return int(connection["radio_channel"])
 
@@ -317,13 +268,10 @@ def radio_channel(robot_config):
 class ConfigDispatch:
     """Backs ``src/comms.py``'s firmware-layer dispatch interface
     (``handle_command(verb_name, payload, now) -> (corr_id, err_code) |
-    None``) for the CONFIG/SET_FIELD/GET_CONFIG verbs -- see this
-    module's docstring for the payload shapes and the GET_CONFIG
-    limitation note below.
+    None``) for the CONFIG/SET_FIELD/GET_CONFIG verbs.
 
-    Payload shapes (this ticket's own hand-decoded, documented
-    convention -- see module docstring for why no generated field table
-    exists yet to decode against instead):
+    Payload shapes (hand-decoded convention -- see module docstring for
+    why no generated field table exists to decode against instead):
 
       SET_FIELD: corr_id:u8, group_id:u8, field_index:u8, value:f32-LE
                  (7 bytes). Applies ONE wheel_control field live (RAM
@@ -333,29 +281,22 @@ class ConfigDispatch:
                  ``WHEEL_CONTROL_FIELDS`` order.
       GET_CONFIG: corr_id:u8, group_id:u8 (2 bytes). See below.
 
-    Only ``CONFIG_GROUP_WHEEL_CONTROL`` (4) is wired this ticket -- any
-    other group id acks ``ERR_UNIMPLEMENTED`` (matches this module's own
-    docstring: the native call needed to push these fields into the
-    kernel does not exist yet either, so wiring more groups than the one
-    this ticket's mapping actually targets would be dead plumbing).
+    Only ``CONFIG_GROUP_WHEEL_CONTROL`` (4) is wired -- any other group
+    id acks ``ERR_UNIMPLEMENTED`` (the native call needed to push other
+    groups into the kernel does not exist yet either).
 
-    GET_CONFIG limitation (flagged, not silently dropped): ``comms.py``'s
-    dispatch interface (``handle_command``) is NOT given the requesting
-    transport, and offers no reply-frame channel beyond the ack ring
-    (``(corr_id, err_code)``) -- by design, per that module's own
-    docstring, since a full ``CommandEnvelope`` decode was explicitly
-    ticket 007's job. This dispatch therefore ALSO accepts its own
-    ``transports`` list (``add_transport()``, independent of
+    GET_CONFIG note: ``comms.py``'s ``handle_command`` interface gets no
+    requesting transport and offers no reply-frame channel beyond the
+    ack ring (``(corr_id, err_code)``). This dispatch therefore keeps
+    its own ``transports`` list (``add_transport()``, independent of
     ``comms.Comms``'s own registration) and, on a valid GET_CONFIG,
-    BROADCASTS a ``CFG`` reply frame (``build_cfg_reply()`` below,
-    COBS+CRC framed via ``wire.encode_frame()``) to every transport
-    registered here, in addition to acking via the ring -- mirroring the
-    broadcast-to-all-transports shape ``Comms.send_banner()``/telemetry's
-    own primary-frame emission already use, and requiring zero changes
-    to ``comms.py`` (a ticket 005 module, out of this ticket's file
-    scope). A caller that never calls ``add_transport()`` here still
-    gets a correct ack; it just does not receive the CFG data frame --
-    documented, not a crash.
+    broadcasts a ``CFG`` reply frame (``build_cfg_reply()`` below,
+    COBS+CRC via ``wire.encode_frame()``) to every registered transport,
+    in addition to acking via the ring -- mirroring the
+    broadcast-to-all-transports shape ``Comms.send_banner()``/
+    telemetry's own frame emission already use. A caller that never
+    calls ``add_transport()`` still gets a correct ack, just no CFG
+    data frame.
     """
 
     def __init__(self, robot_config, transports=None):
@@ -438,10 +379,9 @@ class ConfigDispatch:
 
 
 def _corr_id_or_none(payload):
-    """A malformed-length payload may still carry a recoverable corr_id
-    in its first byte -- best-effort ack target, ``None`` only if even
-    that byte is missing (matches comms.py's own "None = no ack possible"
-    convention)."""
+    """Best-effort ack target for a malformed-length payload -- the
+    corr_id byte may still be present. ``None`` only if even that byte
+    is missing (matches comms.py's "None = no ack possible" convention)."""
     if payload:
         return payload[0]
     return None
@@ -449,9 +389,8 @@ def _corr_id_or_none(payload):
 
 def _pack_f32_le(value):
     """Pack ``value`` as IEEE-754 binary32, little-endian. ``struct``
-    ships on both CPython and MicroPython (microbit's port included), so
-    this needs no import guard -- unlike ``ujson``/``micropython``
-    elsewhere in this port, which do not exist on both sides."""
+    ships on both CPython and MicroPython, unlike ``ujson``/
+    ``micropython`` elsewhere in this port, so no import guard needed."""
     return struct.pack("<f", value)
 
 

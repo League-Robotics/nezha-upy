@@ -1,46 +1,33 @@
-"""telemetry -- the full 22-field TLM frame assembly, M5 (PLAN.md /
-``docs/design/specification.md`` Sec 6/7.2/7.5, UC-012).
+"""telemetry -- the full 22-field TLM frame assembly, spec Sec 6/7.2/
+7.5, UC-012.
 
-``src/comms.py``'s ``TelemetryPolicy`` (ticket 005) already owns the ack
-ring and the emit-policy arithmetic (WHEN a primary frame is due) but
-deliberately does NOT build a real frame -- its own docstring: "does
-NOT build a real 22-field TLM wire frame (that is ticket 007's
-``src/telemetry.py``)". This module is that frame assembler: given the
-current sensor/kernel state, it produces the 22 named fields as a plain
-dict, ready for a boot-level ``emit_callback(now, acks)`` (the callback
-``comms.Comms(..., emit_callback=...)`` accepts) to hand to
+``src/comms.py``'s ``TelemetryPolicy`` owns the ack ring and the
+emit-policy arithmetic (WHEN a primary frame is due) but does not
+build a real frame. This module is that frame assembler: given the
+current sensor/kernel state, it produces the 22 named fields as a
+plain dict, ready for a boot-level ``emit_callback(now, acks)`` (the
+callback ``comms.Comms(..., emit_callback=...)`` accepts) to hand to
 ``TelemetryFrameBuilder.build()``.
 
-Field derivation (22 fields -- see this module's own inline enumeration
-in ``TelemetryFrameBuilder.build()`` for the authoritative list). Source
-of truth: radio-robot-elite's CURRENT ``src/firm/messages/telemetry.h``
-``msg::Telemetry`` struct (21 top-level fields when ``acks_``/
-``acks_count`` are counted as ONE logical field, matching how a wire
-client reads them together) plus this port's own two M1 additions (spec
-Sec 7.2/7.5): ``cycle_overrun_count`` and ``watchdog_fault``. NOTE this
-oracle has evolved past the "22 fields" plain description PLAN.md/spec
-give -- no document in this repo enumerates the 22 names directly, so
-this module's field list is this ticket's own grounded reconstruction,
-documented here rather than asserted without a paper trail:
+Field derivation (see ``TelemetryFrameBuilder.build()``'s inline
+enumeration for the authoritative list). Source of truth:
+radio-robot-elite's ``src/firm/messages/telemetry.h`` ``msg::Telemetry``
+struct (21 top-level fields when ``acks_``/``acks_count`` count as one
+logical field) plus this port's own two additions:
+``cycle_overrun_count`` and ``watchdog_fault``.
 
   - ``duty_per_speed_left/right``, ``bias_left/right``, ``pid_left/
     right`` exist in ``msg::Telemetry`` (byte-for-byte wire-compatible
-    shape, spec Sec 2 "byte-for-byte compatible") but have NO source in
-    this port's kernel any more than they do in the CURRENT
-    radio-robot-elite kernel -- that oracle's own ``telemetry.cpp``
-    already documents holding them at zero for exactly this reason
-    ("EXPLORATORY-KERNEL REWRITE ... held at zero here"). This port
-    follows the SAME precedent: always zero, kept in the frame shape.
-  - ``color`` is always 0 -- no color driver exists this sprint (M7,
-    explicitly deferred per sprint.md's Out of Scope).
-  - ``watchdog_fault`` is exposed BOTH as its own top-level field (this
-    ticket's acceptance criterion: "the watchdog fault bit ... [is]
-    present and populated") AND as a bit inside ``flags`` (spec Sec 7.2's
-    literal wording: "fault bit in telemetry") -- one underlying value,
-    surfaced two ways so either reading style finds it.
+    shape) but have no source in this port's kernel -- matches
+    radio-robot-elite's own current kernel, which also holds them at
+    zero. Always zero here, kept in the frame shape.
+  - ``color`` is always 0 -- no color driver exists yet (deferred).
+  - ``watchdog_fault`` is exposed both as its own top-level field and
+    as a bit inside ``flags`` -- one underlying value, surfaced two
+    ways so either reading style finds it.
 
-MicroPython-only modules are import-guarded so this module imports and
-runs unmodified under CPython (this ticket's own offline gate)."""
+MicroPython-only modules are import-guarded so this module runs under
+CPython too."""
 
 __all__ = [
     "FLAG_ACTIVE",
@@ -76,11 +63,9 @@ SEQ_MODULUS = 128
 
 
 class TelemetryState:
-    """Plain, mutable snapshot of everything a frame needs -- the
-    "synthetic sensor/kernel-state fixture" this ticket's acceptance
-    criteria ask ``tests/test_telemetry.py`` to assert against. Every
-    field has a safe zero/False default so a caller only needs to set
-    what a given test scenario actually exercises.
+    """Plain, mutable snapshot of everything a frame needs. Every field
+    has a safe zero/False default so a caller only needs to set what a
+    given test scenario actually exercises.
 
     ``diffdrive_output``: the dict ``diffdrive.output()`` returns (or a
     fake with the same keys under CPython) -- see

@@ -1,15 +1,12 @@
-"""line -- PlanetX 4-channel line sensor driver (I2C 0x1A), M5 (PLAN.md /
-``docs/design/specification.md`` Sec 6).
+"""line -- PlanetX 4-channel line sensor driver (I2C 0x1A), spec Sec 6.
 
 All bus traffic goes through the moddiffdrive I2C broker
-(``robotio.i2c_xfer()``, ticket 004) -- never a direct bus access -- so
-the shared clearance ledger stays intact (spec Sec 5 "One I2C ledger"),
-same discipline as ``otos.py``.
+(``robotio.i2c_xfer()``) -- never a direct bus access -- so the shared
+clearance ledger stays intact (spec Sec 5 "One I2C ledger"), same
+discipline as ``otos.py``.
 
-Bus facts as captured (ticket 007's own scope note: "0x1A x4/50 ms"),
-verified against radio-robot-elite's current
-``src/firm/hardware/planetx/line_sensor.h`` (chip-level protocol, not
-touched by that repo's kernel rewrite):
+Bus facts (verified against radio-robot-elite's
+``src/firm/hardware/planetx/line_sensor.h``):
 
   - Device address 0x1A.
   - Protocol: write one byte (channel index 0-3), then read one byte of
@@ -19,17 +16,11 @@ touched by that repo's kernel rewrite):
     no-op (returns the cached reading) if called before that much time
     has elapsed since the last real bus read.
 
-Normalization: the schema/`data/*.json` carry no per-channel calibration
-(``cal_min``/``cal_max``) fields today -- ``robot_config.schema.json``
-has no such group, and the copied per-robot JSON's own ``perception``
-block only records mount geometry, not calibration bounds (see
-``data/tovez.json``'s own ``perception`` block). Rather than fabricate a
-calibration this repo has no source for, ``LineSensor`` normalizes with
-the chip's own raw 0-255 span as the identity calibration
-(``cal_min=0``, ``cal_max=255``) unless a caller supplies real bounds --
-flagged here, not silently invented, matching this codebase's own
-"flag rather than fabricate a number" discipline (see e.g.
-``data/README.md``)."""
+Normalization: no per-robot JSON field carries per-channel calibration
+(``cal_min``/``cal_max``) today, so ``LineSensor`` normalizes with the
+chip's own raw 0-255 span as the identity calibration (``cal_min=0``,
+``cal_max=255``) unless a caller supplies real bounds -- flagged, not
+silently invented (see ``data/README.md``)."""
 
 __all__ = ["LINE_ADDR", "READ_PERIOD_MS", "LineReading", "LineSensor"]
 
@@ -87,11 +78,9 @@ class LineSensor:
     def init(self):
         """Probe presence: one full 4-channel raw read must succeed
         (status 0 on every channel) -- mirrors ``LineSensorLeaf::
-        beginStep()``'s own "a successful 4-channel raw read means
-        present" contract, simplified to a single attempt (this port has
-        no fiber-cycle-paced retry loop to drive a multi-attempt
-        detection state machine through; a caller that wants retries can
-        call ``init()`` again). Never raises on a bus error."""
+        beginStep()``'s presence check, simplified to a single attempt
+        (a caller wanting retries can call ``init()`` again). Never
+        raises on a bus error."""
         raw = self._read_raw()
         self.connected = raw is not None
         if self.connected:

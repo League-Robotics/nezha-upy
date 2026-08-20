@@ -1,21 +1,19 @@
-"""wifi_at -- WiFi AT state machine + UDP v5 plane + TCP-REPL demux
-(ticket 006, M4).
+"""wifi_at -- WiFi AT state machine + UDP v5 plane + TCP-REPL demux.
 
 Owns EVERYTHING the AT dialogue needs: joining the network, `CIPMUX=1`,
 bringing up the TCP REPL mirror server and the UDP v5 socket, per-
 datagram coalescing (ONE `AT+CIPSEND` per datagram, never per-character
--- PLAN.md's landmine ledger: "per-char AT sends flood the module"), the
->=50 ms telemetry throttle specific to this plane (spec Sec 8), and
-READY-on-new-peer-edge handling. See `docs/design/specification.md`
-Sec 3/5/8 and `reference/modrobot/wifi_stdio.cpp` (the proven AT-
-sequence oracle this module's state machine, `IpdParser`, and `Matcher`
-port from -- NOT a straight copy, since that file targeted the old
-modrobot module surface and ran the AT dialogue in C++; here it is
-Python, per spec Sec 3: "the AT state machine on top is Python").
+-- per-char AT sends flood the module), the >=50 ms telemetry throttle
+specific to this plane (spec Sec 8), and READY-on-new-peer-edge
+handling. See `docs/design/specification.md` Sec 3/5/8 and
+`reference/modrobot/wifi_stdio.cpp` (the proven AT-sequence oracle this
+module's state machine, `IpdParser`, and `Matcher` port from -- NOT a
+straight copy: that file ran the AT dialogue in C++; here it is Python,
+per spec Sec 3).
 
-Split of responsibility with the native `wifiuart` module (ticket 006's
-C side, `native/modwifiuart.cpp` + `native/codal_app/wifi_uart_pipe.cpp`
-+ `wifi_stdio_hook.cpp`): the C side is a byte-pipe shim over the
+Split of responsibility with the native `wifiuart` module
+(`native/modwifiuart.cpp` + `native/codal_app/wifi_uart_pipe.cpp` +
+`wifi_stdio_hook.cpp`): the C side is a byte-pipe shim over the
 module's UARTE1 link (the stock micropython-microbit-v2 port never
 exposes the second UARTE, and `microbit.uart.init(tx,rx)` retargets the
 ONE stdio UART -- see `native/wifi_uart_fwd.h`) plus a tiny stdin-inject/
@@ -23,8 +21,8 @@ stdout-capture ring pair for mirroring the REPL. EVERY byte of AT
 dialogue, `+IPD` framing, and datagram coalescing happens HERE, in
 Python -- the C side never parses an AT reply or an `+IPD` header.
 
-The UDP v5 plane feeds `src/comms.py`'s SAME `Comms` engine from ticket
-005 (`WifiAtLink` implements that module's own Transport contract --
+The UDP v5 plane feeds `src/comms.py`'s SAME `Comms` engine
+(`WifiAtLink` implements that module's own Transport contract --
 `read_line()`/`send()`/`send_reliable()` -- so `comms.add_transport(link)`
 just works), NOT a second protocol engine.
 
@@ -38,17 +36,15 @@ work, no `time.sleep`/busy-wait loops) -- a deliberate difference from
 safe there only because it runs off the C stdio HAL's own call sites,
 never inside a single bounded Python pump tick.
 
-BENCH-TIME NOTE (expanded fully in ticket 009's procedures doc): the
-WiFi module persists its AP-join/socket/server state across nRF52
-reflashes (PLAN.md's landmine ledger) -- power-cycle the module before
-any WiFi bring-up session, or this state machine's own `AT+RST` may
-race a module that is mid-way through its own stale auto-rejoin.
+BENCH-TIME NOTE: the WiFi module persists its AP-join/socket/server
+state across nRF52 reflashes -- power-cycle the module before any WiFi
+bring-up session, or this state machine's own `AT+RST` may race a
+module that is mid-way through its own stale auto-rejoin.
 
 MicroPython-only modules (`micropython`'s own `wifiuart`) are import-
-guarded so this whole module imports under CPython (this ticket's
-offline gate) -- see the top of the file. `json` is also import-guarded
-(`load_secrets()` degrades to `(None, None)` without it) since it is not
-guaranteed present on every MicroPython build.
+guarded so this whole module imports under CPython. `json` is also
+import-guarded (`load_secrets()` degrades to `(None, None)` without it)
+since it is not guaranteed present on every MicroPython build.
 
 Deviations from the radio-robot/wifi_stdio.cpp sources, matching
 `wire.py`/`comms.py`'s own precedent: no `from __future__ import
@@ -260,12 +256,12 @@ class _IpdParser:
 class TlmThrottle:
     """>=50 ms telemetry throttle specific to the WiFi plane (spec Sec 8)
     -- independent of `comms.py`'s own general 25 ms primary-frame
-    cadence (`TelemetryPolicy`, ticket 005): this throttle caps how
-    often a PERIODIC (non-ack) telemetry push actually goes out over
+    cadence (`TelemetryPolicy`): this throttle caps how often a
+    PERIODIC (non-ack) telemetry push actually goes out over
     THIS plane, even when the engine's own cadence would ask for it more
     often. Deliberately its own tiny class (rather than folded directly
-    into `WifiAtLink`) so its timer logic is unit-testable in isolation
-    -- see this ticket's own acceptance criteria."""
+    into `WifiAtLink`) so its timer logic is unit-testable in
+    isolation."""
 
     def __init__(self, min_interval_ms=TLM_MIN_INTERVAL_MS):
         self._min_interval_ms = min_interval_ms
@@ -297,7 +293,7 @@ class WifiAtLink:
     bytes`. `NativeReplHook` below adapts the native `wifiuart` module's
     own repl_active/stdin_push/stdout_pull surface; `None` (the default)
     leaves the REPL mirror inert -- the UDP v5 plane still works fully
-    without it (this ticket's own offline gate never wires one)."""
+    without it."""
 
     def __init__(self, serial, ssid, password, port=DEFAULT_PORT,
                  discovery_port=DEFAULT_DISCOVERY_PORT, baudrate=115200,
@@ -347,8 +343,8 @@ class WifiAtLink:
 
         self._serial.init(baudrate)
 
-    # -- comms.py Transport contract (ticket 005) -- the UDP v5 plane --
-    # feeds the SAME engine, never a second protocol engine. ------------
+    # -- comms.py Transport contract -- the UDP v5 plane feeds the SAME
+    # engine, never a second protocol engine. ---------------------------
 
     def read_line(self):
         """Non-blocking. Returns the next complete v5 UDP datagram's raw
@@ -477,8 +473,7 @@ class WifiAtLink:
         # here are always well under the UARTE's 250-byte TX buffer
         # (native/codal_app/wifi_uart_pipe.cpp), so a single accepted
         # write is the expected case; this module does not retry a
-        # short write (out of scope -- see the module docstring's
-        # non-blocking-by-construction note).
+        # short write.
         self._serial.write((command_text + "\r\n").encode("ascii"))
         expect_bytes = expect.encode("ascii") if isinstance(expect, str) else expect
         self._start_await(expect_bytes, timeout_ms, now)
@@ -790,9 +785,8 @@ def pump(link, now, comms=None):
     spec Sec 8's "READY on new-peer edge handled in the pump" -- sends
     the boot READY line once per NEW v5 peer this plane starts hearing
     from. `comms`, if given, is the SAME `comms.Comms` instance `link`
-    was registered on via `comms.add_transport(link)` (ticket 005) --
-    the UDP v5 plane feeds that one engine, never a second protocol
-    engine (this ticket's own acceptance criteria)."""
+    was registered on via `comms.add_transport(link)` -- the UDP v5
+    plane feeds that one engine, never a second protocol engine."""
     link.service(now)
     if comms is not None and link.poll_new_peer_edge():
         comms.send_ready()
@@ -827,9 +821,9 @@ def load_secrets(path="wifi_secrets.json"):
 
 
 class NativeWifiSerial:
-    """Adapts the native `wifiuart` module (native/modwifiuart.cpp,
-    ticket 006) to the small duck-typed AT byte-pipe contract
-    `WifiAtLink` expects (`init`/`write`/`any`/`read`) -- see
+    """Adapts the native `wifiuart` module (native/modwifiuart.cpp) to
+    the small duck-typed AT byte-pipe contract `WifiAtLink` expects
+    (`init`/`write`/`any`/`read`) -- see
     `native/wifi_uart_fwd.h` for the C side. Only usable on a
     `--with-wifi` build; every method here is a thin one-line forward
     to the `wifiuart` module, so a missing import surfaces immediately

@@ -1,17 +1,14 @@
-"""otos -- SparkFun OTOS optical tracking chip driver (I2C 0x17), M5
-(PLAN.md / ``docs/design/specification.md`` Sec 6).
+"""otos -- SparkFun OTOS optical tracking chip driver (I2C 0x17), spec
+Sec 6.
 
 All bus traffic goes through the moddiffdrive I2C broker
-(``robotio.i2c_xfer()``, ticket 004) -- never a direct bus access -- so
-the shared clearance ledger (per-device ``lastEnd``/``readyAt`` timers,
-spec Sec 5 "One I2C ledger") stays intact between Python sensor code and
-the kernel's own Nezha traffic.
+(``robotio.i2c_xfer()``) -- never a direct bus access -- so the shared
+clearance ledger (per-device ``lastEnd``/``readyAt`` timers, spec Sec 5
+"One I2C ledger") stays intact between Python sensor code and the
+kernel's own Nezha traffic.
 
-Bus facts as captured (ticket 007's own scope note: "0x17 init/scales/
-20 ms"), verified against radio-robot-elite's current
-``src/firm/hardware/generic/real_otos.h`` (the chip-level register map
-and LSB scales are hardware facts, not something the kernel-rewrite the
-rest of that repo's telemetry stack went through touched):
+Bus facts (verified against radio-robot-elite's
+``src/firm/hardware/generic/real_otos.h``):
 
   - Device address 0x17.
   - Registers: product ID 0x00 (expected 0x5F), linear scalar 0x04,
@@ -48,10 +45,7 @@ _EXPECTED_PRODUCT_ID = 0x5F
 
 # scale -> int8 register encoding, verified against radio-robot-elite's
 # real_otos.cpp scaleToRegister(): raw = round((scale - 1.0) / 0.001),
-# clamped to an int8's range. Chip knowledge, not something this repo's
-# kernel rewrite touched -- ported here since robotio.i2c_xfer() lets
-# this driver actually perform the write, unlike the scale factor itself
-# (recorded, not blindly guessed, where no such reference existed).
+# clamped to an int8's range.
 _SCALE_REGISTER_STEP = 0.001
 _SCALE_REGISTER_MAX = 127
 _SCALE_REGISTER_MIN = -127
@@ -113,10 +107,9 @@ class Otos:
     def init(self):
         """Probe the product ID register; ``connected`` is True iff it
         reads back ``_EXPECTED_PRODUCT_ID`` (0x5F) -- mirrors
-        ``RealOtos::begin()``'s own probe-then-configure shape. Never
-        raises on a bus error -- a disconnected/absent OTOS is a normal,
-        expected condition (this robot's own ``otos_present`` status
-        flag exists for exactly this), not a fault."""
+        ``RealOtos::begin()``'s probe-then-configure shape. Never raises
+        on a bus error -- a disconnected/absent OTOS is a normal,
+        expected condition, not a fault."""
         status, data = self._i2c.i2c_xfer(
             OTOS_ADDR, write_data=bytes([_REG_PRODUCT_ID]), read_len=1, repeated=True
         )

@@ -1,11 +1,10 @@
 """radio_shim -- MicroPython `radio` module wrapper + RAW250 fragment
 reassembly, implementing the same duck-typed Transport contract
-`comms.py` expects (`read_line()`/`send()`/`send_reliable()` -- see
-`comms.py`'s own module docstring for that contract).
+`comms.py` expects (`read_line()`/`send()`/`send_reliable()`).
 
 Ported from radio-robot's
-`src/firm/platform/microbit/microbit_radio_link.{h,cpp}` -- see that
-header's own doc comment for the RAW250 framing this mirrors:
+`src/firm/platform/microbit/microbit_radio_link.{h,cpp}` -- RAW250
+framing:
 
     [SEQ:1][FLAGS:1][LEN:1][payload:LEN]
 
@@ -18,20 +17,17 @@ even the START check, exactly like `onData()`'s own early return.
 
 `length=250` (`MICROBIT_RADIO_MAX_PACKET_SIZE`) must match the relay's
 on-air MAXLEN; `group=10` is fixed to match the relay; `channel` comes
-from the robot's JSON config (ticket 002's `data/*.json`); `queue=4`
-fixes the C++ single-slot RX loss the old firmware carried (PLAN.md:
-"queue=4 fixes the C++ single-slot RX loss").
+from the robot's JSON config; `queue=4` fixes the C++ single-slot RX
+loss the old firmware carried.
 
 MicroPython-only: the `radio` module is import-guarded so this file
 imports and the reassembly/fragmentation logic (`feed_frame()`/`send()`)
-runs unmodified under CPython -- this ticket's own offline gate feeds
-synthetic/captured on-air byte sequences directly into `feed_frame()`
-without any hardware.
+runs unmodified under CPython, fed synthetic/captured on-air byte
+sequences directly with no hardware.
 
 Deviations from the radio-robot source, matching `wire.py`'s own
 precedent: no PEP 604/generic-subscript type hints, no f-strings
-(project style: CLAUDE.md) -- every function's shape is documented in
-its docstring instead.
+(project style: CLAUDE.md).
 """
 
 try:
@@ -126,8 +122,7 @@ class RadioLink:
         """Process ONE on-air frame's raw bytes -- mirrors `onData()`
         exactly: binary-clean (no interpretation beyond the 3-byte
         header), safe to call directly with synthetic/captured on-air
-        byte sequences (this is this ticket's offline gate for fragment
-        reassembly -- no radio hardware required)."""
+        byte sequences, no radio hardware required."""
         frame = bytes(frame)
         n = len(frame)
         if n < FRAME_HEADER:
@@ -186,9 +181,8 @@ class RadioLink:
         Truncates to 255 content bytes before appending the trailing
         `'\\n'` delimiter, matching `MicroBitRadioLink::send()`'s
         256-byte payload buffer exactly. Returns the list of frames
-        actually built (bytes each), primarily so tests can verify
-        fragmentation/feed a peer `RadioLink` without live hardware --
-        harmless to ignore on-device."""
+        actually built (bytes each) -- lets tests verify fragmentation
+        without live hardware; harmless to ignore on-device."""
         data = bytes(data)
         n = len(data) if len(data) < _MAX_SEND_CONTENT else _MAX_SEND_CONTENT
         payload = data[:n] + b"\n"
@@ -232,8 +226,8 @@ class RadioLink:
 
             # Built by concatenation, never mutation: this port compiles
             # out MICROPY_PY_ARRAY_SLICE_ASSIGN, so bytearray slice-store
-            # raises TypeError ON DEVICE only (bench 2026-08-19: crashed
-            # boot's banner send and scroll-bricked the display).
+            # raises TypeError ON DEVICE only (see docs/bench-log-
+            # zetuv-2026-08-19.md).
             seq = self._tx_seq & 0xFF
             self._tx_seq = (self._tx_seq + 1) & 0xFF
             frame = bytes((seq, flags, chunk)) + bytes(payload[off:off + chunk])

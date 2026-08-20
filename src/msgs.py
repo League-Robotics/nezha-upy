@@ -1,47 +1,23 @@
 """msgs -- v5 wire verb registry.
 
-GENERATED -- do not edit (hand-seeded pending gen_messages.py --emit-upy).
+GENERATED -- do not edit (hand-seeded pending gen_messages.py's
+``--emit-upy`` mode -- spec Sec 10.3 open item 3).
 
-This is a STOPGAP. `docs/design/specification.md` Sec 10.3 (spec open
-item 3) and this repo's sprint 001 architecture (`clasi/sprints/
-001-python-first-firmware-image-m0-m6/sprint.md`, "Codec generated, not
-hand-written") both say the real source of this file is radio-robot's
-`src/scripts/gen_messages.py` growing a third emission mode
-(`--emit-upy --out <path>`) over the SAME `src/protos/*.proto`
-field-descriptor walk that already emits `src/firm/messages/*.h`
-(C++, firmware) and `src/host/robot_radio/io/wire_commands.py`
-(Python, host). That generator change is radio-robot-side and explicitly
-out of scope for this sprint (sprint.md "Out of Scope"; this repo only
-consumes its output) -- so this file is hand-seeded to match what the
-generator's `--emit-upy` mode would walk for the ONE schema `src/wire.py`
-and this ticket's golden-vector suite actually need: the closed verb set
-and each verb's binary/cleartext framing.
+Source of truth, mirrored here by hand, byte-for-byte:
+``src/protos/commands.proto``'s ``Verb`` enum (the same schema
+``wire_commands.py`` is generated from). Only a verb's name and its
+``(binary)`` option are recorded here -- direction, dispatch, and a
+binary verb's payload SHAPE are explicitly NOT this registry's concern
+(commands.proto's own scope note). Verified against radio-robot-elite's
+generated ``wire_commands.py`` at seed time.
 
-Source of truth mirrored here, by hand, byte-for-byte:
-`src/protos/commands.proto`'s `Verb` enum (the SAME schema
-`wire_commands.py` is generated from -- see that file's own header for
-why a verb's name and its `(binary)` option are the ONE piece of
-generated metadata a wire-level consumer needs; direction, dispatch, and
-a binary verb's data SHAPE are explicitly NOT this registry's concern,
-per commands.proto's own scope note). Verified against radio-robot-elite
-`src/host/robot_radio/io/wire_commands.py` (also generated from the same
-enum) at seed time.
-
-Deliberately NOT included here (also deferred to the real generator, for
-the same out-of-scope-this-sprint reason): per-message protobuf field
-tables for the 13 binary verbs' payload bodies (`Move`, `Config`,
-`Stop`, `Wheels`, `Estop`, `Tlm`, `Ok`, `Err`, `GetConfig`, `Cfg`,
-`SetField`, `GoTo`, `Calibrate` -- `src/protos/envelope.proto`,
-`robot_config.proto`, `telemetry.proto`). `src/wire.py`'s COBS+CRC
-framing is schema-agnostic -- it only ever needs a verb's ASCII name (for
-the CRC's command scope) and whether that verb is binary or cleartext, so
-this registry is already everything the M2 gate's wire-level round-trip
-requires; a payload's own protobuf field layout is msgs.py's next
-generation's job, once `--emit-upy` lands and there is a real reference
-(protoc-compiled host pb2, or a device-side decode) to hand-verify a
-field table against -- fabricating one now, with no such reference
-available offline in this repo, would be a guess wearing a generated-file
-header.
+Deliberately NOT included: per-message protobuf field tables for the
+13 binary verbs' payload bodies. ``src/wire.py``'s COBS+CRC framing is
+schema-agnostic -- it only needs a verb's ASCII name and whether it's
+binary or cleartext, so this registry is already everything wire-level
+framing requires; a payload's own field layout needs a real generated
+reference (protoc-compiled pb2, or a device-side decode) to verify
+against, which is not available offline in this repo yet.
 """
 
 __all__ = [
@@ -60,9 +36,9 @@ class VerbEntry:
     ``binary``: bool -- True: COBS+CRC-framed binary ``<data>``; False:
     cleartext.
 
-    A plain class, not ``typing.NamedTuple`` (host-only `typing` import;
-    MicroPython does not ship it) -- construction is positional-compatible
-    with a 2-tuple so call sites read the same either way."""
+    A plain class, not ``typing.NamedTuple`` (MicroPython has no
+    ``typing``) -- construction stays positional-compatible with a
+    2-tuple."""
 
     def __init__(self, name, binary):
         self.name = name

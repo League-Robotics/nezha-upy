@@ -4,16 +4,13 @@ policy, scheduled-pump plumbing.
 Ported from radio-robot's ``src/firm/core/comms.cpp``/``comms.h`` (line
 dispatch, verb interception, cleartext replies) and
 ``src/firm/core/telemetry.cpp``/``telemetry.h`` (ack ring, primary-frame
-emit policy) -- see those files' own headers for the full firmware-parity
-rationale. This port is this repo's own mirror, per PLAN.md M3 /
-``docs/design/specification.md`` Sec 5/6: same dispatch ORDER, same ring
+emit policy) -- spec Sec 5/6: same dispatch ORDER, same ring
 depths/packing, same emit-policy arithmetic; NOT a byte-for-byte binary
 frame encoder, because ``msgs.py`` has no per-verb protobuf field tables
-yet (its own docstring explains why -- that generator work is out of
-scope this sprint). Binary verbs are validated (COBS+CRC, via
-``wire.decode_frame()``) and handed to the firmware-layer dispatch
-interface (below) as opaque payload bytes; a full ``CommandEnvelope``
-decode is ticket 007's job once ``msgs.py`` grows field tables.
+yet. Binary verbs are validated (COBS+CRC, via ``wire.decode_frame()``)
+and handed to the firmware-layer dispatch interface (below) as opaque
+payload bytes; a full ``CommandEnvelope`` decode is future work once
+``msgs.py`` grows field tables.
 
 Dispatch order (mirrors ``Comms::dispatchLine()`` byte-for-byte -- see
 ``_dispatch_line()`` below):
@@ -32,11 +29,10 @@ Dispatch order (mirrors ``Comms::dispatchLine()`` byte-for-byte -- see
        queued for the firmware-layer dispatch interface; a cleartext verb
        is answered immediately (HELLO/PING/ID/VER/STATUS/HELP/POSE).
 
-Firmware-layer dispatch interface (per the sprint's Architecture Design
-Rationale: comms.py must not call ``moddiffdrive``/firmware modules
-directly, so THIS ticket's CPython loopback gate never needs the native
-module, which cannot load under CPython at all). A dispatch object is
-any duck-typed value exposing:
+Firmware-layer dispatch interface: comms.py must not call
+``moddiffdrive``/firmware modules directly, so the CPython loopback
+gate never needs the native module, which cannot load under CPython at
+all. A dispatch object is any duck-typed value exposing:
 
     handle_command(verb_name, payload, now) -> (corr_id, err_code) | None
 
@@ -48,9 +44,9 @@ integer ``Comms.pump()`` was called with. Returning a
 (``Telemetry.ack()``); returning ``None`` sends no ack for this command
 (the only correct choice when a real ``corr_id`` cannot be recovered --
 see ``NullDispatch`` below, the default when no dispatch is wired).
-Ticket 007's ``motion.py``/``config.py`` back this interface with the
-real ``moddiffdrive`` calls once a full envelope decode exists; THIS
-ticket's own test backs it with a recording stub.
+``motion.py``/``config.py`` back this interface with the real
+``moddiffdrive`` calls once a full envelope decode exists; tests back
+it with a recording stub.
 
 Transport contract (any object handed to ``Comms.add_transport()`` --
 ``src/radio_shim.py``'s ``RadioLink`` implements it, as does the
@@ -69,17 +65,16 @@ loopback test's own in-process pipe):
         for caller convenience; ``Comms`` always passes ``str`` here).
 
 Scheduled-pump plumbing (spec Sec 5): ``PumpTimer`` below wires a
-periodic source to ``micropython.schedule(pump)`` per the landmine
-ledger (fiber/IRQ Python execution corrupts the MicroPython heap -- Python
-never runs from IRQ/fiber context, only ever from main context between
-bytecodes). The REPL's own blocking-stdin-wait patch (so a queued pump
-still runs while a student's REPL sits at a blocking read) is a
-build-level (C) patch, not something reachable from this module -- see
-``PumpTimer``'s own docstring.
+periodic source to ``micropython.schedule(pump)`` -- fiber/IRQ Python
+execution corrupts the MicroPython heap, so pumping must run only from
+main context between bytecodes, never from IRQ/fiber context. The
+REPL's own blocking-stdin-wait patch (so a queued pump still runs while
+a student's REPL sits at a blocking read) is a build-level (C) patch,
+not something reachable from this module -- see ``PumpTimer``'s own
+docstring.
 
 MicroPython-only modules (``micropython``) are import-guarded so this
-whole module imports and runs unmodified under CPython (this ticket's
-own offline gate) -- see the top of the file.
+whole module imports and runs unmodified under CPython.
 
 Deviations from the radio-robot source, matching ``wire.py``'s own
 precedent: no ``from __future__ import annotations``, no PEP 604/generic-
@@ -318,13 +313,12 @@ def _classify_dbg_arg(data):
 
 class SeedRequest:
     """Mirrors ``Core::Comms::SeedRequest`` -- an external world-fix
-    staged by a SEED command, drained by the firmware layer (ticket 007's
-    ``motion.py``, mirroring ``RobotLoop::applySeed()``). ``x``/``y`` are
-    [mm], ``heading`` is [rad] (matches the C++ struct's own units
-    exactly). ``reply_transport`` is the transport the SEED command
-    arrived on -- the firmware layer echoes an accepted seed back on it,
-    same as ``RobotLoop::applySeed()``'s ``seed.reply->sendReliable()``;
-    comms.py itself never sends that reply (it does not own odometry)."""
+    staged by a SEED command, drained by the firmware layer (``motion.py``,
+    mirroring ``RobotLoop::applySeed()``). ``x``/``y`` are [mm],
+    ``heading`` is [rad] (matches the C++ struct's own units exactly).
+    ``reply_transport`` is the transport the SEED command arrived on --
+    the firmware layer echoes an accepted seed back on it; comms.py
+    itself never sends that reply (it does not own odometry)."""
 
     def __init__(self, x, y, heading, reply_transport):
         self.x = x
@@ -362,16 +356,15 @@ class Status:
 
 class NullDispatch:
     """Default firmware-layer dispatch -- installed automatically when
-    ``Comms`` is constructed without an explicit ``dispatch`` (this
-    ticket's own CPython gate: no moddiffdrive, no motion.py/config.py
-    exist yet). Every binary command is accepted onto the wire (COBS+CRC
-    already validated before ``handle_command()`` is ever called) but
-    produces NO ack: an ack needs a real ``corr_id``, which lives inside
-    the still-opaque envelope bytes ``payload`` carries (see the module
-    docstring -- ``msgs.py`` has no per-verb protobuf field tables yet),
-    so there is nothing correct to ack with. Returning ``None`` is
-    exactly ``Comms.pump()``'s 'skip the ack' signal -- the only honest
-    behavior available with no firmware layer wired."""
+    ``Comms`` is constructed without an explicit ``dispatch``. Every
+    binary command is accepted onto the wire (COBS+CRC already validated
+    before ``handle_command()`` is ever called) but produces NO ack: an
+    ack needs a real ``corr_id``, which lives inside the still-opaque
+    envelope bytes ``payload`` carries (see the module docstring --
+    ``msgs.py`` has no per-verb protobuf field tables yet), so there is
+    nothing correct to ack with. Returning ``None`` is exactly
+    ``Comms.pump()``'s 'skip the ack' signal -- the only honest behavior
+    available with no firmware layer wired."""
 
     def handle_command(self, verb_name, payload, now):
         return None
@@ -382,26 +375,23 @@ class TelemetryPolicy:
     frame CONTENT -- mirrors ``Core::Telemetry``'s ack ring
     (``pushAckRing``/``emitPrimary``'s ack half) and emit policy
     (``primaryDue``/``pendingAckDeliveries``/``emit``) exactly, but does
-    NOT build a real 22-field TLM wire frame (that is ticket 007's
-    ``src/telemetry.py`` -- see this module's own docstring for why: no
-    protobuf field tables exist yet in ``msgs.py``). Named ``TelemetryPolicy``
-    rather than ``Telemetry`` specifically to avoid colliding with that
-    future module's name.
+    NOT build a real 22-field TLM wire frame (that is ``src/telemetry.py``
+    -- no protobuf field tables exist yet in ``msgs.py``). Named
+    ``TelemetryPolicy`` rather than ``Telemetry`` specifically to avoid
+    colliding with that module's name.
 
     Activity tracking is a deliberately simplified slice of
     ``Telemetry::update()``: the real C++ source derives ``kFlagActive``
     from a full ``RobotState``; this port exposes ``set_active(active,
     now)`` directly so the CPython loopback gate can drive "silent while
     parked" / "unsolicited while moving" without needing the firmware
-    layer's state model (per the ticket's own "stubbed telemetry source"
-    acceptance wording).
+    layer's state model.
 
     ``emit_callback(now, acks)``, if given, is called exactly when a
     primary frame WOULD be sent -- ``acks`` is the list of currently-live
     packed ack ints (``corr_id << 4 | err_code``, oldest first). Building
     and broadcasting the real wire bytes for that frame is left to the
-    caller (ticket 007+; see the module docstring) -- this class only
-    decides WHEN and WHAT acks ride along.
+    caller -- this class only decides WHEN and WHAT acks ride along.
     """
 
     def __init__(self, emit_callback=None):
@@ -779,9 +769,8 @@ class Comms:
         """Bounded per-call work, mirrors ``Comms::pump()`` PLUS the
         command-ring-drain / TLM-reply / telemetry-emit sequence
         ``RobotLoop`` runs immediately after it in the C++ source (there
-        is no separate RobotLoop-equivalent module in this sprint's
-        Python layer -- see the sprint architecture's module table:
-        comms.py owns "dispatch order, ack ring, telemetry emit policy").
+        is no separate RobotLoop-equivalent module in this port -- comms.py
+        owns dispatch order, ack ring, and telemetry emit policy).
 
         ``now``: int [ms], monotonic, caller-supplied (this module has no
         clock of its own -- see ``PumpTimer`` for the MicroPython-side
@@ -809,11 +798,10 @@ class Comms:
 class PumpTimer:
     """MicroPython-only scheduled-pump plumbing (spec Sec 5): a periodic
     source calls ``tick()`` -- a hardware timer IRQ (deliberately NOT
-    hard-coded to a specific peripheral API here; ticket 004's native
-    module or a future ``machine.Timer`` may supply it, whichever a later
-    ticket wires up) -- and ``tick()`` ONLY EVER queues the real work via
-    ``micropython.schedule()``, never runs it directly: per PLAN.md's
-    landmine ledger, Python execution from IRQ/fiber context corrupts the
+    hard-coded to a specific peripheral API here; a native module or a
+    future ``machine.Timer`` may supply it) -- and ``tick()`` ONLY EVER
+    queues the real work via ``micropython.schedule()``, never runs it
+    directly: Python execution from IRQ/fiber context corrupts the
     MicroPython heap, so ``pump()`` must always run later, from main
     context, between bytecodes. That is also what keeps the USB REPL
     live -- ``micropython.schedule()`` callbacks run between bytecodes
@@ -822,8 +810,7 @@ class PumpTimer:
     The other half of Sec 5's contract -- patching the REPL's blocking
     stdin-wait loop so a queued callback still runs while a student's
     REPL sits at a blocking read -- is a C-level build patch
-    (``patches/``), not something reachable from this Python class; see
-    CLAUDE.md's build-machinery note.
+    (``patches/``), not reachable from this Python class.
 
     On CPython (``micropython`` unavailable) ``tick()`` degrades to
     calling ``pump()`` immediately and synchronously -- deterministic,
