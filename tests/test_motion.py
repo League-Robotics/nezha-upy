@@ -19,13 +19,17 @@ import motion  # noqa: E402
 class _StubDiffDrive:
     """Records every call; `output()` reports a simple integrating
     position model (position advances by `drive()`'s `v` each call) so
-    `stop_distance_mm` is exercisable."""
+    `stop_distance_mm` is exercisable. `step()`/`cyclePeriod()` extend
+    this same stub for the generator-mode tests below (ticket 007) --
+    unused by, and harmless to, the MoveQueue/RobotDispatch tests above."""
 
-    def __init__(self):
+    def __init__(self, cycle_period_ms=24):
         self.drive_calls = []
         self.neutral_calls = 0
         self.estop_calls = 0
         self.duty_calls = []
+        self.step_calls = 0
+        self._cycle_period_ms = cycle_period_ms
         self._position = 0.0
 
     def drive(self, v, twist, lease_ms):
@@ -45,6 +49,12 @@ class _StubDiffDrive:
 
     def output(self):
         return {"positionLeft": self._position, "positionRight": self._position}
+
+    def step(self):
+        self.step_calls += 1
+
+    def cyclePeriod(self):
+        return self._cycle_period_ms
 
 
 # --- Move validation -----------------------------------------------
@@ -418,3 +428,166 @@ def test_dispatch_go_to_without_pose_provider_acks_malformed():
 def test_dispatch_unknown_verb_returns_none():
     dispatch, diffdrive, queue, _ = _make_dispatch()
     assert dispatch.handle_command("VER", b"", 1000) is None
+
+
+# --- Generator-driven move mode (ticket 007, SUC-001/SUC-002) ----------
+# Offline against the same _StubDiffDrive (step()/cyclePeriod()-extended
+# above), driven by a fake, GC-independent ms clock -- no real sleeping.
+
+class _FakeClock:
+    """`sleep()` advances the counter instead of blocking, so pacing
+    tests run instantly and deterministically. No ticks-wraparound
+    handling needed at these magnitudes -- motion.py's own CPython
+    fallback for `_ticks_add`/`_ticks_diff` is plain +/-."""
+
+    def __init__(self, start_ms=0):
+        self.ms = start_ms
+        self.sleep_calls = []
+
+    def now(self):
+        return self.ms
+
+    def sleep(self, wait_ms):
+        self.sleep_calls.append(wait_ms)
+        self.ms += wait_ms
+
+
+def test_generator_each_next_runs_exactly_one_kernel_step():
+    diffdrive = _StubDiffDrive()
+    clock = _FakeClock()
+    gen = motion.drive(diffdrive, v=1.0, twist=0.0, duration_ms=1000,
+                        ticks_ms=clock.now, sleep_ms=clock.sleep)
+    for expected in range(1, 4):
+        next(gen)
+        assert diffdrive.step_calls == expected
+    gen.close()
+
+
+def test_generator_pacing_uses_absolute_deadlines_not_drifting_sleep():
+    """Absolute-deadline pacing (mirroring the vendored kernel's own
+    run()) self-corrects for a slow cycle instead of drifting: make
+    step() cost 10ms (matching moddiffdrive.cpp's ~9-10ms real settle
+    cost) and confirm the NEXT wait shrinks to period-cost, not the
+    full period -- proof the deadline is `previous_cycle + period`, not
+    `now() + period`."""
+    diffdrive = _StubDiffDrive(cycle_period_ms=24)
+    clock = _FakeClock()
+    step_cost_ms = 10
+    real_step = diffdrive.step
+
+    def step_with_cost():
+        real_step()
+        clock.ms += step_cost_ms
+
+    diffdrive.step = step_with_cost
+
+    gen = motion.drive(diffdrive, v=1.0, twist=0.0, duration_ms=1000,
+                        ticks_ms=clock.now, sleep_ms=clock.sleep)
+    next(gen)  # cycle 1: cycle == now at start, no wait yet
+    assert clock.sleep_calls == []
+    next(gen)  # cycle 2: wait = period - step_cost, not the full period
+    assert clock.sleep_calls == [24 - step_cost_ms]
+    gen.close()
+
+
+def test_generator_lease_renewed_each_cycle_is_short():
+    diffdrive = _StubDiffDrive(cycle_period_ms=24)
+    clock = _FakeClock()
+    gen = motion.drive(diffdrive, v=2.0, twist=0.5, duration_ms=1000,
+                        ticks_ms=clock.now, sleep_ms=clock.sleep)
+    for _ in range(3):
+        next(gen)
+    expected_lease = 24 * motion.GEN_LEASE_PERIODS
+    assert diffdrive.drive_calls == [(2.0, 0.5, expected_lease)] * 3
+    gen.close()
+
+
+def test_generator_finally_lands_neutral_on_normal_completion():
+    diffdrive = _StubDiffDrive(cycle_period_ms=24)
+    clock = _FakeClock()
+    gen = motion.drive(diffdrive, v=1.0, twist=0.0, duration_ms=72,
+                        ticks_ms=clock.now, sleep_ms=clock.sleep)
+    yields = 0
+    with pytest.raises(StopIteration):
+        while True:
+            next(gen)
+            yields += 1
+    assert yields == 4
+    assert diffdrive.neutral_calls == 1
+    assert diffdrive.step_calls == 5  # 4 driving cycles + 1 landing step in finally
+
+
+def test_generator_finally_lands_neutral_on_break():
+    diffdrive = _StubDiffDrive(cycle_period_ms=24)
+    clock = _FakeClock()
+    gen = motion.drive(diffdrive, v=1.0, twist=0.0, duration_ms=1000,
+                        ticks_ms=clock.now, sleep_ms=clock.sleep)
+    next(gen)
+    next(gen)
+    assert diffdrive.step_calls == 2
+    assert diffdrive.neutral_calls == 0
+
+    gen.close()  # simulates `break` out of `for state in motion.drive(...): ...`
+
+    assert diffdrive.neutral_calls == 1
+    assert diffdrive.step_calls == 3  # 2 driving cycles + 1 landing step
+
+
+def test_generator_zero_duration_still_lands_clean_neutral():
+    diffdrive = _StubDiffDrive(cycle_period_ms=24)
+    clock = _FakeClock()
+    gen = motion.drive(diffdrive, v=1.0, twist=0.0, duration_ms=0,
+                        ticks_ms=clock.now, sleep_ms=clock.sleep)
+    with pytest.raises(StopIteration):
+        next(gen)
+    assert diffdrive.drive_calls == []  # no driving cycle ever ran
+    assert diffdrive.step_calls == 1  # only the finally's landing step
+    assert diffdrive.neutral_calls == 1
+
+
+def test_generator_rejects_duration_over_ceiling():
+    diffdrive = _StubDiffDrive()
+    gen = motion.drive(diffdrive, v=1.0, twist=0.0,
+                        duration_ms=motion.MAX_MOVE_DURATION_MS + 1)
+    with pytest.raises(motion.MoveQueueError):
+        next(gen)
+
+
+def test_generator_abandoned_stops_stepping_with_short_lease_outstanding():
+    """Python never auto-advances a generator -- an abandoned one simply
+    stops stepping ("wheels move only while you keep iterating"). The
+    short (~3x period) lease outstanding on the last drive() is what
+    lets the native kernel decay to neutral on its own once it expires
+    (hardware-verified in ticket 009); this offline test verifies the
+    Python-side precondition that makes that decay possible."""
+    diffdrive = _StubDiffDrive(cycle_period_ms=24)
+    clock = _FakeClock()
+    gen = motion.drive(diffdrive, v=1.0, twist=0.0, duration_ms=1000,
+                        ticks_ms=clock.now, sleep_ms=clock.sleep)
+    next(gen)
+    next(gen)
+    steps_after_two_cycles = diffdrive.step_calls
+    last_lease = diffdrive.drive_calls[-1][2]
+    assert last_lease == diffdrive.cyclePeriod() * motion.GEN_LEASE_PERIODS
+
+    # Abandoned: no further next() calls, ever.
+    assert diffdrive.step_calls == steps_after_two_cycles
+
+
+def test_move_queue_background_mode_unaffected_by_generator_addition():
+    """Proves the ticket-007 generator addition changed nothing about
+    MoveQueue/RobotDispatch: same _StubDiffDrive (now step()/
+    cyclePeriod()-extended, harmlessly), same tick()-driven fiber-mode
+    behavior as the pre-existing tests above -- and it never calls the
+    new step()/cyclePeriod() surface at all."""
+    diffdrive = _StubDiffDrive()
+    queue = motion.MoveQueue(diffdrive)
+    queue.enqueue(motion.Move(v=3.0, duration_ms=100))
+
+    queue.tick(now_ms=0)
+    assert queue.is_running() is True
+    assert diffdrive.drive_calls[-1] == (3.0, 0.0, 100)  # lease shrinks to remaining duration
+    assert diffdrive.step_calls == 0  # background/fiber mode never calls step()
+
+    queue.tick(now_ms=100)
+    assert queue.is_running() is False

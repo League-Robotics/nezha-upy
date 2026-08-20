@@ -36,11 +36,14 @@ watchdog.h``) is the safety backstop for that case (fault bit surfaced
 in ``telemetry.py``'s ``watchdog_fault`` field), not a substitute for
 the contract itself.
 
-A second, additive execution mode -- move commands as Python
-generators, each ``next()`` running one kernel ``step()`` inline with
-the generator owning pacing -- is a deliberately deferred extension
-(see ``clasi/issues/generator-driven-control-loop-mode-addition-not-
-replacement.md``), not implemented by this module.
+A second, additive execution mode is implemented below: ``drive()``, a
+generator where each ``next()`` runs one ``diffdrive.step()`` cycle
+inline, the generator owning pacing. Mutually exclusive with the
+background/fiber mode above at the native layer (mode latches on
+whichever of ``start()``/``step()`` is called first this boot, ticket
+006) -- ``MoveQueue``/``RobotDispatch`` above are unchanged either way.
+See ``clasi/issues/generator-driven-control-loop-mode-addition-not-
+replacement.md`` and sprint 006 SUC-001/SUC-002.
 
 ---
 
@@ -80,6 +83,8 @@ __all__ = [
     "ERR_FAULTED",
     "ERR_DURATION_TOO_LONG",
     "ERR_MALFORMED",
+    "GEN_LEASE_PERIODS",
+    "drive",
 ]
 
 MAX_QUEUE_DEPTH = 5
@@ -472,3 +477,86 @@ def _corr_id_or_none(payload):
     if payload:
         return payload[0]
     return None
+
+
+# --- Generator-driven move mode (SUC-001/SUC-002) -----------------------
+# Additive: a new, separate entry point alongside MoveQueue/RobotDispatch
+# above (unchanged). Mode latches natively on the first diffdrive.step()
+# call this boot (ticket 006's start()/step() latch) -- no mode tracking
+# here duplicates that.
+
+try:
+    import utime as _time
+except ImportError:  # CPython -- no utime; shims below stand in for it
+    import time as _time
+
+
+def _ticks_ms():
+    if hasattr(_time, "ticks_ms"):
+        return _time.ticks_ms()
+    return int(_time.monotonic() * 1000)
+
+
+def _ticks_add(ticks, delta):
+    if hasattr(_time, "ticks_add"):
+        return _time.ticks_add(ticks, delta)
+    return ticks + delta
+
+
+def _ticks_diff(a, b):
+    if hasattr(_time, "ticks_diff"):
+        return _time.ticks_diff(a, b)
+    return a - b
+
+
+def _sleep_ms(ms):
+    if hasattr(_time, "sleep_ms"):
+        _time.sleep_ms(ms)
+    else:
+        _time.sleep(ms / 1000.0)
+
+
+# Short lease multiple (~3x cyclePeriod), renewed every next() -- an
+# abandoned generator decays to neutral on its own before the watchdog
+# would ever need to act (SUC-002).
+GEN_LEASE_PERIODS = 3
+
+
+def drive(diffdrive, v, twist, duration_ms, ticks_ms=_ticks_ms, sleep_ms=_sleep_ms):
+    """Generator-driven move: each ``next()`` runs one ``diffdrive.step()``
+    cycle and yields ``diffdrive.output()``; the generator owns pacing --
+    absolute deadlines against ``diffdrive.cyclePeriod()``, mirroring the
+    vendored kernel's own ``run()`` pacing rule, not a fixed
+    ``sleep(period)`` that drifts under jitter. ``duration_ms``:
+    MILLISECONDS (module docstring's ms-not-seconds landmine --
+    ``0 <= duration_ms <= MAX_MOVE_DURATION_MS``).
+
+    On normal completion OR ``break``/``GeneratorExit``, the ``finally``
+    block commands ``neutral()`` and lands one more ``step()`` so the
+    staged zero actually reaches the bus: wheels move only while the
+    caller keeps iterating.
+
+    ``ticks_ms``/``sleep_ms``: injectable clock seam for offline tests
+    (default: ``utime`` on-device, a ``time.monotonic()``-based shim
+    under CPython) -- same DI pattern as ``comms.PumpTimer``'s ``now_fn``.
+    """
+    if duration_ms < 0 or duration_ms > MAX_MOVE_DURATION_MS:
+        raise MoveQueueError(
+            "duration_ms out of range (ms, not seconds): %r" % (duration_ms,)
+        )
+    period_ms = diffdrive.cyclePeriod()
+    lease_ms = period_ms * GEN_LEASE_PERIODS
+    end = _ticks_add(ticks_ms(), duration_ms)
+    cycle = ticks_ms()
+    try:
+        while _ticks_diff(end, ticks_ms()) > 0:
+            wait = _ticks_diff(cycle, ticks_ms())
+            if wait > 0:
+                sleep_ms(wait)
+            cycle = _ticks_add(cycle, period_ms)  # absolute deadline, not now()+period
+            diffdrive.drive(v, twist, lease_ms)
+            diffdrive.step()
+            yield diffdrive.output()
+    finally:
+        diffdrive.neutral()
+        diffdrive.step()  # one landing cycle so the staged zero reaches the bus
