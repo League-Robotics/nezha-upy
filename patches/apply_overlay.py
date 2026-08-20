@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""apply_overlay.py -- Merge config keys from an overlay JSON into a target JSON.
+"""Merge config keys from an overlay JSON into a target JSON.
 
-Usage:
-    python3 apply_overlay.py target.json overlay.json
+Usage: python3 apply_overlay.py target.json overlay.json
 
-Reads overlay["config"] and merges each key into target["config"], skipping
-keys that start with "_" (comments). Writes the result back to target.json.
+Reads overlay["config"], merges each key into target["config"]
+(skipping "_"-prefixed comment keys), and writes the result back.
 """
 import json
 import sys

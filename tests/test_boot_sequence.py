@@ -1,22 +1,17 @@
 """M5-stabilisation gate: `src/boot.py`'s power-on assembly sequence,
-under CPython (sprint 001 ticket 010). See `clasi/sprints/
-001-python-first-firmware-image-m0-m6/tickets/
-010-boot-wiring-assemble-the-firmware-layer-at-power-on.md`'s
-acceptance criteria this file encodes:
+under CPython.
 
   - happy path: valid config -> diffdrive configured/begun/started,
     comms + radio transport up, pump started, banner/READY emitted;
-  - fail-closed path: invalid/missing-required-key config -> motion
-    refused (diffdrive never armed), comms/REPL still available;
+  - fail-closed path: invalid/missing config -> motion refused
+    (diffdrive never armed), comms/REPL still available;
   - no-secrets path: wifi_secrets.json absent -> WiFi transport not
     started, everything else proceeds normally.
 
-No hardware, no native modules -- `boot.py` itself is import-guarded
-against `diffdrive`/`microbit`/`utime` (see its own module docstring),
-and every hardware-touching dependency `run()` needs is an injectable
-parameter, defaulted here with small stand-ins mirroring this
-codebase's own existing fakes (`tests/test_motion.py`'s
-`_StubDiffDrive`, `tests/test_wifi_at.py`'s `FakeSerial`).
+No hardware, no native modules -- `boot.py` is import-guarded against
+`diffdrive`/`microbit`/`utime`, and every hardware-touching dependency
+`run()` needs is an injectable parameter, defaulted here with small
+stand-ins (see `_StubDiffDrive`, `_FakeWifiSerial` below).
 """
 
 import json
@@ -38,10 +33,7 @@ import motion  # noqa: E402
 
 class _StubDiffDrive:
     """Records configure/begin/start plus the drive-side calls
-    `motion.MoveQueue`/`RobotDispatch` might make -- same shape as
-    `tests/test_motion.py`'s own `_StubDiffDrive`, extended with the
-    configure/begin/start trio this ticket's own boot sequence needs to
-    verify were called, in order, with the mapped config kwargs."""
+    `motion.MoveQueue`/`RobotDispatch` might make."""
 
     def __init__(self):
         self.configure_calls = []
@@ -86,8 +78,8 @@ class _StubDiffDrive:
 
 class _FakeWifiSerial:
     """Minimal duck-typed AT byte-pipe -- `WifiAtLink.__init__` only
-    calls `init()` at construction time; `service()` is never invoked in
-    these tests, so `write`/`any`/`read` just need to exist."""
+    calls `init()` at construction; `service()` is never invoked here,
+    so `write`/`any`/`read` just need to exist."""
 
     def __init__(self):
         self.baudrate = None
@@ -112,14 +104,9 @@ def _missing_path(tmp_path, name="does_not_exist.json"):
 class _OneShotTransport:
     """Duck-typed Comms Transport (`read_line`/`send`/`send_reliable`)
     that yields ONE pre-scripted line, then `None` forever after --
-    used to prove the pump chain (`PumpTimer.tick()` ->
-    `Comms.pump()`) is actually wired end-to-end from a `BootResult`,
-    via the wire-observable `TLM:NOW` verb (forces an immediate
-    telemetry emission regardless of AUTO mode's own activity-based
-    "silent while parked" heuristic -- so this does not depend on
-    `TelemetryPolicy`'s emit-policy internals, only on the documented
-    `TLM:NOW` -> forced-emission contract `tests/test_comms_loopback.py`
-    already covers)."""
+    proves the pump chain (`PumpTimer.tick()` -> `Comms.pump()`) is
+    wired end-to-end from a `BootResult`, via the wire-observable
+    `TLM:NOW` forced-emission verb."""
 
     def __init__(self, line):
         self._line = line
@@ -137,8 +124,8 @@ class _OneShotTransport:
 
 def _tick_and_count_emissions(result, line=b"TLM:NOW"):
     """Register a one-shot TLM:NOW transport, tick the pump once, and
-    return the resulting `telemetry.emit_count` -- the shared "pump
-    reaches comms.pump()" proof every scenario below uses."""
+    return the resulting `telemetry.emit_count` delta -- the shared
+    "pump reaches comms.pump()" proof used below."""
     result.comms.add_transport(_OneShotTransport(line))
     before = result.comms.telemetry.emit_count
     result.pump_timer.tick()
@@ -159,9 +146,9 @@ def test_happy_path_configures_diffdrive_and_boots_comms(tmp_path):
     assert result.robot_config is not None
     assert result.config_ok() is True
 
-    # diffdrive configured/begun/started, in order, exactly once.
-    assert stub.begin_calls == 0   # boot stages config only; first motion consumer begins (bench 2026-08-19)
-    assert stub.start_calls == 0   # see begin_calls note
+    # diffdrive configured, not begun/started -- first motion consumer does.
+    assert stub.begin_calls == 0
+    assert stub.start_calls == 0
     assert len(stub.configure_calls) == 1
     kwargs = stub.configure_calls[0]
     assert kwargs["left_port"] == 2
@@ -176,18 +163,13 @@ def test_happy_path_configures_diffdrive_and_boots_comms(tmp_path):
     assert result.radio_link is not None
     assert result.comms.transport_count() == 1  # radio only -- no secrets
 
-    # pump started: a tick reaches comms.pump() (CPython PumpTimer.tick()
-    # degrades to a synchronous call -- see comms.PumpTimer's own
-    # docstring) -- proven via a wire-observable TLM:NOW forced emission,
-    # not by guessing at AUTO mode's own activity-based emit policy.
+    # pump started: a tick reaches comms.pump(), proven via a
+    # wire-observable TLM:NOW forced emission.
     assert result.pump_timer is not None
     assert _tick_and_count_emissions(result) == 1
 
-    # banner/READY already emitted during run() -- confirm via a fresh
-    # transport registered after boot answering HELLO with the exact
-    # banner text (byte-exact banner is ticket 005's own gate; this only
-    # confirms boot.py actually called send_banner()/send_ready(), not
-    # that it built a NEW banner mechanism).
+    # banner/READY already emitted during run() -- a fresh transport
+    # registered after boot gets the exact banner text back.
     assert result.comms._banner.startswith("DEVICE:NEZHA2:robot:tovez:")
     assert result.comms._id_line.startswith("ID:nezha:tovez:")
 
@@ -216,8 +198,8 @@ def test_fail_closed_path_refuses_motion_but_keeps_comms_alive(tmp_path):
     # motion refused: no RobotDispatch wired (NullDispatch stays default).
     assert result.dispatch is None
 
-    # comms/REPL still available -- banner/READY still emit even though
-    # config failed (a fresh transport still gets a HELLO reply).
+    # comms/REPL still available -- banner/READY still emit even with
+    # config failed.
     assert result.comms is not None
     assert result.comms._banner.startswith("DEVICE:NEZHA2:robot:unconfigured:")
     assert result.radio_link is not None
@@ -254,16 +236,16 @@ def test_no_secrets_path_skips_wifi_but_boots_everything_else(tmp_path):
 
     # everything else proceeds normally -- same happy-path assertions.
     assert result.diffdrive_ready is True
-    assert stub.begin_calls == 0   # boot stages config only; first motion consumer begins (bench 2026-08-19)
-    assert stub.start_calls == 0   # see begin_calls note
+    assert stub.begin_calls == 0
+    assert stub.start_calls == 0
     assert isinstance(result.dispatch, motion.RobotDispatch)
     assert _tick_and_count_emissions(result) == 1
 
 
 def test_secrets_present_starts_wifi_transport(tmp_path):
-    """Complement of the no-secrets test -- confirms the WiFi bring-up
-    branch is not dead code: when wifi_secrets.json IS present, a WiFi
-    transport is constructed and registered alongside radio."""
+    """Complement of the no-secrets test -- when wifi_secrets.json IS
+    present, a WiFi transport is constructed and registered alongside
+    radio."""
     secrets_path = tmp_path / "wifi_secrets.json"
     secrets_path.write_text(json.dumps({"ssid": "testnet", "password": "testpass"}))
 
@@ -287,8 +269,8 @@ def test_run_never_raises_for_bad_or_missing_config(tmp_path):
         str(FIXTURES_DIR / "robot_config_malformed.json"),
         _missing_path(tmp_path),
     ):
-        # run() itself must never propagate ConfigError -- fail-closed
-        # means "continue booting", not "abort the boot sequence".
+        # run() must never propagate ConfigError -- fail-closed means
+        # continue booting, not abort.
         boot.run(
             config_path=path,
             secrets_path=_missing_path(tmp_path),

@@ -1,14 +1,9 @@
-"""Sprint 002 ticket 002: `src/demo_square.py`'s offline-testable
-segment-generation logic (the TOUR_SQUARE shape -- 4 straight legs +
-4 left pivots, interleaved) against known geometry constants. The
-hardware-touching half (`run()`/`_run_segment()`, which call
-`diffdrive` directly) is not exercised here -- no CPython stub can
-stand in for the real on-device closed-loop polling without asserting
-something about timing this module never promises; that half is
-verified on the bench instead (see
-`docs/bench-log-zetuv-2026-08-19.md`). See `clasi/sprints/
-002-zetuv-bench-square-tour-wheels-demo/tickets/
-002-on-device-square-tour-demo.md`."""
+"""`src/demo_square.py`'s offline-testable segment-generation logic
+(the TOUR_SQUARE shape -- 4 straight legs + 4 left pivots, interleaved)
+against known geometry constants. The hardware-touching half
+(`run()`/`_run_segment()`, which call `diffdrive` directly) is not
+exercised here -- no CPython stub can stand in for the real on-device
+closed-loop polling; that half is verified on the bench instead."""
 
 import sys
 from pathlib import Path
@@ -24,8 +19,7 @@ import demo_square  # noqa: E402
 
 
 def test_on_device_is_false_under_cpython():
-    # No `diffdrive` native module exists off-device -- the module's own
-    # import-time guard must have caught the ImportError.
+    # No diffdrive module off-device -- the import-time guard must catch it.
     assert demo_square._ON_DEVICE is False
 
 
@@ -35,15 +29,11 @@ def test_run_refuses_off_device():
 
 
 def test_leg_ticks_matches_distance_times_ticks_per_mm():
-    # sprint 006 ticket 001: TICKS_PER_MM is now derived from the
-    # stakeholder-directed 90 mm wheel diameter (a calibration ITERATION
-    # point, not a claimed-final value -- see demo_square's own module
-    # docstring/"Geometry -- SUPERSEDED sprint 006 ticket 001" note),
-    # superseding sprint 005's own ~3.8424 (80.77 mm, tovez's wheel).
-    # EMPIRICAL_COUNTS_PER_REV (975) is UNCHANGED throughout. Tied to the
-    # live constant rather than a hand-copied literal so a future
-    # correction cannot leave this test silently re-asserting a stale
-    # value.
+    # TICKS_PER_MM is derived from the 90 mm wheel diameter (a
+    # calibration iteration point, not final -- see module docstring).
+    # EMPIRICAL_COUNTS_PER_REV (975) is unchanged. Tied to the live
+    # constant, not a hand-copied literal, so a future correction can't
+    # leave this test silently stale.
     assert demo_square._leg_ticks(500.0, demo_square.TICKS_PER_MM) == pytest.approx(
         500.0 * demo_square.TICKS_PER_MM)
     assert demo_square.TICKS_PER_MM == pytest.approx(3.4484, abs=0.001)
@@ -55,8 +45,7 @@ def test_pivot_ticks_matches_arc_length_times_ticks_per_mm():
                                       demo_square.TICKS_PER_MM)
     assert ticks == pytest.approx(
         (demo_square.PI / 2.0) * 64.0 * demo_square.TICKS_PER_MM)
-    # sprint 006 ticket 001: ~347 ticks (was ~386.28 under sprint 005's
-    # own now-superseded TICKS_PER_MM ~3.8424).
+    # ~347 ticks at the current TICKS_PER_MM.
     assert ticks == pytest.approx(346.67, abs=0.5)
 
 
@@ -81,9 +70,8 @@ def test_leg_segments_drive_both_wheels_forward_equally():
 
 
 def test_pivot_segments_are_left_ccw_matching_kernel_twist_sign():
-    # out.twist = 0.5*(velocityRight - velocityLeft), CCW positive
-    # (native/differential_drive.h) -- a LEFT/CCW pivot needs
-    # velocityRight > 0 and velocityLeft < 0.
+    # out.twist = 0.5*(velocityRight - velocityLeft), CCW positive --
+    # a LEFT/CCW pivot needs velocityRight > 0 and velocityLeft < 0.
     segments = demo_square.build_square_tour()
     for s in segments:
         if s["kind"] != "pivot":
@@ -98,9 +86,8 @@ def test_pivot_segments_are_left_ccw_matching_kernel_twist_sign():
 
 
 def test_build_square_tour_is_parametric_not_hardcoded():
-    # A different geometry must change the computed tick targets --
-    # guards against the constants being baked into the segment dicts
-    # independent of their own arguments.
+    # A different geometry must change tick targets -- guards against
+    # constants baked in independent of arguments.
     default_segments = demo_square.build_square_tour()
     custom_segments = demo_square.build_square_tour(
         ticks_per_mm=2.0, trackwidth_mm=200.0, leg_mm=1000.0,
@@ -119,7 +106,7 @@ def test_mean_abs_delta_averages_both_wheels():
     assert mean_delta == pytest.approx((10.0 + 6.0) / 2.0)
 
 
-# --- sprint 006 ticket 001: config-driven geometry -----------------------
+# --- config-driven geometry ------------------------------------------
 
 def test_geometry_from_robot_config_happy_path(tmp_path):
     config_path = tmp_path / "robot.json"
@@ -174,16 +161,15 @@ def test_geometry_from_robot_config_negative_ticks_per_rev_rejected(tmp_path):
 
 
 def test_module_level_geometry_falls_back_off_device():
-    # Under CPython, _ON_DEVICE is False, so the module never attempts
-    # a real filesystem read at import time -- the fallback constants
-    # (mirroring data/zetuv.json's own stakeholder-directed 90.0 mm
-    # starting point) are used deterministically.
+    # Under CPython, _ON_DEVICE is False, so the module never reads the
+    # filesystem at import -- fallback constants (mirroring zetuv.json's
+    # 90.0 mm) are used deterministically.
     assert demo_square.GEOMETRY_SOURCE == "hardcoded fallback"
     assert demo_square.WHEEL_DIAMETER_MM == 90.0
     assert demo_square.EMPIRICAL_COUNTS_PER_REV == 975.0
 
 
-# --- sprint 006 ticket 001: button B single-leg entry point --------------
+# --- button B single-leg entry point -----------------------------------
 
 def test_run_single_leg_refuses_off_device():
     with pytest.raises(RuntimeError):
@@ -191,31 +177,25 @@ def test_run_single_leg_refuses_off_device():
 
 
 def test_run_single_leg_default_distance_matches_leg_distance():
-    # Button B commands the same 500 mm the square tour's own legs use
-    # (data/zetuv.json's own _wheels_note / this ticket's own acceptance
-    # criteria: "exactly 500 mm commanded").
+    # Button B commands the same 500 mm the square tour's legs use.
     import inspect
     sig = inspect.signature(demo_square.run_single_leg)
     assert sig.parameters["distance_mm"].default == demo_square.LEG_DISTANCE_MM
     assert demo_square.LEG_DISTANCE_MM == 500.0
 
 
-# --- sprint 006 ticket 001: auto-run trigger ------------------------------
+# --- auto-run trigger ---------------------------------------------------
 
 def test_module_does_not_auto_run_on_plain_import():
-    # A plain `import demo_square` (this test file's own top-level
-    # import, and main.py's own sys.modules.pop(...) + import pattern)
-    # must never itself invoke run()/run_single_leg() -- __name__ is
-    # "demo_square" for any import, never "__main__", by Python's own
-    # guaranteed import semantics. This module has no diffdrive
-    # available off-device anyway, so an accidental auto-run would have
-    # raised RuntimeError at import time and this whole test file would
-    # already have failed to collect -- this test makes that guarantee
-    # explicit rather than relying on it being an accidental side effect.
+    # A plain `import demo_square` must never itself invoke
+    # run()/run_single_leg() -- __name__ is "demo_square" for any
+    # import, never "__main__". Made explicit here rather than relying
+    # on it being an accidental side effect of no diffdrive being
+    # available off-device.
     assert demo_square.__name__ == "demo_square"
 
 
-# --- OOP bench session 2026-08-19: config-driven wiring -------------------
+# --- config-driven wiring ------------------------------------------------
 
 def test_wiring_from_robot_config_happy_path(tmp_path):
     config_path = tmp_path / "robot.json"
@@ -252,7 +232,7 @@ def test_module_level_wiring_falls_back_off_device():
     assert (demo_square.FWD_SIGN_LEFT, demo_square.FWD_SIGN_RIGHT) == (1, 1)
 
 
-# --- OOP bench session 2026-08-19: encoder-balancing controller -----------
+# --- encoder-balancing controller -----------------------------------------
 
 def test_balanced_duties_no_error_no_trim():
     assert demo_square.balanced_duties(15.0, 15.0, 100.0, 100.0) == (15.0, 15.0)

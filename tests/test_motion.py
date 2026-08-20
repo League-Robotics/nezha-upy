@@ -1,8 +1,6 @@
 """M5 gate: `src/motion.py`'s queue/stop-condition/timeout-fault/replace
 logic against a stub diffdrive backend, with an explicit regression
-assertion that durations are treated as milliseconds, not seconds. See
-`clasi/sprints/001-python-first-firmware-image-m0-m6/tickets/
-007-python-firmware-layer-config-telemetry-motion-otos-line-m5.md`."""
+assertion that durations are treated as milliseconds, not seconds."""
 
 import struct
 import sys
@@ -20,10 +18,8 @@ import motion  # noqa: E402
 
 class _StubDiffDrive:
     """Records every call; `output()` reports a simple integrating
-    position model so `stop_distance_mm` is exercisable (encoder
-    counts advance by `drive()`'s own `v` on every `drive()` call, one
-    "cycle" per call -- exact units don't matter, only that position
-    advances monotonically with commanded speed)."""
+    position model (position advances by `drive()`'s `v` each call) so
+    `stop_distance_mm` is exercisable."""
 
     def __init__(self):
         self.drive_calls = []
@@ -134,9 +130,8 @@ def test_stop_distance_completes_move_early():
     queue = motion.MoveQueue(diffdrive)
     queue.enqueue(motion.Move(v=10.0, duration_ms=10000, stop_distance_mm=25.0))
 
-    # Each tick() checks the distance travelled BY THE END OF THE PRIOR
-    # tick (a realistic "read sensor, decide, then drive" order) before
-    # issuing this cycle's own drive() call.
+    # Each tick() checks distance travelled as of the PRIOR tick
+    # (read-sensor-then-drive order) before issuing this cycle's drive().
     queue.tick(now_ms=0)  # distance so far: 0 -> drives, position -> 10
     assert queue.is_running() is True
     queue.tick(now_ms=100)  # distance so far: 10 -> drives, position -> 20
@@ -158,8 +153,8 @@ def test_timeout_fault_when_far_past_duration_plus_grace():
     queue.tick(now_ms=0)
     assert queue.is_running() is True
 
-    # now_ms jumps far past duration_ms + TIMEOUT_GRACE_MS without any
-    # intervening tick() calls -- e.g. the pump stalled.
+    # now_ms jumps far past duration_ms + TIMEOUT_GRACE_MS with no
+    # intervening tick() -- e.g. the pump stalled.
     queue.tick(now_ms=100 + motion.TIMEOUT_GRACE_MS + 1)
     assert queue.fault is True
     assert queue.fault_reason == "timeout"
@@ -243,9 +238,8 @@ def test_lease_shrinks_to_remaining_duration_near_the_end():
 
 def test_duration_is_milliseconds_not_seconds_regression():
     """PLAN.md landmine ledger L4: a sec/ms slip once ran wheels 8+
-    minutes. A move commanded for 100 ms must be DONE well before
-    100 real seconds pass -- if `duration_ms` were being treated as
-    seconds, the move would still be running at now_ms=101."""
+    minutes. A move commanded for 100 ms must be DONE well before 100
+    real seconds pass."""
     diffdrive = _StubDiffDrive()
     queue = motion.MoveQueue(diffdrive)
     queue.enqueue(motion.Move(v=1.0, duration_ms=100))
@@ -260,9 +254,8 @@ def test_duration_is_milliseconds_not_seconds_regression():
 
 
 def test_100ms_move_would_still_be_running_if_misread_as_seconds():
-    """Companion assertion: if duration_ms were (incorrectly) seconds,
-    a 100-unit move would need 100_000 ms to complete -- confirm this
-    module does NOT wait that long."""
+    """Companion: if duration_ms were (incorrectly) seconds, a 100-unit
+    move would need 100_000 ms -- confirm this does NOT wait that long."""
     diffdrive = _StubDiffDrive()
     queue = motion.MoveQueue(diffdrive)
     queue.enqueue(motion.Move(v=1.0, duration_ms=100))
@@ -282,8 +275,8 @@ def test_go_to_enqueues_turn_then_drive_legs():
     assert ok is True
     assert queue.depth() == 2
     turn_move, drive_move = queue._queue
-    # facing along +x already (heading 0), target is straight ahead ->
-    # turn leg should be ~zero-duration (minimum 1 ms floor).
+    # facing +x already, target straight ahead -> turn leg is
+    # ~zero-duration (1 ms floor).
     assert turn_move.duration_ms == 1
     assert drive_move.v == 50.0
     assert drive_move.stop_distance_mm == pytest.approx(100.0)

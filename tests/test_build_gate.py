@@ -6,9 +6,7 @@ This does NOT run the build itself -- run `./build.sh --clean` first, then:
 
 All checks are static inspection of the build's output artifacts (the
 produced hex, the linker map, and the patched source/config files). No
-hardware, no flashing, no REPL. See docs/design/specification.md section
-6 (M0 gate) and clasi/sprints/.../tickets/001-build-boots-offline-gate-m0.md
-for the acceptance criteria this file encodes.
+hardware, no flashing, no REPL.
 """
 from __future__ import annotations
 
@@ -26,16 +24,14 @@ MPCONFIGPORT_PATH = MP_DIR / "src" / "codal_port" / "mpconfigport.h"
 CODAL_JSON_PATH = MP_DIR / "src" / "codal_app" / "codal.json"
 OVERLAY_JSON_PATH = REPO_ROOT / "codal_overlay.json"
 
-# _fs_start per docs/design/specification.md section 6 / ticket 001: the
-# non-negotiable M0 gate value. If this ever legitimately moves (e.g. a
-# future overlay change), update it here alongside the ticket that changes
-# it -- do not silently loosen the check.
+# The non-negotiable M0 gate value. If this ever legitimately moves,
+# update it here alongside the change that moved it -- do not silently
+# loosen the check.
 EXPECTED_FS_START = 0x6D000
 
-# Same symbol set + page-size arithmetic as addlayouttable.py (the actual
-# tool that builds the flash layout table baked into the hex) -- this test
-# recomputes flash-end independently from the map file, using the same
-# source of truth, rather than trusting addlayouttable.py's own stdout.
+# Same symbol set + page-size arithmetic as addlayouttable.py (the tool
+# that builds the flash layout table baked into the hex) -- recomputes
+# flash-end independently from the map file, not from its stdout.
 NRF_PAGE_SIZE_LOG2 = 12
 NRF_PAGE_SIZE = 1 << NRF_PAGE_SIZE_LOG2
 
@@ -87,18 +83,18 @@ def map_symbols() -> dict[str, int | None]:
 
 
 def test_hex_produced():
-    """AC: `./build.sh --clean` exits 0 and produces
+    """`./build.sh --clean` must produce
     micropython-microbit-v2/src/MICROBIT.hex."""
     _require(HEX_PATH, "run `./build.sh --clean` first")
     assert HEX_PATH.stat().st_size > 0, "MICROBIT.hex exists but is empty"
 
 
 def test_flash_end_below_fs_start(map_symbols):
-    """AC: flash-end address (from the .map) is < _fs_start (0x6D000).
+    """Flash-end address (from the .map) must be < _fs_start.
 
     Recomputes the same layout-table placement addlayouttable.py uses
-    (mp_end -> next-page-aligned layout_addr -> layout end), so this is an
-    independent check against the map, not a re-read of build.sh's stdout.
+    (mp_end -> next-page-aligned layout_addr -> layout end), independent
+    of build.sh's own stdout.
     """
     missing = [k for k, v in map_symbols.items() if v is None and k != "microbit_version_string"]
     assert not missing, f"symbols missing from {MAP_PATH.name}: {missing}"
@@ -116,13 +112,10 @@ def test_flash_end_below_fs_start(map_symbols):
     data_len = map_symbols["__data_end__"] - map_symbols["__data_start__"]
     mp_end = map_symbols["__etext"] + data_len
 
-    # Layout table placement: highest 16-byte-aligned table that still fits
-    # in the page containing mp_end, else the next page (mirrors
-    # addlayouttable.py exactly -- the actual layout table size is small and
-    # fixed for this build: 1 region (no SoftDevice) + 1 header = 32 bytes,
-    # rounded; we only need an upper bound here, so use a generous 64-byte
-    # placeholder length -- flash-end is bounded above by page-aligned
-    # layout_addr + NRF_PAGE_SIZE regardless of exact table length).
+    # Layout table placement mirrors addlayouttable.py: highest
+    # 16-byte-aligned table that fits in mp_end's page, else next page.
+    # Real table size here is ~32 bytes; a generous 64-byte placeholder
+    # is fine since flash_end is bounded above regardless of exact size.
     layout_addr = ((mp_end >> NRF_PAGE_SIZE_LOG2) << NRF_PAGE_SIZE_LOG2) + NRF_PAGE_SIZE - 64
     if layout_addr < mp_end:
         layout_addr += NRF_PAGE_SIZE
@@ -136,7 +129,7 @@ def test_flash_end_below_fs_start(map_symbols):
 
 
 def test_version_string_present(map_symbols):
-    """Goal (M0): version string present in the built image."""
+    """Version string must be present in the built image."""
     addr = map_symbols["microbit_version_string"]
     assert addr is not None, (
         "microbit_version_string symbol not found in MICROBIT.map -- "
@@ -148,9 +141,9 @@ def test_version_string_present(map_symbols):
 
 
 def test_micropy_nlr_setjmp_is_1():
-    """AC: MICROPY_NLR_SETJMP is 1 in the patched mpconfigport.h -- the
-    non-negotiable landmine-ledger item (a HardFault on any exception
-    without it, GCC15 / v1.18 nlr_thumb.c miscompile)."""
+    """MICROPY_NLR_SETJMP must be 1 in the patched mpconfigport.h --
+    without it, any exception HardFaults under GCC15 (v1.18
+    nlr_thumb.c miscompile)."""
     _require(MPCONFIGPORT_PATH, "run `./build.sh --clean` first (patches this file)")
     text = MPCONFIGPORT_PATH.read_text()
     match = re.search(r"#define\s+MICROPY_NLR_SETJMP\s+\(?(\d+)\)?", text)
@@ -162,7 +155,7 @@ def test_micropy_nlr_setjmp_is_1():
 
 
 def test_codal_overlay_keys_merged():
-    """AC: codal_overlay.json's merged keys are present in the resulting
+    """codal_overlay.json's keys must be present, unmodified, in
     codal_app/codal.json after patches/apply_overlay.py runs."""
     _require(OVERLAY_JSON_PATH, "codal_overlay.json should be checked into the repo root")
     _require(CODAL_JSON_PATH, "run `./build.sh --clean` first (patches this file)")
