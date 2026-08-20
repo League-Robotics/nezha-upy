@@ -362,4 +362,23 @@ RAM/flash checkpoint.
    walk with a `GENERATED — do not edit` header and replaced by the
    generator.
 4. Teaching-framework loop ownership (`on_tick()` vs student
-   `while True:`) — decide before M5 (§7.2).
+   `while True:`) — decide before M5 (§7.2). **Resolved at the
+   mechanism level, sprint 006** (`docs/bench-acceptance-procedures.md`
+   Part B §B.1, `src/motion.py`): neither `on_tick()` nor a raw student
+   `while True:`. Framework-owned cadence now lives inside the move
+   generator itself (`motion.drive()`, ticket 007) — each `next()` runs
+   one kernel cycle and the student's own loop body runs between
+   `next()` calls — while the pre-existing background/fiber mode is
+   unchanged and still requires the student's code to reach idle. The
+   two modes are additive and mutually exclusive per boot (native mode
+   latch, ticket 006), not a replacement of one by the other. **Still
+   open**: which mode is the *primary* teaching posture (background vs.
+   generator) is explicitly deferred, not decided here — that call
+   belongs to ticket 009, from bench hardware evidence (the safety
+   triple plus a generator-mode drive/break/abandoned-generator leg).
+   Ticket 009 itself is parked, not yet run, pending the stakeholder
+   resolving which robot is the confirmed bench target (two boards on
+   the bench currently self-identify as `tovez`; `zetuv`'s UID has
+   never enumerated — sprint 006 `sprint.md`'s Migration Concerns) — so
+   the primary-posture question has a named precondition, not a
+   scheduled resolution date.
