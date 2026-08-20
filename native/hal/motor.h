@@ -2,18 +2,13 @@
 // vendor/motor_armor.h are both written against (`class NezhaMotor :
 // public Hal::Motor`, `class MotorArmor : public Hal::Motor`).
 //
-// Reverse-engineered from the UNION of both files' `override` lists (not
-// copied from radio-robot's current src/firm/hal/motor.h -- see
-// device_types.h's file header for why that copy would not even compile:
-// it still declares applyTravelCalib(), which motor_armor.h's own comment
-// says was already gone at sync time, and it has no emergencyStop() at
-// all, which both vendored files override).
+// Reverse-engineered from the union of both files' `override` lists,
+// not copied from radio-robot's current (already-diverged)
+// src/firm/hal/motor.h -- see device_types.h.
 //
-// Methods NEITHER vendored override get a default body here (matching
-// what motor_armor.h's comments say the base class provides): wedged(),
-// wedgeSuspect() default false ("nothing is watching"), setForcedWedge()
-// defaults to a no-op. Every other method is pure virtual because both
-// vendored classes provide a real override for it.
+// wedged()/wedgeSuspect() default false and setForcedWedge() defaults
+// to a no-op (neither vendored override provides them); every other
+// method is pure virtual.
 #pragma once
 
 #include <cstdint>
@@ -34,9 +29,8 @@ class Motor {
   virtual void setDuty(float duty) = 0;         // [-1, 1] raw duty
   virtual void setNeutral(Neutral mode) = 0;
 
-  // Immediate, unstaged zero -- the one call that must not wait for a
-  // tick() that may never come (nezha_motor.cpp's emergencyStop(),
-  // motor_armor.h's straight-through forward).
+  // Immediate, unstaged zero -- must not wait for a tick() that may
+  // never come.
   virtual void emergencyStop() = 0;
 
   // Guarded whole-config replacement: refuses (returns false, leaves
@@ -50,10 +44,7 @@ class Motor {
   virtual void setForcedWedge(bool) {}
 
   // --- Getters ---
-  virtual float position() const = 0;        // [counts] (this vendored
-                                               //   snapshot is the
-                                               //   counts-native leaf --
-                                               //   see nezha_motor.h)
+  virtual float position() const = 0;        // [counts] (counts-native leaf)
   virtual float velocity() const = 0;         // [counts/s] signed
   virtual float appliedDuty() const = 0;      // [-1, 1] last landed write
   virtual bool connected() const = 0;

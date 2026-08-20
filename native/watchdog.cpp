@@ -10,12 +10,9 @@ extern "C" {
 namespace Native {
 
 namespace {
-// Display indication (spec Section 7.2: "a silent stop at 250 ms is
-// indistinguishable from a hardware fault to a student" -- fault bit in
-// telemetry alone is not enough). A fixed diagonal-X pattern across the
-// 5x5 LED matrix: visually distinct from digits/scrolling text, cheap
-// (five direct pixel writes, no allocation, no fiber involvement) and
-// safe to call from the VM hook on the rare trip edge.
+// Fault display: a fixed diagonal-X across the 5x5 LED matrix, visually
+// distinct from digits/scrolling text. Cheap (five pixel writes, no
+// allocation, no fiber involvement) -- safe from the VM hook.
 void showFaultIndicator() {
   static const int kXs[5] = {0, 1, 2, 3, 4};
   static const int kYsA[5] = {0, 1, 2, 3, 4};
@@ -38,9 +35,8 @@ void Watchdog::poll() {
     return;
   }
 
-  // Cheap throttle: skip the output() copy unless kPollIntervalUs has
-  // elapsed since the last sample. Unsigned wraparound-safe (see
-  // I2cBroker::waitForClearance() for the same idiom).
+  // Skip the output() copy unless kPollIntervalUs has elapsed.
+  // Unsigned-wraparound-safe (same idiom as I2cBroker::waitForClearance()).
   if (static_cast<int32_t>(now - lastPollUs_) <
       static_cast<int32_t>(kPollIntervalUs)) {
     return;
@@ -49,17 +45,14 @@ void Watchdog::poll() {
 
   const DiffDrive::DifferentialDrive::Output out = kernel_.output();
   if (out.cycleCount != lastCycleCount_) {
-    // Kernel fiber is alive and advancing -- healthy. Refresh the
-    // advance timestamp and remember the fresh cycle count.
+    // Fiber is alive and advancing -- healthy.
     lastCycleCount_ = out.cycleCount;
     lastAdvanceUs_ = now;
     return;
   }
 
-  // cycleCount has not moved since the last sample. Only a genuine
-  // starvation concern if wheels are actually commanded right now, per
-  // the kernel's OWN last-known state -- a parked/neutral/estopped robot
-  // whose fiber has gone idle between commands is not a fault.
+  // cycleCount hasn't moved. Only a fault if wheels are actually
+  // commanded -- a parked/neutral/estopped robot idling is not a fault.
   const bool wheelsCommanded =
       out.ready && !out.leaseExpired && !out.estopped && !out.stallHalted;
   if (!wheelsCommanded) {
@@ -69,20 +62,15 @@ void Watchdog::poll() {
   if (static_cast<int32_t>(now - lastAdvanceUs_) >=
       static_cast<int32_t>(kStallThresholdUs)) {
     trip();
-    // Re-arm the advance clock so a still-stalled kernel does not retrip
-    // (and re-hammer the bus) on every subsequent poll interval; a
-    // genuinely still-stalled kernel simply never advances cycleCount
-    // again, so wheelsCommanded's own snapshot goes stale too -- the
-    // latch (faultLatched_) is the durable signal from here on, not
-    // repeated tripping.
+    // Re-arm so a still-stalled kernel doesn't retrip every interval;
+    // faultLatched_ is the durable signal from here on.
     lastAdvanceUs_ = now;
   }
 }
 
 void Watchdog::trip() {
-  // Raw, unconditional, unshaped zero -- bypasses the kernel entirely
-  // (the kernel fiber is exactly what might be dead right now). Never
-  // yields; see this file's own header for why that is safe here.
+  // Raw, unshaped zero -- bypasses the kernel (which might be dead).
+  // Never yields.
   writeNezhaZeroDutyWithRetry(bus_, leftPort_, kZeroWriteRetries);
   writeNezhaZeroDutyWithRetry(bus_, rightPort_, kZeroWriteRetries);
 

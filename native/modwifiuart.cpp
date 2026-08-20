@@ -1,33 +1,21 @@
 // modwifiuart.cpp -- MicroPython C++ module: wifiuart.
 //
-// The UARTE1 byte-pipe shim + stdio TCP-REPL mirror hook this ticket
-// adds (spec Sec 3/5/8; M4): the stock micropython-microbit-v2 port
-// never exposes the second UARTE, and microbit.uart.init(tx,rx)
-// retargets the ONE stdio UART -- so the WiFi UART needs its own
-// distinct C shim, not the stock API. This file is the MicroPython
-// glue ONLY: raw byte-pipe I/O plus the stdin/stdout mirror ring's
-// push/pull surface. ALL AT-command logic (join, CIPMUX, CIPSERVER,
-// CIPSTART, +IPD framing, per-datagram coalescing, the >=50ms TLM
-// throttle, READY-on-new-peer) lives in src/wifi_at.py -- see that
-// module's own docstring for the split, and spec Sec 3 ("the AT state
-// machine on top is Python").
+// UARTE1 byte-pipe shim + stdio TCP-REPL mirror hook: the stock
+// micropython-microbit-v2 port only exposes one UART (microbit.uart
+// retargets it), so WiFi needs its own shim. This file is MicroPython
+// glue only -- raw byte-pipe I/O and the mirror ring's push/pull
+// surface. All AT-command logic lives in src/wifi_at.py.
 //
 // The actual UARTE1/NRF52Serial access lives in
 // native/codal_app/wifi_uart_pipe.cpp + wifi_stdio_hook.cpp, copied by
-// build.sh's --with-wifi step into
-// micropython-microbit-v2/src/codal_app/ (the CMake-driven CODAL build,
-// which has full CODAL header access). THIS file compiles under
-// codal_port's plain Makefile, which does NOT (see
-// native/codal_fwd.h's own header for why) -- so it only calls the
-// extern "C" surface declared in wifi_uart_fwd.h, resolved at LINK
-// time, same pattern codal_fwd.h already established for the fiber
-// scheduler.
+// build.sh's --with-wifi step into the CODAL build; this file compiles
+// under codal_port's plain Makefile (no CODAL headers -- see
+// native/codal_fwd.h), so it only calls the extern "C" surface declared
+// in wifi_uart_fwd.h, resolved at link time.
 //
-// Deliberately returns plain ints/bytes rather than raising on a short
-// write/read -- every call here is non-blocking by construction (see
-// wifi_uart_fwd.h's own per-function contracts), so "fewer bytes than
-// asked for" is an ordinary, expected result the Python caller checks,
-// not an error.
+// Returns plain ints/bytes rather than raising on a short write/read --
+// every call here is non-blocking by construction, so a short result is
+// expected, not an error.
 
 extern "C" {
 #include "py/obj.h"
@@ -38,8 +26,7 @@ extern "C" {
 
 namespace {
 // Bounds a single read()/stdout_pull() call -- generous relative to
-// both ring sizes (wifi_stdio_hook.h's kRingSize=256) and one v5/REPL
-// datagram, small enough to be a trivial stack frame.
+// both ring sizes and one v5/REPL datagram.
 constexpr size_t kMaxChunk = 512;
 }  // namespace
 

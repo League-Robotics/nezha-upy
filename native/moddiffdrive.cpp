@@ -1,30 +1,19 @@
 // moddiffdrive.cpp -- MicroPython C++ module: diffdrive + robotio.
 //
-// diffdrive wraps the vendored DiffDrive::DifferentialDrive kernel
-// (vendor/differential_drive.{h,cpp}, compiled unedited) over this
-// platform's four ports (native/platform_ports.h, native/nezha_leaf.h),
-// plus this ticket's own safety additions the kernel does not provide by
-// itself: a pre-VM boot zero-write, a VM-hook zero-only starvation
+// diffdrive wraps the vendored DiffDrive::DifferentialDrive kernel over
+// this platform's four ports, plus safety additions the kernel doesn't
+// provide itself: a pre-VM boot zero-write, a VM-hook starvation
 // watchdog (native/watchdog.h), and a 5000 ms binding-level lease
-// ceiling (tighter than and independent of the kernel's own 3,600,000 ms
-// kLeaseMax -- see driveWithLeaseCeiling() below).
+// ceiling, tighter than the kernel's own 3,600,000 ms kLeaseMax (see
+// kBindingLeaseMaxMs below).
 //
-// robotio.i2c_xfer() exposes the SAME I2cBroker instance the kernel
-// leaves use (native/i2c_broker.h), so Python sensor traffic and the
-// kernel's own Nezha traffic share one clearance ledger -- spec Section 5
-// "One I2C ledger."
+// robotio.i2c_xfer() shares the same I2cBroker instance the kernel
+// leaves use, so Python and kernel I2C traffic share one clearance
+// ledger (spec Section 5). See native/README.md for the full contract.
 //
-// API (per this ticket): diffdrive.configure/begin/start/drive/
-// driveDuty/neutral/estop/output/lastError/cycleOverrunCount,
-// robotio.i2c_xfer. See native/README.md for the full contract.
-//
-// Deliberately returns STATUS VALUES (strings) rather than raising
-// mp_raise_* from C++ logic for expected refusal paths -- reference/
-// vevov-micropython-spike-handoff.md's Challenge 2 documents this C++/MP
-// NLR interaction as fragile in this exact binding shape ("success-path
-// returns were much safer than exception-path exits"); mp_arg_parse's own
-// OWN exceptions (stock MP C code, not ours) still apply for malformed
-// calls.
+// Returns status strings rather than raising from C++ logic on expected
+// refusal paths -- C++/MP NLR interaction is fragile here; mp_arg_parse's
+// own exceptions still apply for malformed calls.
 
 extern "C" {
 #include "py/obj.h"
@@ -44,38 +33,25 @@ extern "C" {
 
 namespace {
 
-// 5000 ms binding-level lease ceiling (spec Sections 3/5/8; PLAN.md's
-// landmine ledger L4: a units slip once ran wheels 8+ minutes
-// unsupervised). Independent of and far tighter than the kernel's own
-// DiffDrive::DifferentialDrive::kLeaseMax (3,600,000 ms) -- this ticket's
-// binding REJECTS a longer lease outright rather than clamping it, so a
-// caller's bug is visible (a refused command), not silently truncated
-// into something that looks like it worked.
+// 5000 ms binding-level lease ceiling (PLAN.md landmine L4: a units
+// slip once ran wheels 8+ minutes unsupervised). Rejects a longer lease
+// outright rather than clamping it, so a caller's bug is visible, not
+// silently truncated.
 constexpr uint32_t kBindingLeaseMaxMs = 5000;
 
-// Platform ports -- module-lifetime singletons, constructed once at
-// static-init time (all three are trivially default-constructible; none
-// of them touch hardware in their constructors).
+// Module-lifetime singletons, constructed once at static-init time.
 Native::PlatformClock g_clock;
 Native::PlatformSleeper g_sleeper;
 Native::PlatformFiberLauncher g_launcher;
 
-// The kernel's two Motor leaves and the DifferentialDrive object itself
-// cannot be default-constructed (see native/nezha_leaf.h /
-// vendor/differential_drive.h -- both constructors require real
-// references/config supplied at configure() time, which is a runtime
-// Python call, not a compile-time constant). Placement-new into static
-// storage is the standard embedded-C++ way to defer construction of a
-// non-default-constructible object without heap allocation/exceptions
-// (this build is -fno-exceptions) -- see configure() below.
+// The kernel's two Motor leaves and the DifferentialDrive object cannot
+// be default-constructed (real references/config only exist at
+// configure() time). Placement-new into static storage defers
+// construction without heap allocation/exceptions (-fno-exceptions).
 //
-// SCOPE NOTE for ticket 007: configure() is designed to be called ONCE
-// per boot. A second call re-placement-news over the same storage
-// (equivalent to "reconfigure resets everything"), which is a reasonable
-// M1 behavior but not a live reconfigure -- extending this to a real
-// guarded reconfigure() (mirroring Hal::Motor::reconfigure()'s own
-// at-rest guard) is left to whichever ticket wires the full per-robot
-// config surface.
+// configure() is designed to be called once per boot; a second call
+// re-placement-news over the same storage (reconfigure resets
+// everything) rather than a guarded live reconfigure.
 alignas(Native::NezhaLeaf) unsigned char g_leftLeafStorage[sizeof(Native::NezhaLeaf)];
 alignas(Native::NezhaLeaf) unsigned char g_rightLeafStorage[sizeof(Native::NezhaLeaf)];
 alignas(DiffDrive::DifferentialDrive) unsigned char
@@ -113,16 +89,11 @@ mp_obj_t statusObj(DiffDrive::DifferentialDrive::Status status) {
 
 }  // namespace
 
-// ---------------------------------------------------------------------
-// Boot zero-write -- called from main.c BEFORE gc_init()/mp_init(), i.e.
-// before the VM exists at all. Spec Section 5 / this ticket's acceptance
-// criteria: the Nezha brick latches its last commanded speed across an
-// nRF52 reset, so a reset mid-drive must be silenced immediately, before
-// any Python (including a student's own boot code) can run. The exact
-// wiring is not yet known this early (Python has not called configure()
-// yet), so this defensively sweeps every physically possible port
-// (1-4) rather than only the two a robot happens to use.
-// ---------------------------------------------------------------------
+// Boot zero-write -- called from main.c before gc_init()/mp_init(), i.e.
+// before the VM exists. The Nezha brick latches its last commanded speed
+// across an nRF52 reset, so a reset mid-drive must be silenced before any
+// Python runs. Wiring is unknown this early, so this sweeps every
+// physically possible port (1-4).
 extern "C" void moddiffdrive_boot_zero_write(void) {
   Native::I2cBroker& broker = Native::I2cBroker::instance();
   for (uint32_t port = 1; port <= 4; ++port) {
@@ -130,35 +101,23 @@ extern "C" void moddiffdrive_boot_zero_write(void) {
   }
 }
 
-// ---------------------------------------------------------------------
-// VM-hook starvation watchdog entry point -- called from
-// MICROPY_VM_HOOK_POLL (mpconfigport.h, patched by build.sh's
-// --with-diffdrive step). See native/watchdog.h for the full safety
-// argument (never yields; cheap on every call except the rare fault
-// path). No-ops before configure() has run (g_watchdog is null).
-// ---------------------------------------------------------------------
+// VM-hook starvation watchdog entry point, called from
+// MICROPY_VM_HOOK_POLL. See native/watchdog.h for the safety argument.
+// No-ops before configure() has run (g_watchdog is null).
 extern "C" void moddiffdrive_vm_hook(void) {
   if (g_watchdog != nullptr) {
     g_watchdog->poll();
   }
 }
 
-// ---------------------------------------------------------------------
 // diffdrive.configure(left_port, right_port, fwd_sign_left=1,
 //                      fwd_sign_right=1, max_duty=0.0,
 //                      full_duty_velocity=0.0, cycle_period_ms=24)
 //
-// Binds the two physical wheel ports/signs and the kernel's core
-// authority fields. Every default is fail-closed (max_duty=0.0,
-// full_duty_velocity=0.0), matching DiffDrive::Config's own
-// "EVERY DEFAULT IS FAIL-CLOSED" contract (differential_drive.h) rather
-// than substituting a convenience non-zero default that would undermine
-// it. The remaining Hal::MotorConfig write-shaping fields (slew rate,
-// reversal dwell, output deadband) take this codebase's established
-// bench defaults (reference/modrobot/modrobot.cpp's
-// kDefaultSlewRate/kDefaultReversalDwell/kDefaultDeadband) until ticket
-// 007 wires the full per-robot JSON.
-// ---------------------------------------------------------------------
+// Every default is fail-closed (max_duty=0.0, full_duty_velocity=0.0),
+// matching DiffDrive::Config's own contract. Write-shaping fields (slew
+// rate, reversal dwell, output deadband) take this codebase's bench
+// defaults until a future ticket wires the full per-robot JSON.
 extern "C" mp_obj_t diffdrive_configure_fn(size_t n_args, const mp_obj_t* pos_args,
                                             mp_map_t* kw_args) {
   enum {
@@ -169,9 +128,8 @@ extern "C" mp_obj_t diffdrive_configure_fn(size_t n_args, const mp_obj_t* pos_ar
     kArgMaxDuty,
     kArgFullDutyVelocity,
     kArgCyclePeriodMs,
-    // Velocity-PID + wheel-control fields (DiffDrive::Config, same
-    // order as config.py's WHEEL_CONTROL_FIELDS mapping). Defaults 0 =
-    // kernel defaults; omitting them reproduces the pre-PID behavior.
+    // Velocity-PID + wheel-control fields (DiffDrive::Config). Defaults
+    // 0 = kernel defaults; omitting them reproduces pre-PID behavior.
     kArgVMin,
     kArgBiasMax,
     kArgTauAdapt,
@@ -187,10 +145,8 @@ extern "C" mp_obj_t diffdrive_configure_fn(size_t n_args, const mp_obj_t* pos_ar
     kArgStallSpeed,
     kArgStallDemand,
     kArgStallWindow,
-    // Stage-A per-wheel feedforward correction (Config.wheelGain/
-    // wheelIntercept, applied to BOTH accel/decel slots): the fast
-    // lever that removes steady plant asymmetry so the I-term only
-    // handles residuals. Defaults 1/0 = neutral.
+    // Per-wheel feedforward correction (Config.wheelGain/wheelIntercept,
+    // applied to both accel/decel slots). Defaults 1/0 = neutral.
     kArgWheelGainLeft,
     kArgWheelGainRight,
     kArgWheelInterceptLeft,
@@ -230,8 +186,7 @@ extern "C" mp_obj_t diffdrive_configure_fn(size_t n_args, const mp_obj_t* pos_ar
   Hal::MotorConfig leftConfig;
   leftConfig.port = static_cast<uint32_t>(args[kArgLeftPort].u_int);
   leftConfig.fwdSign = args[kArgFwdSignLeft].u_int;
-  leftConfig.slewRate = 0.0f;          // NezhaMotor substitutes its own
-                                        // kDefaultSlewRate for <= 0.
+  leftConfig.slewRate = 0.0f;          // <= 0 -> NezhaMotor's own default
   leftConfig.reversalDwell = 100.0f;   // [ms]
   leftConfig.outputDeadband = 0.03f;   // [-1, 1]
   leftConfig.writeThrottle = 0.0f;     // disabled
@@ -307,7 +262,7 @@ extern "C" mp_obj_t diffdrive_drive_fn(mp_obj_t velocityObj, mp_obj_t twistObj,
   }
   const mp_int_t leaseMs = mp_obj_get_int(leaseObj);
   if (leaseMs < 0 || static_cast<uint32_t>(leaseMs) > kBindingLeaseMaxMs) {
-    // REJECT, never clamp -- see kBindingLeaseMaxMs's own comment.
+    // Reject, never clamp -- see kBindingLeaseMaxMs's own comment.
     return mp_obj_new_str("refused_lease_ceiling", strlen("refused_lease_ceiling"));
   }
   const float velocity = mp_obj_get_float(velocityObj);
@@ -386,9 +341,7 @@ extern "C" mp_obj_t diffdrive_output_fn(void) {
   mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_connectedRight),
                      mp_obj_new_bool(out.connectedRight));
 
-  // The watchdog's own state -- NOT part of vendor/'s Output (a vendor/
-  // struct this repo never edits): this is this ticket's own visible-
-  // fault addition, spec Section 7.2.
+  // Watchdog state -- not part of vendor/'s Output struct.
   const bool fault = g_watchdog != nullptr && g_watchdog->faultLatched();
   const uint32_t tripCount = g_watchdog != nullptr ? g_watchdog->tripCount() : 0;
   mp_obj_dict_store(dict, MP_OBJ_NEW_QSTR(MP_QSTR_watchdogFault),
@@ -405,11 +358,9 @@ extern "C" mp_obj_t diffdrive_lastError_fn(void) {
   return statusObj(g_kernel->lastError());
 }
 
-// Raw accessor required by this ticket's acceptance criteria ("at minimum
-// via a raw accessor on the diffdrive module") -- redundant with
-// output()'s own cycleOverrunCount field, kept as a direct, single-value
-// call so a bench script does not need to build/parse a dict just to read
-// this one counter.
+// Redundant with output()'s cycleOverrunCount field -- a direct,
+// single-value call so a bench script needn't parse a dict for one
+// counter.
 extern "C" mp_obj_t diffdrive_cycleOverrunCount_fn(void) {
   if (g_kernel == nullptr) {
     return mp_obj_new_int_from_uint(0);
@@ -417,17 +368,10 @@ extern "C" mp_obj_t diffdrive_cycleOverrunCount_fn(void) {
   return mp_obj_new_int_from_uint(g_kernel->output().cycleOverrunCount);
 }
 
-// ---------------------------------------------------------------------
 // robotio.i2c_xfer(address, write_data=b'', read_len=0, repeated=False,
 //                   pre_clear=0, post_clear=0)
-//
-// -> int status                 when read_len == 0 (write-only)
-// -> (int status, bytes data)   when read_len > 0 (write [if any] then
-//                                read, both through the SAME I2cBroker
-//                                instance the kernel leaves use)
-//
-// The one shared I2C ledger's Python-facing door -- spec Section 5.
-// ---------------------------------------------------------------------
+// -> int status when read_len == 0; (int status, bytes data) otherwise,
+// both through the same I2cBroker instance the kernel leaves use.
 extern "C" mp_obj_t robotio_i2c_xfer_fn(size_t n_args, const mp_obj_t* pos_args,
                                          mp_map_t* kw_args) {
   enum {
@@ -470,9 +414,8 @@ extern "C" mp_obj_t robotio_i2c_xfer_fn(size_t n_args, const mp_obj_t* pos_args,
     return mp_obj_new_int(writeStatus);
   }
 
-  // Bounded: this is a Nezha/OTOS/line/color-class sensor bus, not a bulk
-  // transfer -- reject anything that would risk this VM-hook-adjacent
-  // stack frame's headroom.
+  // Bounded: a sensor bus, not bulk transfer -- protects this stack
+  // frame's headroom.
   constexpr mp_int_t kMaxReadLen = 64;
   if (readLen > kMaxReadLen) {
     mp_raise_ValueError(MP_ERROR_TEXT("read_len too large"));

@@ -5,14 +5,8 @@
 namespace Native {
 namespace {
 
-// The bench's fixed WiFi jack: TX=P8, RX=P1 -- matches
-// reference/modrobot/wifi_stdio.cpp's own default jack (kJacks[0]).
-// That file scans 4 possible jacks at runtime because its classroom
-// deployment had to cope with any of them being wired; this repo's
-// bench robot (tovez, per docs/design/specification.md Sec 2/9) has one
-// fixed WiFi jack, so a compile-time pin choice is enough here --
-// extending to a runtime-selectable jack is future work if a different
-// robot's wiring needs it (not this ticket's scope).
+// Fixed WiFi jack: TX=P8, RX=P1. A runtime-selectable jack is future
+// work if a different robot's wiring needs it.
 NRF52Serial g_uart(uBit.io.P8, uBit.io.P1, NRF_UARTE1);
 
 }  // namespace
@@ -32,12 +26,9 @@ void WifiUartPipe::init(uint32_t baudRateHz) {
 
 size_t WifiUartPipe::write(const uint8_t* data, size_t len) {
   if (!started_ || len == 0) return 0;
-  // Non-blocking: queue as many bytes as fit the UARTE's own TX buffer
-  // right now. NEVER busy-waits or schedule()s here -- this is a byte
-  // pipe, not an AT-aware sender (see wifi_stdio.cpp's own sendRaw() for
-  // the busy-wait alternative this file deliberately does NOT copy: this
-  // shim's caller, wifi_at.py's pump, retries the remainder next tick
-  // instead, keeping every native call bounded).
+  // Non-blocking: queues as many bytes as fit the TX buffer right now.
+  // Never busy-waits or schedule()s -- the caller (wifi_at.py's pump)
+  // retries any remainder next tick.
   const int space = 250 - g_uart.txBufferedSize();
   if (space <= 0) return 0;
   size_t take = len;

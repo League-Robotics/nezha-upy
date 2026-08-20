@@ -1,15 +1,10 @@
-// device_config.h -- Hal::MotorConfig, reverse-engineered from every field
-// vendor/nezha_motor.cpp actually reads (config_.fwdSign, config_.slewRate,
-// config_.port, config_.reversalDwell, config_.outputDeadband,
-// config_.writeThrottle). See device_types.h's file header for why this is
-// authored fresh in native/ rather than copied from radio-robot's current
-// src/firm/hal/device_config.h (which has already diverged from the
-// vendored snapshot -- e.g. it has no writeThrottle field at all).
+// device_config.h -- Hal::MotorConfig, reverse-engineered from every
+// field vendor/nezha_motor.cpp actually reads (not copied from
+// radio-robot's current, already-diverged src/firm/hal/device_config.h
+// -- see device_types.h).
 //
-// wheelTravelCalib is deliberately NOT here: nezha_motor.h's own comment
-// says applyTravelCalib() "is GONE -- counts-native leaf ... the mm
-// conversion belongs to the application layer," and nezha_motor.cpp never
-// reads a travel-calib field, so this leaf-facing config has none.
+// wheelTravelCalib is deliberately absent: nezha_motor.cpp never reads
+// one (mm conversion belongs to the application layer).
 #pragma once
 
 #include <cstdint>
@@ -20,9 +15,8 @@ struct MotorConfig {
   // +1 or -1: corrects a mirror-mounted wheel's encoder/duty sign.
   int32_t fwdSign = 0;
 
-  // Maximum |duty write step| per tick, in the leaf's raw hardware write
-  // domain (integer PWM-percent register). <= 0 substituted with
-  // NezhaMotor's own kDefaultSlewRate at reconfigure() time.
+  // Max |duty write step| per tick; <=0 substituted with NezhaMotor's
+  // kDefaultSlewRate.
   float slewRate = 0.0f;
 
   // 1-based port label (the Nezha frame's own port byte).
@@ -31,9 +25,8 @@ struct MotorConfig {
   float reversalDwell = 0.0f;    // [ms]
   float outputDeadband = 0.0f;   // [-1, 1] fraction
 
-  // Minimum spacing between non-stop writes to this channel. <= 0 disables
-  // the throttle (write-on-change + slew still bound the write rate). Stop
-  // writes always bypass it -- see nezha_motor.cpp's writeRawDuty().
+  // Minimum spacing between non-stop writes to this channel. <= 0
+  // disables the throttle; stop writes always bypass it.
   float writeThrottle = 0.0f;    // [us]
 };
 
