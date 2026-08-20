@@ -1,56 +1,27 @@
 """wifi_at -- WiFi AT state machine + UDP v5 plane + TCP-REPL demux.
 
-Owns EVERYTHING the AT dialogue needs: joining the network, `CIPMUX=1`,
-bringing up the TCP REPL mirror server and the UDP v5 socket, per-
-datagram coalescing (ONE `AT+CIPSEND` per datagram, never per-character
--- per-char AT sends flood the module), the >=50 ms telemetry throttle
-specific to this plane (spec Sec 8), and READY-on-new-peer-edge
-handling. See `docs/design/specification.md` Sec 3/5/8 and
-`reference/modrobot/wifi_stdio.cpp` (the proven AT-sequence oracle this
-module's state machine, `IpdParser`, and `Matcher` port from -- NOT a
-straight copy: that file ran the AT dialogue in C++; here it is Python,
-per spec Sec 3).
+Owns the whole AT dialogue: joining, `CIPMUX=1`, the TCP REPL mirror
+server, the UDP v5 socket, per-datagram coalescing (ONE `AT+CIPSEND`
+per datagram -- per-char floods the module), the >=50 ms telemetry
+throttle (Sec 8), and READY-on-new-peer-edge handling. Ports
+`reference/modrobot/wifi_stdio.cpp`'s AT-sequence machine from C++ to
+Python (Sec 3), not a straight copy. The native `wifiuart` module is
+only a byte-pipe shim over UARTE1 plus a REPL stdin/stdout ring --
+every AT/`+IPD`/coalescing byte is handled HERE. The UDP v5 plane
+feeds `comms.py`'s SAME `Comms` engine (`WifiAtLink` implements its
+Transport contract), not a second protocol engine.
 
-Split of responsibility with the native `wifiuart` module
-(`native/modwifiuart.cpp` + `native/codal_app/wifi_uart_pipe.cpp` +
-`wifi_stdio_hook.cpp`): the C side is a byte-pipe shim over the
-module's UARTE1 link (the stock micropython-microbit-v2 port never
-exposes the second UARTE, and `microbit.uart.init(tx,rx)` retargets the
-ONE stdio UART -- see `native/wifi_uart_fwd.h`) plus a tiny stdin-inject/
-stdout-capture ring pair for mirroring the REPL. EVERY byte of AT
-dialogue, `+IPD` framing, and datagram coalescing happens HERE, in
-Python -- the C side never parses an AT reply or an `+IPD` header.
+Single-context (Sec 8): `WifiAtLink.service()`/module-level `pump()`
+run ONLY from the scheduled pump context, never a VM/GC hook or IRQ --
+so every method here is non-blocking (no `time.sleep`/busy-wait).
 
-The UDP v5 plane feeds `src/comms.py`'s SAME `Comms` engine
-(`WifiAtLink` implements that module's own Transport contract --
-`read_line()`/`send()`/`send_reliable()` -- so `comms.add_transport(link)`
-just works), NOT a second protocol engine.
+BENCH-TIME: the WiFi module persists AP-join/socket/server state
+across nRF52 reflashes -- power-cycle it before any bring-up session,
+or `AT+RST` may race a stale auto-rejoin already in progress.
 
-Single-context module access (spec Sec 8): `WifiAtLink.service()` and
-the module-level `pump()` below must be called ONLY from the scheduled
-pump context (the same `micropython.schedule()`-driven main-context call
-site `comms.py`'s own `PumpTimer` uses) -- never from a VM/GC hook or an
-IRQ. Every method here is non-blocking by construction (bounded per-call
-work, no `time.sleep`/busy-wait loops) -- a deliberate difference from
-`wifi_stdio.cpp`'s own blocking `sendRaw()`/`waitFor()` style, which is
-safe there only because it runs off the C stdio HAL's own call sites,
-never inside a single bounded Python pump tick.
-
-BENCH-TIME NOTE: the WiFi module persists its AP-join/socket/server
-state across nRF52 reflashes -- power-cycle the module before any WiFi
-bring-up session, or this state machine's own `AT+RST` may race a
-module that is mid-way through its own stale auto-rejoin.
-
-MicroPython-only modules (`micropython`'s own `wifiuart`) are import-
-guarded so this whole module imports under CPython. `json` is also
-import-guarded (`load_secrets()` degrades to `(None, None)` without it)
-since it is not guaranteed present on every MicroPython build.
-
-Deviations from the radio-robot/wifi_stdio.cpp sources, matching
-`wire.py`/`comms.py`'s own precedent: no `from __future__ import
-annotations`, no PEP 604/generic-subscript type hints, no f-strings
-(project style: CLAUDE.md) -- every function's shape is documented in
-its docstring instead.
+`wifiuart`/`json` are import-guarded; `load_secrets()` degrades to
+`(None, None)` without `json`. No PEP 604/generic-subscript hints, no
+f-strings (CLAUDE.md).
 """
 
 try:
@@ -76,12 +47,11 @@ __all__ = [
     "TLM_MIN_INTERVAL_MS",
 ]
 
-# -- protocol constants -- mirror reference/modrobot/wifi_stdio.cpp -----
-
+# Protocol constants -- mirror reference/modrobot/wifi_stdio.cpp.
 V5_LINK = 4  # ESP-AT link id, fixed (kV5Link)
-DEFAULT_PORT = 7654  # module's own well-known TCP REPL / UDP local port
+DEFAULT_PORT = 7654  # well-known TCP REPL / UDP local port
 DEFAULT_DISCOVERY_PORT = 7655  # host's fixed local port (kV5DiscoveryPort)
-TLM_MIN_INTERVAL_MS = 50  # spec Sec 8: ">=50 ms TLM throttle on the WiFi plane"
+TLM_MIN_INTERVAL_MS = 50  # spec Sec 8: WiFi-plane TLM throttle floor
 
 _CMD_TIMEOUT_MS = 4000
 _JOIN_TIMEOUT_MS = 15000
@@ -98,11 +68,8 @@ _ST_SERVER = "server"
 _ST_READY = "ready"
 _ST_BACKOFF = "backoff"
 
-# (command, expect, timeout_ms, tolerant) -- mirrors wifi_stdio.cpp's
-# own serviceConfigure() kSteps table exactly, including the AT+RST-
-# first ordering (the module is RJ11-powered and keeps its server/
-# client links/mux mode/lease across an nRF reset -- rebooting the
-# module first is what makes every bring-up start from a clean state).
+# (command, expect, timeout_ms, tolerant); AT+RST first because the
+# RJ11-powered module keeps server/client/mux state across an nRF reset.
 _CONFIGURE_STEPS = (
     ("AT+RST", "ready", 6000, True),
     ("AT", "OK", 2000, True),  # absorb boot-banner stragglers
@@ -113,17 +80,13 @@ _CONFIGURE_STEPS = (
     ("AT+CIPCLOSE", "OK", _CMD_TIMEOUT_MS, True),
     ("AT+CWMODE=1", "OK", _CMD_TIMEOUT_MS, False),
     ("AT+CIPMUX=1", "OK", _CMD_TIMEOUT_MS, False),
-    # =1: +IPD now carries the sender's ip/port inline -- required so the
-    # v5 UDP socket (opened in _service_server()) can learn its peer.
-    ("AT+CIPDINFO=1", "OK", _CMD_TIMEOUT_MS, True),
+    ("AT+CIPDINFO=1", "OK", _CMD_TIMEOUT_MS, True),  # +IPD then carries sender ip/port inline
 )
 
 
 class _Matcher:
-    """Incremental substring matcher -- Python port of
-    reference/modrobot/wifi_stdio.cpp's own Matcher: feed one byte at a
-    time, True exactly when `token` has just been completed. `token` is
-    `bytes` (or None); feeding while unarmed always returns False."""
+    """Incremental substring matcher: feed one byte at a time, True
+    exactly when `token` (bytes, or None) has just been completed."""
 
     def __init__(self, token=None):
         self._token = None
@@ -149,10 +112,8 @@ class _Matcher:
 
 
 class _IpdParser:
-    """Python port of `reference/modrobot/wifi_stdio.cpp`'s own
-    `IpdParser`: parses both `+IPD,<link>,<len>:` (CIPDINFO=0) and the
-    CIPDINFO=1 extended `+IPD,<link>,<len>,"<ip>",<port>:` form -- both
-    forms must parse (see that file's own comment on why)."""
+    """Parses both `+IPD,<link>,<len>:` (CIPDINFO=0) and the
+    CIPDINFO=1 extended `+IPD,<link>,<len>,"<ip>",<port>:` form."""
 
     _TAG = b"+IPD,"
 
@@ -180,9 +141,8 @@ class _IpdParser:
         self._port_saw_digit = False
 
     def feed(self, ch):
-        """Feed one byte (int). Returns True exactly when a full header
-        (either form) has just been recognized -- `self.link`/`length`/
-        `ip`/`port` are valid at that instant."""
+        """Feed one byte (int); True exactly when a full header (either
+        form) is recognized -- `self.link`/`length`/`ip`/`port` valid."""
         stage = self._stage
         if stage == "tag":
             if self._tag.feed(ch):
@@ -254,24 +214,18 @@ class _IpdParser:
 
 
 class TlmThrottle:
-    """>=50 ms telemetry throttle specific to the WiFi plane (spec Sec 8)
-    -- independent of `comms.py`'s own general 25 ms primary-frame
-    cadence (`TelemetryPolicy`): this throttle caps how often a
-    PERIODIC (non-ack) telemetry push actually goes out over
-    THIS plane, even when the engine's own cadence would ask for it more
-    often. Deliberately its own tiny class (rather than folded directly
-    into `WifiAtLink`) so its timer logic is unit-testable in
-    isolation."""
+    """>=50 ms telemetry throttle for the WiFi plane (Sec 8),
+    independent of `comms.py`'s general 25 ms cadence -- caps how
+    often a PERIODIC (non-ack) push goes out over THIS plane."""
 
     def __init__(self, min_interval_ms=TLM_MIN_INTERVAL_MS):
         self._min_interval_ms = min_interval_ms
         self._last_sent_ms = None
 
     def allow(self, now):
-        """True (and records `now`) iff at least `min_interval_ms` has
-        elapsed since the last allowed call, or this is the first call
-        ever. Never raises; `now` is the same [ms] integer the pump
-        passes everywhere else in this codebase."""
+        """True (and records `now`, int [ms]) iff `min_interval_ms`
+        has elapsed since the last allowed call, or this is the
+        first ever."""
         if self._last_sent_ms is None or (now - self._last_sent_ms) >= self._min_interval_ms:
             self._last_sent_ms = now
             return True
@@ -281,19 +235,12 @@ class TlmThrottle:
 class WifiAtLink:
     """WiFi AT bring-up state machine + the UDP v5 plane's `comms.py`
     Transport (`read_line`/`send`/`send_reliable`) + TCP-REPL demux.
-
-    `serial` is a small duck-typed AT byte-pipe: `init(baudrate)`,
-    `write(data: bytes) -> int` (bytes actually accepted, non-blocking),
-    `any() -> int`, `read(n) -> bytes` (non-blocking). `NativeWifiSerial`
-    below adapts the native `wifiuart` module to this contract; tests
-    use a scripted fake.
-
-    `repl_hook`, if given, is a small duck-typed TCP-REPL mirror bridge:
-    `set_active(bool)`, `stdin_push(data) -> int`, `stdout_pull(n) ->
-    bytes`. `NativeReplHook` below adapts the native `wifiuart` module's
-    own repl_active/stdin_push/stdout_pull surface; `None` (the default)
-    leaves the REPL mirror inert -- the UDP v5 plane still works fully
-    without it."""
+    `serial`: duck-typed AT byte-pipe -- `init(baudrate)`, `write(data:
+    bytes) -> int`, `any() -> int`, `read(n) -> bytes`, all
+    non-blocking (`NativeWifiSerial` adapts `wifiuart`; tests fake it).
+    `repl_hook`, if given: `set_active(bool)`, `stdin_push(data) ->
+    int`, `stdout_pull(n) -> bytes` (`NativeReplHook` adapts
+    `wifiuart`); `None` (default) leaves the REPL mirror inert."""
 
     def __init__(self, serial, ssid, password, port=DEFAULT_PORT,
                  discovery_port=DEFAULT_DISCOVERY_PORT, baudrate=115200,
@@ -343,23 +290,19 @@ class WifiAtLink:
 
         self._serial.init(baudrate)
 
-    # -- comms.py Transport contract -- the UDP v5 plane feeds the SAME
-    # engine, never a second protocol engine. ---------------------------
+    # -- comms.py Transport contract; feeds the SAME engine ---------------
 
     def read_line(self):
-        """Non-blocking. Returns the next complete v5 UDP datagram's raw
-        content (no trailing delimiter to strip -- unlike radio_shim.py,
-        a UDP datagram IS the message, no framing needed), or None."""
+        """Non-blocking; next v5 UDP datagram's raw content (a UDP
+        datagram IS the message, no framing/delimiter), or None."""
         if not self._v5_rx:
             return None
         return self._v5_rx.pop(0)
 
     def send(self, data):
-        """Queue ONE UDP datagram for the current v5 peer -- ONE
-        `AT+CIPSEND` per call, never decomposed per character (spec Sec
-        3/8; see `_pop_next_send()`). Silently drops (matches
-        wifi_stdio.cpp's own `sendV5Datagram()` failure policy) if not
-        READY or no peer is currently known."""
+        """Queue ONE UDP datagram for the v5 peer -- ONE `AT+CIPSEND`
+        per call, never per character (Sec 3/8). Drops silently if not
+        READY or no peer currently known."""
         if self._state != _ST_READY:
             return
         if not self._v5_peer_known_now(self._last_now):
@@ -371,30 +314,18 @@ class WifiAtLink:
             text = text.encode("ascii")
         self.send(text)
 
-    # -- telemetry-specific send, throttled independently of send() -----
-
     def send_telemetry(self, data, throttle, now):
-        """Periodic (non-ack) telemetry push on the WiFi plane, gated by
-        `throttle` (a `TlmThrottle` instance -- the caller, e.g. a future
-        `telemetry.py`, owns exactly one per WiFi transport). Ordinary
-        command replies/acks must use `send()`/`send_reliable()`
-        directly, UNTHROTTLED -- an ack's reliability matters more than
-        this plane's own AT-command budget, and only a periodic frame is
-        what spec Sec 8's ">=50 ms TLM throttle" applies to."""
+        """Periodic (non-ack) push, gated by `throttle` (a
+        `TlmThrottle`). Replies/acks must use `send()`/
+        `send_reliable()` directly, UNTHROTTLED."""
         if not throttle.allow(now):
             return
         self.send(data)
 
-    # -- new-peer edge (spec Sec 8: "READY on new-peer edge handled in
-    # the pump") ----------------------------------------------------
-
     def poll_new_peer_edge(self):
         """True exactly once per NEW (ip, port) the v5 plane starts
-        hearing from -- consumes the edge (a second call before another
-        new peer arrives returns False). The pump (see `pump()` below)
-        uses this to fire `comms.send_ready()` for a freshly-connected
-        WiFi peer, mirroring the boot handshake a fresh radio connection
-        gets."""
+        hearing from (consumed on read). `pump()` uses this to fire
+        `comms.send_ready()` for a freshly-connected WiFi peer."""
         current = (
             (self._v5_peer_ip, self._v5_peer_port)
             if self._v5_peer_known_now(self._last_now) else None
@@ -404,12 +335,10 @@ class WifiAtLink:
             return True
         return False
 
-    # -- the state machine ------------------------------------------
-
     def service(self, now):
         """Advance the AT bring-up / READY-state pumping by one bounded
-        step. Call every scheduled-pump tick (single-context: main
-        context only, never a VM/GC hook -- spec Sec 8)."""
+        step. Call every scheduled-pump tick (main context only, never
+        a VM/GC hook or IRQ -- spec Sec 8)."""
         self._last_now = now
         if self._state == _ST_CONFIGURE:
             self._service_configure(now)
@@ -425,8 +354,7 @@ class WifiAtLink:
             self._service_backoff(now)
 
     def state(self):
-        """The current bring-up state name -- for tests/diagnostics."""
-        return self._state
+        return self._state  # for tests/diagnostics
 
     def _enter_state(self, state, now):
         self._state = state
@@ -438,10 +366,7 @@ class WifiAtLink:
         self._payload_buf = bytearray()
 
     def _enter_backoff(self, now):
-        # Tear down peer/client state -- matches wifi_stdio.cpp's own
-        # restart(): AT+RST (the next CONFIGURE pass) wipes every
-        # ESP-AT socket on the module side, so the peer relationship and
-        # any in-flight send are equally stale.
+        # Tear down peer/client state -- the next CONFIGURE pass's AT+RST wipes every ESP-AT socket.
         self._v5_peer_known = False
         self._v5_peer_ip = None
         self._v5_peer_port = None
@@ -453,10 +378,7 @@ class WifiAtLink:
         self._deadline = now + _BACKOFF_DELAY_MS
         self._enter_state(_ST_BACKOFF, now)
 
-    # -- AT command/await plumbing -- mirrors wifi_stdio.cpp's own
-    # sendCommand()/awaitReply(), but NON-BLOCKING: one call per pump
-    # tick, never a busy-wait loop (see this module's own docstring for
-    # why that is a deliberate difference from the C++ oracle). --------
+    # -- AT command/await: NON-BLOCKING port of sendCommand()/awaitReply() --
 
     def _start_await(self, expect, timeout_ms, now):
         self._expect.reset(expect)
@@ -469,12 +391,7 @@ class WifiAtLink:
         self._awaiting = True
 
     def _start_command(self, command_text, expect, timeout_ms, now):
-        # ONE write() call for the whole command line -- AT commands
-        # here are always well under the UARTE's 250-byte TX buffer
-        # (native/codal_app/wifi_uart_pipe.cpp), so a single accepted
-        # write is the expected case; this module does not retry a
-        # short write.
-        self._serial.write((command_text + "\r\n").encode("ascii"))
+        self._serial.write((command_text + "\r\n").encode("ascii"))  # 1 write; under UARTE's 250-byte TX buf
         expect_bytes = expect.encode("ascii") if isinstance(expect, str) else expect
         self._start_await(expect_bytes, timeout_ms, now)
 
@@ -492,8 +409,7 @@ class WifiAtLink:
             return "timeout"
         return "pending"
 
-    # -- incoming byte demux -- Python port of wifi_stdio.cpp's own
-    # feedIncoming()/handleStatusLine() ---------------------------------
+    # -- incoming byte demux: port of feedIncoming()/handleStatusLine() --
 
     def _pump_incoming(self, now):
         while True:
@@ -517,10 +433,7 @@ class WifiAtLink:
             self._payload_remaining = self._ipd.length
             self._payload_link = self._ipd.link
             if self._payload_link == V5_LINK:
-                # The peer is learned/refreshed off the HEADER alone,
-                # not the payload -- so an empty datagram still counts
-                # as heard-from, exactly like every other byte on this
-                # link (matches wifi_stdio.cpp's own comment).
+                # Peer learned/refreshed off the HEADER alone -- an empty datagram still counts as heard-from.
                 if self._ipd.ip:
                     self._v5_peer_ip = self._ipd.ip
                 if self._ipd.port:
@@ -546,8 +459,7 @@ class WifiAtLink:
             self._v5_rx.append(data)
         elif self._payload_link == self._repl_link and self._repl_hook is not None:
             self._repl_hook.stdin_push(data)
-        # else: payload on an unrecognized/not-yet-matched link --
-        # dropped, matching wifi_stdio.cpp's own "not ready yet" policy.
+        # else: unrecognized/not-yet-matched link -- dropped.
 
     def _feed_status_byte(self, ch):
         if ch == 0x0D:  # '\r'
@@ -563,12 +475,9 @@ class WifiAtLink:
             self._line_buf = bytearray()
 
     def _handle_status_line(self, line):
-        """`<link>,CONNECT` / `<link>,CLOSED` -- mirrors
-        wifi_stdio.cpp's own handleStatusLine(). The v5 UDP link is not
-        a TCP client; ESP-AT's mux-mode CIPSTART reports a CONNECT/
-        CLOSED lifecycle for it the same as a TCP one, so this is
-        explicitly ignored for V5_LINK (else the v5 socket would get
-        mistaken for a REPL client)."""
+        """`<link>,CONNECT` / `<link>,CLOSED`. V5_LINK is ignored here:
+        ESP-AT's mux CIPSTART reports this lifecycle for it too (not a
+        TCP client), else it'd be mistaken for a REPL client."""
         try:
             text = line.decode("ascii")
         except UnicodeError:
@@ -584,9 +493,7 @@ class WifiAtLink:
         if link == V5_LINK:
             return
         if status == "CONNECT":
-            # Newest client wins -- a stale abandoned session otherwise
-            # shadows the fresh one (matches wifi_stdio.cpp's own
-            # comment).
+            # Newest client wins -- else a stale abandoned session shadows the fresh one.
             self._repl_link = link
             if self._repl_hook is not None:
                 self._repl_hook.set_active(True)
@@ -595,9 +502,7 @@ class WifiAtLink:
             if self._repl_hook is not None:
                 self._repl_hook.set_active(False)
 
-    # -- peer-silence lazy-forget -- mirrors wifi_stdio.cpp's own
-    # v5PeerKnown(): checked here rather than on a timer so a caller
-    # that never asks pays nothing. --------------------------------
+    # -- peer-silence lazy-forget: checked here, not on a timer -------
 
     def _v5_peer_known_now(self, now):
         if not self._v5_peer_known:
@@ -631,11 +536,11 @@ class WifiAtLink:
     def _service_join(self, now):
         self._pump_incoming(now)
         if self._step == 0:
-            # Step 0 polls AT+CWJAP? for the module's own auto-rejoin
-            # (after AT+RST) to land -- an explicit CWJAP fired into an
-            # in-progress auto-join answers busy/ERROR (wifi_stdio.cpp's
-            # own comment on the gopiv 2026-08-14 near-livelock this
-            # avoids).
+            # LANDMINE: poll AT+CWJAP? first to let the module's own
+            # post-AT+RST auto-rejoin land -- firing an explicit CWJAP
+            # into an in-progress auto-join answers busy/ERROR, observed
+            # on gopiv 2026-08-14 as a join->backoff->RST near-livelock
+            # (reference/modrobot/wifi_stdio.cpp::serviceJoin()).
             if not self._awaiting:
                 expect = "+CWJAP:\"%s\"" % self._ssid
                 self._start_command("AT+CWJAP?", expect, 1500, now)
@@ -668,20 +573,14 @@ class WifiAtLink:
         self._enter_backoff(now)
 
     def _service_address(self, now):
-        # DHCP only -- this repo's bench convention (spec Sec 2/9) has
-        # no static-IP requirement; a future robot needing one can add
-        # AT+CIPSTA here without touching the rest of this file.
-        self._pump_incoming(now)
+        self._pump_incoming(now)  # DHCP only; add AT+CIPSTA here for static IP
         if not self._awaiting:
             self._start_command("AT+CWDHCP=1,1", "OK", _CMD_TIMEOUT_MS, now)
             return
         result = self._poll_await(now)
         if result == "pending":
             return
-        # Tolerant of any result -- matches wifi_stdio.cpp's own
-        # serviceAddress(), which proceeds regardless of match/reject/
-        # timeout.
-        self._enter_state(_ST_SERVER, now)
+        self._enter_state(_ST_SERVER, now)  # tolerant of match/reject/timeout alike
 
     def _service_server(self, now):
         self._pump_incoming(now)
@@ -700,12 +599,8 @@ class WifiAtLink:
             self._enter_backoff(now)
             return
         if self._step == 1:
-            # The v5 UDP plane: a SECOND, independent socket (V5_LINK).
-            # Remote "255.255.255.255",discovery_port with mode 2
-            # ("remote resets to the last sender") means no peer needs
-            # to be known yet -- the host broadcasts until this robot
-            # answers, and the first datagram heard teaches the real
-            # peer (see _feed_byte()'s own IPD handling).
+            # v5 UDP: SECOND socket (V5_LINK), remote "255.255.255.255",
+            # mode 2 -- no peer known needed yet; first datagram teaches it.
             if not self._awaiting:
                 command = ("AT+CIPSTART=%d,\"UDP\",\"255.255.255.255\",%d,%d,2"
                            % (V5_LINK, self._discovery_port, self._port))
@@ -723,10 +618,7 @@ class WifiAtLink:
     def _service_ready(self, now):
         self._pump_incoming(now)
 
-        # Drain the REPL mirror's captured stdout once nothing else is
-        # already in flight -- queued through the SAME send machinery
-        # below, so a REPL reply and a v5 datagram are both subject to
-        # the identical one-CIPSEND-per-datagram discipline.
+        # Drain REPL stdout when idle, via the same one-CIPSEND-each send machinery as v5 datagrams.
         if (self._send_phase is None and not self._send_queue
                 and self._repl_hook is not None and self._repl_link is not None):
             chunk = self._repl_hook.stdout_pull(512)
@@ -736,10 +628,7 @@ class WifiAtLink:
         if self._send_phase == "await_prompt":
             result = self._poll_await(now)
             if result == "matched":
-                # ONE write() call for the payload -- the second (and
-                # last) write of this datagram's exactly-two-writes
-                # shape (command, then payload).
-                self._serial.write(self._send_payload)
+                self._serial.write(self._send_payload)  # 2nd of 2 writes: command, then payload
                 self._send_phase = "await_ok"
                 self._start_await(b"SEND OK", _CMD_TIMEOUT_MS, now)
             elif result in ("rejected", "timeout"):
@@ -763,9 +652,7 @@ class WifiAtLink:
         else:
             link = a
             command = "AT+CIPSEND=%d,%d" % (link, len(data))
-        # ONE write() call for the command -- the first of this
-        # datagram's exactly-two-writes shape.
-        self._start_command(command, ">", _CMD_TIMEOUT_MS, now)
+        self._start_command(command, ">", _CMD_TIMEOUT_MS, now)  # 1st of 2 writes
         self._send_payload = data
         self._send_phase = "await_prompt"
 
@@ -777,30 +664,19 @@ class WifiAtLink:
 
 
 def pump(link, now, comms=None):
-    """Call once per scheduled-pump tick (the same
-    `micropython.schedule()`-driven main-context call site `comms.py`'s
-    own `PumpTimer` uses -- spec Sec 5/8, single-context module access).
-
-    Advances `link`'s AT bring-up/READY-state byte pumping, then --
-    spec Sec 8's "READY on new-peer edge handled in the pump" -- sends
-    the boot READY line once per NEW v5 peer this plane starts hearing
-    from. `comms`, if given, is the SAME `comms.Comms` instance `link`
-    was registered on via `comms.add_transport(link)` -- the UDP v5
-    plane feeds that one engine, never a second protocol engine."""
+    """Call once per scheduled-pump tick (same call site as
+    `comms.py`'s `PumpTimer`). Advances `link`'s AT pumping, then
+    sends boot READY once per NEW v5 peer heard from (Sec 8). `comms`,
+    if given, is the SAME instance `link` was registered on."""
     link.service(now)
     if comms is not None and link.poll_new_peer_edge():
         comms.send_ready()
 
 
 def load_secrets(path="wifi_secrets.json"):
-    """Reads `wifi_secrets.json` (gitignored, provided locally at bench
-    time -- see CLAUDE.md/README.md; NEVER commit one) if present.
-    Expected schema: `{"ssid": "...", "password": "..."}` -- see
-    `wifi_secrets.example.json` for a placeholder template. Returns
-    `(ssid, password)`, or `(None, None)` if the file is absent,
-    unreadable, or malformed -- never raises (a missing secrets file at
-    bench time is an expected, offline-testable condition, not an
-    error)."""
+    """Reads `wifi_secrets.json` (gitignored, provided locally; NEVER
+    commit one), schema `{"ssid": ..., "password": ...}`. Returns
+    `(ssid, password)`, or `(None, None)` if absent/malformed."""
     if json is None:
         return None, None
     try:
@@ -821,15 +697,9 @@ def load_secrets(path="wifi_secrets.json"):
 
 
 class NativeWifiSerial:
-    """Adapts the native `wifiuart` module (native/modwifiuart.cpp) to
-    the small duck-typed AT byte-pipe contract `WifiAtLink` expects
-    (`init`/`write`/`any`/`read`) -- see
-    `native/wifi_uart_fwd.h` for the C side. Only usable on a
-    `--with-wifi` build; every method here is a thin one-line forward
-    to the `wifiuart` module, so a missing import surfaces immediately
-    as an `AttributeError` on first use -- the correct failure mode for
-    on-device code that should never run without the module it depends
-    on."""
+    """Adapts native `wifiuart` to the AT byte-pipe contract
+    `WifiAtLink` expects (`init`/`write`/`any`/`read`); `--with-wifi`
+    builds only."""
 
     def init(self, baudrate):
         wifiuart.init(baudrate=baudrate)

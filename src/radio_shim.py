@@ -1,38 +1,25 @@
-"""radio_shim -- MicroPython `radio` module wrapper + RAW250 fragment
-reassembly, implementing the same duck-typed Transport contract
-`comms.py` expects (`read_line()`/`send()`/`send_reliable()`).
+"""radio_shim -- MicroPython `radio` wrapper + RAW250 fragment
+reassembly; implements the `comms.py` Transport contract
+(`read_line()`/`send()`/`send_reliable()`), ported from radio-robot's
+`microbit_radio_link.{h,cpp}`.
 
-Ported from radio-robot's
-`src/firm/platform/microbit/microbit_radio_link.{h,cpp}` -- RAW250
-framing:
+RAW250 frame: `[SEQ:1][FLAGS:1][LEN:1][payload:LEN]`, the raw payload
+of one CODAL radio datagram (no MakeCode/PXT header). FLAGS:
+START=0x01, MORE=0x02, END=0x04, ACK=0x10. Messages over MTU (247)
+split START..END; ACK frames are dropped before the START check.
 
-    [SEQ:1][FLAGS:1][LEN:1][payload:LEN]
+Config facts: `length=250` must match the relay's on-air MAXLEN;
+`group=10` matches the relay; `channel` comes from JSON config;
+`queue=4` fixes the old firmware's C++ single-slot RX loss.
 
-carried as the raw payload of one CODAL/MicroPython radio datagram (no
-MakeCode/PXT header). FLAGS: START=0x01, MORE=0x02, END=0x04, ACK=0x10.
-A message longer than MTU (247) bytes is split across multiple fragments,
-START through END; a single-fragment message is flagged START|END
-(0x05). ACK frames (FLAG_ACK set) are never reassembled -- dropped before
-even the START check, exactly like `onData()`'s own early return.
-
-`length=250` (`MICROBIT_RADIO_MAX_PACKET_SIZE`) must match the relay's
-on-air MAXLEN; `group=10` is fixed to match the relay; `channel` comes
-from the robot's JSON config; `queue=4` fixes the C++ single-slot RX
-loss the old firmware carried.
-
-MicroPython-only: the `radio` module is import-guarded so this file
-imports and the reassembly/fragmentation logic (`feed_frame()`/`send()`)
-runs unmodified under CPython, fed synthetic/captured on-air byte
-sequences directly with no hardware.
-
-Deviations from the radio-robot source, matching `wire.py`'s own
-precedent: no PEP 604/generic-subscript type hints, no f-strings
-(project style: CLAUDE.md).
+`radio` is import-guarded (MicroPython-only) so this file, and
+`feed_frame()`/`send()` in particular, run under CPython with no
+hardware. No PEP 604/generic-subscript hints, no f-strings (CLAUDE.md).
 """
 
 try:
     import radio
-except ImportError:  # CPython (tests), or no radio module on this build
+except ImportError:  # CPython tests, or a build without radio
     radio = None
 
 __all__ = [
@@ -47,8 +34,7 @@ __all__ = [
     "REASM_MAX",
 ]
 
-# RadioRelay Sec 5 fragment framing -- mirrors
-# MicroBitRadioLink's private constants exactly.
+# Fragment framing (RadioRelay Sec 5), matches MicroBitRadioLink exactly.
 FLAG_START = 0x01
 FLAG_MORE = 0x02
 FLAG_END = 0x04
@@ -59,23 +45,14 @@ MAX_FRAME = 250  # MICROBIT_RADIO_MAX_PACKET_SIZE
 MTU = MAX_FRAME - FRAME_HEADER  # 247
 REASM_MAX = 512  # v2 GET dump can reach ~290 bytes
 
-# The largest raw line content `send()` will fragment -- mirrors
-# MicroBitRadioLink::send()'s own 256-byte payload buffer: up to 255
-# content bytes, plus the one trailing '\n' delimiter it always appends.
-_MAX_SEND_CONTENT = 255
+_MAX_SEND_CONTENT = 255  # + 1 trailing '\n' = MicroBitRadioLink::send()'s 256-byte buffer
 
 
 class RadioLink:
-    """One RAW250 radio link -- binary-clean, no wire-line interpretation
-    beyond the [SEQ][FLAGS][LEN] fragment header (Core::Comms decides
-    cleartext-vs-binary from the parsed `<COMMAND>` prefix once it has a
-    complete line -- see `comms.py`'s own docstring, same division of
-    responsibility as the C++ source).
-
-    Only ONE reassembled message is buffered at a time -- a second
-    message completing before `read_line()` drains the first is silently
-    dropped, exactly matching `MicroBitRadioLink::onData()`'s own
-    documented behavior."""
+    """One RAW250 radio link -- binary-clean, no interpretation beyond
+    the [SEQ][FLAGS][LEN] header. Buffers only ONE reassembled message
+    at a time -- a second completing before `read_line()` drains the
+    first is silently dropped (matches `onData()`)."""
 
     def __init__(self, channel, group=10, queue=4, length=MAX_FRAME):
         self._channel = channel
@@ -92,10 +69,7 @@ class RadioLink:
     # --- MicroPython radio setup / polling ------------------------------
 
     def begin(self):
-        """`radio.on()` + `radio.config(...)` with this link's
-        channel/group/queue/length. No-op under CPython (`radio`
-        unavailable) -- tests drive `feed_frame()`/inspect `send()`'s
-        return value directly instead."""
+        """`radio.on()` + `radio.config(...)`. No-op under CPython."""
         if radio is None:
             return
         radio.on()
@@ -106,8 +80,7 @@ class RadioLink:
         return self._channel
 
     def poll(self):
-        """Drain any MicroPython-queued packets into `feed_frame()`.
-        No-op under CPython."""
+        """Drain queued packets into `feed_frame()`. No-op under CPython."""
         if radio is None:
             return
         while True:
@@ -119,10 +92,8 @@ class RadioLink:
     # --- reassembly ------------------------------------------------------
 
     def feed_frame(self, frame):
-        """Process ONE on-air frame's raw bytes -- mirrors `onData()`
-        exactly: binary-clean (no interpretation beyond the 3-byte
-        header), safe to call directly with synthetic/captured on-air
-        byte sequences, no radio hardware required."""
+        """Process ONE on-air frame's raw bytes -- mirrors `onData()`;
+        callable directly with synthetic/captured bytes, no hardware."""
         frame = bytes(frame)
         n = len(frame)
         if n < FRAME_HEADER:
@@ -147,22 +118,15 @@ class RadioLink:
                 self._reasm.extend(frame[FRAME_HEADER:FRAME_HEADER + copy])
 
         if flags & FLAG_END:
-            # Publish only if the previous message has been consumed;
-            # otherwise drop -- matches onData()'s own "second message
-            # completing before readLine() drains the first" behavior.
-            if self._reasm_active and not self._msg_ready:
+            if self._reasm_active and not self._msg_ready:  # else drop -- previous msg not yet drained
                 self._msg = bytes(self._reasm)
                 self._msg_ready = True
             self._reasm_active = False
             self._reasm = bytearray()
 
     def read_line(self):
-        """Non-blocking. Returns the next complete reassembled message's
-        raw content (a single trailing `'\\n'` stripped, matching
-        `readLine()`'s own contract -- NOT `'\\r'`-stripping: a binary
-        line may legitimately carry 0x0D as content, only classified as
-        cleartext once `comms.py` has parsed the `<COMMAND>` prefix), or
-        `None` if none is ready."""
+        """Non-blocking; next message, trailing `'\\n'` stripped (not
+        `'\\r'` -- a binary line may carry 0x0D as content), or `None`."""
         if not self._msg_ready:
             return None
         content = self._msg
@@ -175,14 +139,10 @@ class RadioLink:
     # --- fragmentation / send --------------------------------------------
 
     def send(self, data):
-        """Fragment `data` (one wire line's raw content, no trailing
-        `'\\n'` -- matches the Transport contract) into RAW250 frames and
-        transmit each via `radio.send_bytes()` (no-op under CPython).
-        Truncates to 255 content bytes before appending the trailing
-        `'\\n'` delimiter, matching `MicroBitRadioLink::send()`'s
-        256-byte payload buffer exactly. Returns the list of frames
-        actually built (bytes each) -- lets tests verify fragmentation
-        without live hardware; harmless to ignore on-device."""
+        """Fragment `data` (one wire line, no trailing `'\\n'`) into
+        RAW250 frames and transmit via `radio.send_bytes()` (no-op
+        under CPython); truncates to 255 content bytes first. Returns
+        the frames built, for tests."""
         data = bytes(data)
         n = len(data) if len(data) < _MAX_SEND_CONTENT else _MAX_SEND_CONTENT
         payload = data[:n] + b"\n"
@@ -193,20 +153,15 @@ class RadioLink:
         return frames
 
     def send_reliable(self, text):
-        """Same contract as `send()` for a cleartext line -- accepts
-        `str` for caller convenience (mirrors `sendReliable(const char*)`
-        forwarding straight to `send()`, no separate bounded-wait path:
-        RAW250 fragmentation has no backpressure signal to wait on)."""
+        """Same as `send()` for a cleartext line; accepts `str`. No
+        bounded-wait path -- RAW250 has no backpressure signal."""
         if isinstance(text, str):
             text = text.encode("ascii")
         return self.send(text)
 
     def _fragment(self, payload):
-        """Split `payload` (already including its trailing `'\\n'`) into
-        RAW250 frames -- mirrors `sendFragmented()`'s do/while loop
-        exactly (a zero-length payload would still emit one START|END
-        frame; never occurs in practice since `send()` always appends
-        the `'\\n'` first)."""
+        """Split `payload` (its trailing `'\\n'` already included) into
+        RAW250 frames -- mirrors `sendFragmented()`'s do/while loop."""
         frames = []
         off = 0
         first = True
@@ -224,10 +179,8 @@ class RadioLink:
             else:
                 flags |= FLAG_END
 
-            # Built by concatenation, never mutation: this port compiles
-            # out MICROPY_PY_ARRAY_SLICE_ASSIGN, so bytearray slice-store
-            # raises TypeError ON DEVICE only (see docs/bench-log-
-            # zetuv-2026-08-19.md).
+            # LANDMINE: concatenate, never bytearray slice-assign -- raises
+            # TypeError ON DEVICE only; see docs/bench-log-zetuv-2026-08-19.md.
             seq = self._tx_seq & 0xFF
             self._tx_seq = (self._tx_seq + 1) & 0xFF
             frame = bytes((seq, flags, chunk)) + bytes(payload[off:off + chunk])

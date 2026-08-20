@@ -1,33 +1,17 @@
-"""otos -- SparkFun OTOS optical tracking chip driver (I2C 0x17), spec
-Sec 6.
+"""otos -- SparkFun OTOS optical tracking driver, spec Sec 6.
 
-All bus traffic goes through the moddiffdrive I2C broker
-(``robotio.i2c_xfer()``) -- never a direct bus access -- so the shared
-clearance ledger (per-device ``lastEnd``/``readyAt`` timers, spec Sec 5
-"One I2C ledger") stays intact between Python sensor code and the
-kernel's own Nezha traffic.
+Bus access only via the moddiffdrive I2C broker (``robotio.i2c_xfer()``)
+so the shared per-device clearance ledger (spec Sec 5) stays intact.
 
-Bus facts (verified against radio-robot-elite's
-``src/firm/hardware/generic/real_otos.h``):
+Register map (I2C 0x17, vs radio-robot-elite's ``real_otos.h``):
+  0x00 product ID (expect 0x5F)  0x04 linear scalar  0x05 angular scalar
+  0x20 position (x/y/heading, 3x int16 LE)  0x26 velocity (vx/vy/omega,
+  3x int16 LE) -- one 12-byte read from 0x20 covers both.
 
-  - Device address 0x17.
-  - Registers: product ID 0x00 (expected 0x5F), linear scalar 0x04,
-    angular scalar 0x05, position block starting at 0x20 (x/y/heading,
-    3x int16 LE), velocity block starting at 0x26 (vx/vy/omega, 3x
-    int16 LE) -- one contiguous 12-byte read from 0x20 covers both
-    blocks.
-  - Scales: position 0.305 mm/LSB, heading 0.00549 deg/LSB (converted to
-    rad/LSB here), velocity 5000/32768 mm/s/LSB, omega 34.9/32768
-    rad/s/LSB.
-  - Read period 20 ms (``kReadPeriod`` = 20000 us) -- ``read()`` below is
-    a no-op (returns the cached reading) if called before that much time
-    has elapsed since the last real bus read, matching the chip's own
-    documented budget.
+Scale table: position 0.305 mm/LSB, heading 0.00549 deg/LSB (-> rad
+here), velocity 5000/32768 mm/s/LSB, omega 34.9/32768 rad/s/LSB.
 
-``init()`` probes the product ID and applies the robot's configured
-linear/angular scalars (``otos.linear_scale``/``otos.angular_scale``,
-``data/*.json``'s ``otos`` group) -- mirrors ``RealOtos::begin()``'s own
-two-step (probe, then apply scalars) shape.
+Read period 20 ms: ``read()`` is a no-op (cached) if called sooner.
 """
 
 import struct
@@ -43,9 +27,8 @@ _REG_POSITION_XL = 0x20
 
 _EXPECTED_PRODUCT_ID = 0x5F
 
-# scale -> int8 register encoding, verified against radio-robot-elite's
-# real_otos.cpp scaleToRegister(): raw = round((scale - 1.0) / 0.001),
-# clamped to an int8's range.
+# scale -> int8 register: raw = round((scale - 1.0) / 0.001), clamped
+# to int8 range (real_otos.cpp scaleToRegister()).
 _SCALE_REGISTER_STEP = 0.001
 _SCALE_REGISTER_MAX = 127
 _SCALE_REGISTER_MIN = -127
@@ -69,10 +52,8 @@ READ_PERIOD_MS = 20
 
 
 class OtosReading:
-    """One sample -- ``x``/``y`` [mm], ``heading`` [rad], ``v_x``/``v_y``
-    [mm/s], ``omega`` [rad/s]. Plain mutable attributes (no
-    ``dataclasses`` -- host-only import), matching ``comms.py``'s own
-    ``Status`` precedent."""
+    """One sample: x/y [mm], heading [rad], v_x/v_y [mm/s], omega
+    [rad/s]. Plain attributes (no ``dataclasses`` -- host-only import)."""
 
     def __init__(self, x=0.0, y=0.0, heading=0.0, v_x=0.0, v_y=0.0, omega=0.0):
         self.x = x
@@ -84,16 +65,13 @@ class OtosReading:
 
 
 class Otos:
-    """Driver over a duck-typed ``i2c`` object exposing
-    ``i2c_xfer(address, write_data=b'', read_len=0, repeated=False,
-    pre_clear=0, post_clear=0) -> int | (int, bytes)`` -- the real
-    ``robotio`` module on-device, a fake in ``tests/test_otos.py``.
+    """Driver over a duck-typed ``i2c`` exposing ``i2c_xfer(address,
+    write_data=b'', read_len=0, repeated=False, pre_clear=0,
+    post_clear=0) -> int | (int, bytes)`` (real ``robotio`` on-device;
+    fake in tests).
 
-    ``linear_scale``/``angular_scale``: from the robot's config JSON
-    (``otos`` group) -- see ``config.py``. Both default to 1.0
-    (identity); ``init()`` writes them to the chip's scalar registers
-    via ``_scale_to_register()`` (see module docstring for the formula's
-    source)."""
+    ``linear_scale``/``angular_scale``: config JSON's ``otos`` group,
+    default 1.0; ``init()`` writes them via ``_scale_to_register()``."""
 
     def __init__(self, i2c, linear_scale=1.0, angular_scale=1.0):
         self._i2c = i2c
@@ -105,11 +83,8 @@ class Otos:
         self.reading = OtosReading()
 
     def init(self):
-        """Probe the product ID register; ``connected`` is True iff it
-        reads back ``_EXPECTED_PRODUCT_ID`` (0x5F) -- mirrors
-        ``RealOtos::begin()``'s probe-then-configure shape. Never raises
-        on a bus error -- a disconnected/absent OTOS is a normal,
-        expected condition, not a fault."""
+        """Probes the product ID register; ``connected`` iff it reads
+        back 0x5F. A bus error leaves it False; never raises."""
         status, data = self._i2c.i2c_xfer(
             OTOS_ADDR, write_data=bytes([_REG_PRODUCT_ID]), read_len=1, repeated=True
         )
@@ -132,11 +107,9 @@ class Otos:
         return self.connected
 
     def read(self, now_ms):
-        """Read position+velocity if ``READ_PERIOD_MS`` has elapsed since
-        the last real read; otherwise return the cached ``self.reading``
-        unchanged (matches the chip's own 20 ms budget -- see module
-        docstring). Returns ``self.reading``. A bus error leaves
-        ``self.reading`` at its last good value and does not raise."""
+        """Read position+velocity if ``READ_PERIOD_MS`` elapsed since
+        the last read, else return the cached ``self.reading``. A bus
+        error leaves it unchanged; never raises."""
         if not self.connected:
             return self.reading
         if self.last_read_ms is not None and (now_ms - self.last_read_ms) < READ_PERIOD_MS:

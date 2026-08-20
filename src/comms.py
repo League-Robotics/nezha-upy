@@ -1,85 +1,38 @@
-"""comms -- v5 protocol engine: dispatch order, ack ring, telemetry emit
-policy, scheduled-pump plumbing.
+"""comms -- v5 protocol engine: dispatch order, ack ring, telemetry
+emit policy, scheduled-pump plumbing. Ported from radio-robot's
+``core/comms.{cpp,h}``/``core/telemetry.{cpp,h}`` (spec Sec 5/6, same
+order/ring-depths/emit arithmetic) -- not a byte-for-byte binary frame
+encoder (``msgs.py`` lacks per-verb field tables). Binary verbs are
+COBS+CRC-validated (``wire.decode_frame()``) then handed to the
+dispatch interface below as opaque bytes.
 
-Ported from radio-robot's ``src/firm/core/comms.cpp``/``comms.h`` (line
-dispatch, verb interception, cleartext replies) and
-``src/firm/core/telemetry.cpp``/``telemetry.h`` (ack ring, primary-frame
-emit policy) -- spec Sec 5/6: same dispatch ORDER, same ring
-depths/packing, same emit-policy arithmetic; NOT a byte-for-byte binary
-frame encoder, because ``msgs.py`` has no per-verb protobuf field tables
-yet. Binary verbs are validated (COBS+CRC, via ``wire.decode_frame()``)
-and handed to the firmware-layer dispatch interface (below) as opaque
-payload bytes; a full ``CommandEnvelope`` decode is future work once
-``msgs.py`` grows field tables.
+Dispatch order (``_dispatch_line()``, mirrors ``dispatchLine()``):
+    1. Relay control lines (``#``/``!``/``?`` first byte) dropped, not
+       even verb-looked-up.
+    2. Verb looked up in ``msgs.VERB_BY_NAME``; unknown -> drop.
+    3. TLM, SEED, DBG intercepted HERE, before the binary/cleartext
+       branch (TLM's REPLY is binary but its inbound name is
+       cleartext-mode; SEED/DBG are cleartext-flagged but the generic
+       switch has no cases for them).
+    4. Else: binary -> COBS+CRC validate, queue; cleartext -> answer
+       immediately (HELLO/PING/ID/VER/STATUS/HELP/POSE).
 
-Dispatch order (mirrors ``Comms::dispatchLine()`` byte-for-byte -- see
-``_dispatch_line()`` below):
-    1. Relay control-plane lines (first byte ``#``/``!``/``?``) are
-       dropped before anything else -- not even verb-looked-up.
-    2. The verb name (up to the first ``':'``, or the whole line minus a
-       trailing ``'\\r'``) is looked up in ``msgs.VERB_BY_NAME``. Unknown
-       verb -> ``malformed_count`` and drop.
-    3. TLM, SEED, DBG are intercepted HERE, before the binary/cleartext
-       branch below -- even though TLM is flagged ``binary=True`` in
-       ``msgs.VERBS`` (a telemetry REPLY frame is binary-framed; the
-       INBOUND command name is a cleartext mode verb) and SEED/DBG are
-       flagged ``binary=False`` (they still bypass the generic cleartext
-       dispatch switch, which has no cases for them).
-    4. Otherwise: a binary verb goes through COBS+CRC validation and is
-       queued for the firmware-layer dispatch interface; a cleartext verb
-       is answered immediately (HELLO/PING/ID/VER/STATUS/HELP/POSE).
+Dispatch interface: comms.py never calls firmware modules directly. A
+dispatch object exposes ``handle_command(verb_name, payload, now) ->
+(corr_id, err_code) | None`` (``now``: int [ms]) -- a pair pushes an
+ack, ``None`` sends none (see ``NullDispatch``); ``motion.py``/
+``config.py`` back it for real, tests use a stub.
 
-Firmware-layer dispatch interface: comms.py must not call
-``moddiffdrive``/firmware modules directly, so the CPython loopback
-gate never needs the native module, which cannot load under CPython at
-all. A dispatch object is any duck-typed value exposing:
+Transport contract (``Comms.add_transport()`` -- ``radio_shim.RadioLink``,
+the loopback test's in-process pipe):
+    read_line() -> bytes | None      next line, ``'\\n'`` stripped
+    send(data: bytes) -> None        appends its own trailing ``'\\n'``
+    send_reliable(text: str | bytes) -> None   same, for cleartext
 
-    handle_command(verb_name, payload, now) -> (corr_id, err_code) | None
-
-``verb_name`` is the ASCII verb string (e.g. ``"WHEELS"``); ``payload``
-is the COBS+CRC-VALIDATED but still schema-opaque bytes (no envelope
-decode -- see the module docstring above); ``now`` is the same [ms]
-integer ``Comms.pump()`` was called with. Returning a
-``(corr_id, err_code)`` pair pushes that pair onto the ack ring
-(``Telemetry.ack()``); returning ``None`` sends no ack for this command
-(the only correct choice when a real ``corr_id`` cannot be recovered --
-see ``NullDispatch`` below, the default when no dispatch is wired).
-``motion.py``/``config.py`` back this interface with the real
-``moddiffdrive`` calls once a full envelope decode exists; tests back
-it with a recording stub.
-
-Transport contract (any object handed to ``Comms.add_transport()`` --
-``src/radio_shim.py``'s ``RadioLink`` implements it, as does the
-loopback test's own in-process pipe):
-
-    read_line() -> bytes | None
-        Non-blocking. Returns the next complete wire LINE's raw content
-        (``<COMMAND>[':' <data>]``, trailing ``'\\n'`` delimiter already
-        stripped), or ``None`` if none is ready.
-    send(data: bytes) -> None
-        Send one line's raw content; the transport appends its own
-        trailing ``'\\n'`` (mirrors ``Hal::Transport::send()`` --
-        ``Comms`` never appends a delimiter itself).
-    send_reliable(text: str | bytes) -> None
-        Same contract as ``send()`` for a cleartext line (accepts ``str``
-        for caller convenience; ``Comms`` always passes ``str`` here).
-
-Scheduled-pump plumbing (spec Sec 5): ``PumpTimer`` below wires a
-periodic source to ``micropython.schedule(pump)`` -- fiber/IRQ Python
-execution corrupts the MicroPython heap, so pumping must run only from
-main context between bytecodes, never from IRQ/fiber context. The
-REPL's own blocking-stdin-wait patch (so a queued pump still runs while
-a student's REPL sits at a blocking read) is a build-level (C) patch,
-not something reachable from this module -- see ``PumpTimer``'s own
-docstring.
-
-MicroPython-only modules (``micropython``) are import-guarded so this
-whole module imports and runs unmodified under CPython.
-
-Deviations from the radio-robot source, matching ``wire.py``'s own
-precedent: no ``from __future__ import annotations``, no PEP 604/generic-
-subscript type hints, no f-strings (project style: CLAUDE.md) -- every
-function's shape is documented in its docstring instead.
+``PumpTimer`` wires a periodic source to ``micropython.schedule(pump)``
+(Sec 5) -- IRQ/fiber execution corrupts the heap, so pumping runs only
+from main context. No PEP 604/generic-subscript hints, no f-strings
+(CLAUDE.md).
 """
 
 import msgs
@@ -109,9 +62,7 @@ __all__ = [
     "TLM_MODE_ON",
 ]
 
-# --- Ring depths / policy constants -- mirror radio-robot's core/comms.h
-# and core/telemetry.h byte-for-byte (see this module's own docstring). ---
-
+# Ring depths / policy constants -- mirror core/comms.h, core/telemetry.h.
 CMD_RING_DEPTH = 12  # Core::kCmdRingDepth
 PUMP_MAX_LINES = 2 * CMD_RING_DEPTH  # Core::kPumpMaxLines
 DBG_RING_DEPTH = 4  # Core::Comms::kDbgRingDepth
@@ -129,8 +80,7 @@ TLM_MODE_OFF = "OFF"
 TLM_MODE_AUTO = "AUTO"
 TLM_MODE_ON = "ON"
 
-# Core::Comms::TlmAction, as plain strings (no `enum` -- host-only import
-# MicroPython does not ship; matches msgs.py's own plain-class precedent).
+# Core::Comms::TlmAction as plain strings (no `enum` -- host-only import).
 TLM_NONE = "NONE"
 TLM_FRAME = "FRAME"
 TLM_SET_OFF = "SET_OFF"
@@ -140,13 +90,10 @@ TLM_UNRECOGNIZED = "UNRECOGNIZED"
 
 
 def _parse_float_prefix(text, start):
-    """Parse the LONGEST valid float-literal prefix of ``text`` starting at
-    index ``start`` -- mirrors C's ``strtof()`` scanning contract (parses
-    as much as is valid, does not require a delimiter to follow, never
-    raises). Returns ``(value, end_index)``; on failure (no digits found)
-    returns ``(None, start)`` -- the caller's ``end == start`` check is
-    ``strtof``'s own "nothing consumed" signal (``end == cursor`` in the
-    C++ source)."""
+    """Parse the LONGEST valid float-literal prefix of ``text`` from
+    ``start`` -- mirrors C's ``strtof()`` (parses what it can, no
+    trailing delimiter required, never raises). Returns ``(value,
+    end_index)``; ``(None, start)`` on failure (no digits found)."""
     n = len(text)
     i = start
     if i < n and (text[i] == "+" or text[i] == "-"):
@@ -183,9 +130,8 @@ def _parse_float_prefix(text, start):
 
 
 def _parse_leading_uint(text):
-    """Parse the leading run of ASCII digits in ``text`` as an int,
-    trailing junk ignored -- mirrors ``strtoul(text, nullptr, 10)``'s
-    "parse what you can, 0 if nothing" contract. Never raises."""
+    """Leading run of ASCII digits in ``text`` as an int, trailing junk
+    ignored -- mirrors ``strtoul(text, nullptr, 10)``. Never raises."""
     i = 0
     n = len(text)
     while i < n and "0" <= text[i] <= "9":
@@ -196,11 +142,9 @@ def _parse_leading_uint(text):
 
 
 def _classify_tlm_arg(data):
-    """Mirrors ``classifyTlmArg()`` -- ``data`` (bytes, the text after
-    ``TLM:``) case-insensitively matched against NOW/ON/AUTO/OFF, a
-    trailing ``'\\r'`` stripped first. Returns one of the ``TLM_*``
-    action constants; never raises (a non-ASCII argument is simply
-    unrecognized)."""
+    """Mirrors ``classifyTlmArg()`` -- ``data`` (text after ``TLM:``)
+    matched case-insensitively against NOW/ON/AUTO/OFF. Returns a
+    ``TLM_*`` constant; never raises (non-ASCII -> unrecognized)."""
     if data and data[-1:] == b"\r":
         data = data[:-1]
     try:
@@ -220,12 +164,10 @@ def _classify_tlm_arg(data):
 
 
 class DbgAction:
-    """Mirrors ``Core::Comms::DbgAction``. ``kind`` is one of: ``"none"``
-    (the ring-empty sentinel ``take_dbg_action()`` returns -- distinct
-    from ``"unrecognized"``, which means a DBG line WAS received but its
-    sub-command didn't parse), ``"mark"``, ``"ping"``, ``"clear"``,
-    ``"otos"``, ``"vmin"``, ``"asteady"``, ``"pos"``, ``"gain"``,
-    ``"wedge"``, ``"unrecognized"``."""
+    """``kind``: ``"none"`` (ring-empty sentinel, distinct from
+    ``"unrecognized"`` = a DBG line was received but didn't parse),
+    ``"mark"``/``"ping"``/``"clear"``/``"otos"``/``"vmin"``/
+    ``"asteady"``/``"pos"``/``"gain"``/``"wedge"``/``"unrecognized"``."""
 
     def __init__(self, kind="none", text="", port=0, duration=0, value=0.0, value2=0.0):
         self.kind = kind
@@ -243,10 +185,8 @@ class DbgAction:
 
 def _classify_dbg_arg(data):
     """Mirrors ``classifyDbgArg()``'s sub-command tokenizer (mark/ping/
-    clear/otos/vmin/asteady/pos/gain/wedge). Returns a ``DbgAction``,
-    ``kind="unrecognized"`` on any parse failure or empty/non-ASCII
-    input -- matches the C++ default-constructed-to-kUnrecognized
-    behavior for a received-but-unparseable DBG line."""
+    clear/otos/vmin/asteady/pos/gain/wedge). Returns a ``DbgAction``;
+    ``kind="unrecognized"`` on any parse failure, empty, or non-ASCII."""
     if not data:
         return DbgAction(kind="unrecognized")
     try:
@@ -312,13 +252,9 @@ def _classify_dbg_arg(data):
 
 
 class SeedRequest:
-    """Mirrors ``Core::Comms::SeedRequest`` -- an external world-fix
-    staged by a SEED command, drained by the firmware layer (``motion.py``,
-    mirroring ``RobotLoop::applySeed()``). ``x``/``y`` are [mm],
-    ``heading`` is [rad] (matches the C++ struct's own units exactly).
-    ``reply_transport`` is the transport the SEED command arrived on --
-    the firmware layer echoes an accepted seed back on it; comms.py
-    itself never sends that reply (it does not own odometry)."""
+    """External world-fix staged by SEED, drained by ``motion.py``.
+    ``x``/``y`` [mm], ``heading`` [rad]. ``reply_transport``: SEED's
+    transport -- the firmware layer replies on it; comms.py does not."""
 
     def __init__(self, x, y, heading, reply_transport):
         self.x = x
@@ -328,15 +264,10 @@ class SeedRequest:
 
 
 class Status:
-    """Mirrors ``Core::Comms::Status`` -- data the firmware layer publishes
-    each cycle via ``Comms.set_status()`` so ``STATUS``/``POSE`` replies
-    have something to format. Plain mutable attributes (no ``dataclasses``
-    -- host-only import); every field defaults exactly as the C++ struct
-    does. ``tlm_mode`` is NOT read by ``Comms``'s own ``STATUS`` reply --
-    that reads ``Comms.telemetry.mode`` directly (the two are always the
-    same live value in this port, since ``Comms`` owns ``telemetry``
-    itself; the C++ source keeps a synchronized COPY here only because
-    ``Comms``/``Telemetry`` are separate peer objects there)."""
+    """Data the firmware layer publishes each cycle via
+    ``Comms.set_status()`` so ``STATUS``/``POSE`` have something to
+    format. Note: the ``STATUS`` reply reads ``Comms.telemetry.mode``
+    directly, not a field here."""
 
     def __init__(self):
         self.ready = False
@@ -355,44 +286,23 @@ class Status:
 
 
 class NullDispatch:
-    """Default firmware-layer dispatch -- installed automatically when
-    ``Comms`` is constructed without an explicit ``dispatch``. Every
-    binary command is accepted onto the wire (COBS+CRC already validated
-    before ``handle_command()`` is ever called) but produces NO ack: an
-    ack needs a real ``corr_id``, which lives inside the still-opaque
-    envelope bytes ``payload`` carries (see the module docstring --
-    ``msgs.py`` has no per-verb protobuf field tables yet), so there is
-    nothing correct to ack with. Returning ``None`` is exactly
-    ``Comms.pump()``'s 'skip the ack' signal -- the only honest behavior
-    available with no firmware layer wired."""
+    """Default dispatch when ``Comms`` gets no explicit ``dispatch``.
+    Produces no ack: a real ``corr_id`` lives inside the still-opaque
+    ``payload`` (module docstring), so ``None`` is the only honest
+    response with nothing wired up."""
 
     def handle_command(self, verb_name, payload, now):
         return None
 
 
 class TelemetryPolicy:
-    """Ack ring + primary-frame emit-policy decision, decoupled from
-    frame CONTENT -- mirrors ``Core::Telemetry``'s ack ring
-    (``pushAckRing``/``emitPrimary``'s ack half) and emit policy
-    (``primaryDue``/``pendingAckDeliveries``/``emit``) exactly, but does
-    NOT build a real 22-field TLM wire frame (that is ``src/telemetry.py``
-    -- no protobuf field tables exist yet in ``msgs.py``). Named
-    ``TelemetryPolicy`` rather than ``Telemetry`` specifically to avoid
-    colliding with that module's name.
-
-    Activity tracking is a deliberately simplified slice of
-    ``Telemetry::update()``: the real C++ source derives ``kFlagActive``
-    from a full ``RobotState``; this port exposes ``set_active(active,
-    now)`` directly so the CPython loopback gate can drive "silent while
-    parked" / "unsolicited while moving" without needing the firmware
-    layer's state model.
-
-    ``emit_callback(now, acks)``, if given, is called exactly when a
-    primary frame WOULD be sent -- ``acks`` is the list of currently-live
-    packed ack ints (``corr_id << 4 | err_code``, oldest first). Building
-    and broadcasting the real wire bytes for that frame is left to the
-    caller -- this class only decides WHEN and WHAT acks ride along.
-    """
+    """Ack ring + primary-frame emit-policy, decoupled from frame
+    CONTENT -- mirrors ``Core::Telemetry`` but does not build the real
+    22-field TLM wire frame (``src/telemetry.py``, pending field
+    tables). ``emit_callback(now, acks)``, if given, fires exactly
+    when a primary frame would be sent (``acks``: packed ``corr_id <<
+    4 | err_code`` ints, oldest first); the caller builds/broadcasts
+    the wire bytes."""
 
     def __init__(self, emit_callback=None):
         self.mode = TLM_MODE_AUTO
@@ -409,21 +319,17 @@ class TelemetryPolicy:
         self._emit_callback = emit_callback
 
     def set_active(self, active, now):
-        """Simplified stand-in for ``Telemetry::update()``'s activity
-        latch: ``active=True`` marks "moving now" and refreshes the coast
-        window; ``active=False`` alone does not clear activity (the coast
-        holdoff below still applies) -- matches ``kFlagActive`` /
-        ``everMoved_`` / ``lastActivity_`` semantics exactly."""
+        """``True`` marks "moving now" and refreshes the coast window;
+        ``False`` alone does not clear activity (holdoff still applies)."""
         self._active = active
         if active:
             self._ever_moved = True
             self._last_activity = now
 
     def ack(self, corr_id, err_code):
-        """Push one ``(corr_id, err_code)`` pair onto the ack ring, packed
-        as ``corr_id << 4 | (err_code & 0xF)`` -- mirrors
-        ``pushAckRing()``: depth 12, oldest entry evicted (ring advances)
-        once full, new entry's resend counter starts at 0."""
+        """Push ``(corr_id, err_code)`` onto the ack ring, packed as
+        ``corr_id << 4 | (err_code & 0xF)``; depth 12, oldest evicted
+        once full."""
         packed = (corr_id << ACK_ERR_BITS) | (err_code & ACK_ERR_MASK)
         if self._ack_count < ACK_RING_DEPTH:
             tail = (self._ack_head + self._ack_count) % ACK_RING_DEPTH
@@ -436,8 +342,7 @@ class TelemetryPolicy:
 
     def apply_action(self, action):
         """Mirrors ``applyAction()``: SET_OFF/SET_AUTO/SET_ON update
-        ``mode``; returns True iff ``action`` is ``TLM_FRAME`` (a forced
-        immediate emission is owed)."""
+        ``mode``; returns True iff ``action`` is ``TLM_FRAME``."""
         if action == TLM_SET_OFF:
             self.mode = TLM_MODE_OFF
         elif action == TLM_SET_AUTO:
@@ -462,13 +367,10 @@ class TelemetryPolicy:
         return self._active or (self._ever_moved and (now - self._last_activity) < COAST_HOLDOFF_MS)
 
     def emit(self, now, force=False):
-        """Mirrors ``Telemetry::emit()``: default mode AUTO emits
-        unsolicited frames only while ``_activity()`` is true (silent
-        while parked); mode OFF never emits unsolicited; mode ON always
-        does. Regardless of mode, a pending (not-yet-``ACK_REPEATS``-
-        delivered) ack, or ``force=True`` (the TLM "NOW" verb), forces an
-        emission -- but ALL of that is still gated by
-        ``_primary_due()`` (the 25 ms floor)."""
+        """Mirrors ``Telemetry::emit()``: AUTO emits unsolicited frames
+        only while ``_activity()``; OFF never, ON always. A pending
+        ack or ``force=True`` (TLM "NOW") forces emission regardless --
+        all still gated by ``_primary_due()`` (the 25 ms floor)."""
         activity = self._activity(now)
         if self.mode == TLM_MODE_OFF:
             unsolicited = False
@@ -494,10 +396,9 @@ class TelemetryPolicy:
 
 
 class Comms:
-    """v5 protocol engine -- mirrors ``Core::Comms``. Owns a set of
-    transports (registration order is dispatch-tie-break order, exactly
-    like ``addTransport()``'s own doc comment), the command ring, DBG/SEED
-    staging, and a ``TelemetryPolicy`` instance (``self.telemetry``)."""
+    """v5 protocol engine -- mirrors ``Core::Comms``. Owns the
+    transports (registration order is dispatch-tie-break order), the
+    command ring, DBG/SEED staging, and ``self.telemetry``."""
 
     def __init__(self, banner, id_line, dispatch=None, version="dev", emit_callback=None):
         self._banner = banner
@@ -528,11 +429,8 @@ class Comms:
     # --- transport registration -------------------------------------
 
     def add_transport(self, transport):
-        """Register one more transport, in order. Returns False (does NOT
-        raise) if ``MAX_TRANSPORTS`` are already registered -- a caller
-        that ignores the return value silently loses a link, matching
-        the C++ source's own ``[[nodiscard]]`` warning-not-error
-        contract."""
+        """Register one more transport, in order. Returns False (never
+        raises) once ``MAX_TRANSPORTS`` are registered."""
         if len(self._transports) >= MAX_TRANSPORTS:
             return False
         self._transports.append(transport)
@@ -544,22 +442,14 @@ class Comms:
     # --- status / boot sequence ---------------------------------------
 
     def set_status(self, status):
-        """Replace the ``Status`` snapshot ``STATUS``/``POSE`` read from --
-        mirrors ``setStatus()``/``updateStatus()``, called by the firmware
-        layer once per cycle."""
+        """Replace the ``Status`` snapshot ``STATUS``/``POSE`` read from."""
         self._status = status
 
     def send_banner(self):
-        """Broadcast the (already-formatted) banner string to every
-        registered transport -- mirrors ``sendBanner()``. Byte-frozen per
-        spec Sec 6: whatever banner text the caller passes in, this sends
-        it unmodified."""
         self._broadcast_reliable(self._banner)
 
     def send_ready(self):
-        """Broadcast the literal ``"READY"`` -- mirrors ``sendReady()``.
-        The boot sequence is always ``send_banner()`` then
-        ``send_ready()``, matching ``RobotLoop``'s own boot preamble."""
+        """Boot sequence is always ``send_banner()`` then ``send_ready()``."""
         self._broadcast_reliable("READY")
 
     def _broadcast_reliable(self, text):
@@ -569,15 +459,13 @@ class Comms:
     # --- staged-action drains (SEED / DBG) -----------------------------
 
     def take_seed(self):
-        """Pop and clear the pending SEED request, or ``None`` if none is
-        staged -- mirrors ``takeSeed()``."""
+        """Pop and clear the pending SEED request, or ``None``."""
         seed = self._seed
         self._seed = None
         return seed
 
     def take_dbg_action(self):
-        """Pop the oldest staged DBG action, or ``DbgAction(kind="none")``
-        if the ring is empty -- mirrors ``takeDbgAction()``."""
+        """Pop the oldest staged DBG action, or ``DbgAction(kind="none")``."""
         if self._dbg_count == 0:
             return DbgAction(kind="none")
         action = self._dbg_ring[self._dbg_head]
@@ -593,10 +481,8 @@ class Comms:
         self._dbg_count += 1
 
     def _stage_seed(self, data, transport):
-        """Mirrors ``stageSeed()``: ``"<x>,<y>,<heading>"``, commas or
-        spaces, all three required and signed. Any parse failure (empty,
-        oversized, non-ASCII, or an unparseable float) increments
-        ``malformed_count`` and stages nothing."""
+        """``"<x>,<y>,<heading>"`` (commas or spaces, all three
+        required, signed). Any parse failure -> ``malformed_count``."""
         if not data or len(data) >= 64:
             self.malformed_count += 1
             return
@@ -752,8 +638,7 @@ class Comms:
             self._send_status(self._tlm_reply_transport)
         elif action == TLM_UNRECOGNIZED:
             self._send_help(self._tlm_reply_transport)
-        # TLM_NONE / TLM_FRAME: no reply here -- kFrame's reply IS the
-        # forced telemetry emission `pump()` already triggered.
+        # TLM_NONE/TLM_FRAME: no reply here -- FRAME's reply is the emission pump() already triggered.
 
     # --- the pump ----------------------------------------------------------
 
@@ -766,15 +651,10 @@ class Comms:
         return False
 
     def pump(self, now):
-        """Bounded per-call work, mirrors ``Comms::pump()`` PLUS the
-        command-ring-drain / TLM-reply / telemetry-emit sequence
-        ``RobotLoop`` runs immediately after it in the C++ source (there
-        is no separate RobotLoop-equivalent module in this port -- comms.py
-        owns dispatch order, ack ring, and telemetry emit policy).
-
-        ``now``: int [ms], monotonic, caller-supplied (this module has no
-        clock of its own -- see ``PumpTimer`` for the MicroPython-side
-        timer wiring)."""
+        """Bounded per-call work: mirrors ``Comms::pump()`` plus the
+        ring-drain/TLM-reply/telemetry-emit sequence ``RobotLoop`` runs
+        right after it in C++ (no separate module here). ``now``: int
+        [ms], monotonic, caller-supplied."""
         for _ in range(PUMP_MAX_LINES):
             if not self._pump_once(now):
                 break
@@ -796,26 +676,11 @@ class Comms:
 
 
 class PumpTimer:
-    """MicroPython-only scheduled-pump plumbing (spec Sec 5): a periodic
-    source calls ``tick()`` -- a hardware timer IRQ (deliberately NOT
-    hard-coded to a specific peripheral API here; a native module or a
-    future ``machine.Timer`` may supply it) -- and ``tick()`` ONLY EVER
-    queues the real work via ``micropython.schedule()``, never runs it
-    directly: Python execution from IRQ/fiber context corrupts the
-    MicroPython heap, so ``pump()`` must always run later, from main
-    context, between bytecodes. That is also what keeps the USB REPL
-    live -- ``micropython.schedule()`` callbacks run between bytecodes
-    regardless of what the foreground REPL is doing.
-
-    The other half of Sec 5's contract -- patching the REPL's blocking
-    stdin-wait loop so a queued callback still runs while a student's
-    REPL sits at a blocking read -- is a C-level build patch
-    (``patches/``), not reachable from this Python class.
-
-    On CPython (``micropython`` unavailable) ``tick()`` degrades to
-    calling ``pump()`` immediately and synchronously -- deterministic,
-    no scheduler queue to drain, exactly what the offline loopback test
-    wants."""
+    """Scheduled-pump plumbing (Sec 5): ``tick()`` only ever queues via
+    ``micropython.schedule()``, never runs directly -- IRQ/fiber
+    execution corrupts the heap (the REPL's stdin-wait patch is a
+    separate C-level build patch, ``patches/``). On CPython ``tick()``
+    calls ``pump()`` immediately and synchronously."""
 
     def __init__(self, comms, now_fn):
         self._comms = comms
