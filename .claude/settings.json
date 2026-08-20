@@ -33,28 +33,6 @@
         ]
       }
     ],
-    "TaskCreated": [
-      {
-        "matcher": ".*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "clasi hook task-created"
-          }
-        ]
-      }
-    ],
-    "TaskCompleted": [
-      {
-        "matcher": ".*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "clasi hook task-completed"
-          }
-        ]
-      }
-    ],
     "PreToolUse": [
       {
         "matcher": "Edit|Write|MultiEdit",
@@ -79,10 +57,7 @@
       {
         "matcher": "Bash",
         "hooks": [
-          {
-            "type": "command",
-            "command": "clasi hook commit-check"
-          }
+
         ]
       },
       {
