@@ -432,6 +432,7 @@ CREEP_VELOCITY_FRACTION = {"leg": 0.4, "pivot": 0.85}
 # duty-equivalent; a lower creep twist stalls it (bench).
 
 _velocity_mode = False      # set by _configure_and_start from ready flag
+_started = False            # once-per-boot bracket latch -- see _configure_and_start
 
 
 def _gain_overrides(path=ROBOT_CONFIG_PATH):
@@ -440,12 +441,21 @@ def _gain_overrides(path=ROBOT_CONFIG_PATH):
     Lets gain tuning iterate by config re-copy, no reflash (the demo
     modules are frozen). Fail-soft: absent file/group/ujson -> {}."""
     try:
+        import gc
+        gc.collect()  # parse needs ~3 KB contiguous; defragment first
         import ujson
         with open(path, "r") as f:
             doc = ujson.loads(f.read())
         group = doc.get("demo_velocity", {})
+        del doc
+        gc.collect()
         return group if isinstance(group, dict) else {}
-    except (ImportError, OSError, ValueError):
+    except (ImportError, OSError, ValueError, MemoryError):
+        # MemoryError included deliberately: parsing the whole config
+        # needs ~3 KB contiguous and a fragmented press-time heap can
+        # refuse it (bench: every press faulted here). Overrides are
+        # OPTIONAL -- defaults must drive; a tuning nicety must never
+        # cost the button.
         return {}
 
 
@@ -459,7 +469,18 @@ def _configure_and_start(caller_name):
     the kernel's own ready flag is the authority for whether it took.
     Falls back to raw duty mode if the binding predates the PID kwargs
     or calibration is absent."""
-    global _velocity_mode, CRUISE_VELOCITY, PIVOT_TWIST
+    global _velocity_mode, CRUISE_VELOCITY, PIVOT_TWIST, _started
+    if _started:
+        # LANDMINE: the bracket must run ONCE PER BOOT. start() is
+        # irreversible by design (no stop(); the kernel fiber's run()
+        # never returns), so a second configure() placement-news the
+        # kernel UNDER the live fiber and a second start() launches a
+        # second fiber on the same storage. Bench-measured: press 2
+        # "completed" in 25 ms on a -41255-count encoder discontinuity,
+        # press 3 timed out with the wheels dead. Idempotent re-entry
+        # keeps every later press on the healthy first-boot kernel.
+        print("demo_square: %s reusing running kernel" % (caller_name,))
+        return
     _velocity_mode = False
     gains = dict(VELOCITY_GAINS)
     if _ON_DEVICE:
@@ -487,6 +508,7 @@ def _configure_and_start(caller_name):
     print("demo_square: %s begin" % (caller_name,), diffdrive.begin())
     print("demo_square: %s start" % (caller_name,), diffdrive.start())
     time.sleep_ms(100)
+    _started = True
     _velocity_mode = bool(diffdrive.output().get("ready", False))
     print("demo_square: %s mode" % (caller_name,),
           "VELOCITY(PID)" if _velocity_mode else "raw-duty fallback")

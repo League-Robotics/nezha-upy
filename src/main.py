@@ -48,6 +48,14 @@ import sys
 
 from microbit import Image, button_a, button_b, display, sleep
 
+# At boot, not per press: the frozen bytecode costs nothing to load, but
+# module-level init reads robot.json twice (geometry + wiring) and needs
+# a few KB of contiguous heap. At press time the heap is fragmented and
+# a partial import failure POISONS sys.modules -- every later press then
+# gets a module stump with no run()/run_single_leg() (bench-measured).
+# Boot is the one moment the heap is fresh.
+import demo_square
+
 # Bare path, no leading slash -- see module docstring.
 ROBOT_CONFIG_PATH = "robot.json"
 
@@ -80,6 +88,36 @@ def robot_ready():
     return True
 
 
+FAULT_LOG_PATH = "fault.txt"
+
+# Emergency heap reserve. Released in _log_fault() so that logging a
+# MemoryError does not itself need memory it cannot get -- without this
+# the fault handler's open() fails, the except swallows it, and the
+# failure is invisible (bench-observed: sad face, no fault file).
+_FAULT_RESERVE = bytearray(2048)
+
+
+def _log_fault(kind, exc):
+    """Persist a fault to the filesystem, append-only.
+
+    The display can only say "something went wrong" and this port's
+    stdout does not reach the USB serial line, so a fault on a real
+    button press is otherwise invisible. APPEND, not truncate: the
+    first fault is the interesting one and a later cascading failure
+    must not overwrite the cause.
+    """
+    global _FAULT_RESERVE
+    import gc
+    _FAULT_RESERVE = None      # hand the reserve back before we need it
+    gc.collect()
+    try:
+        with open(FAULT_LOG_PATH, "a") as f:
+            f.write("%s: %s: %s free=%d\n"
+                    % (kind, type(exc).__name__, exc, gc.mem_free()))
+    except Exception:
+        pass
+
+
 def _demo_square():
     """Import the frozen demo module.
 
@@ -103,7 +141,6 @@ def _demo_square():
     """
     import gc
     gc.collect()
-    import demo_square
     return demo_square
 
 
@@ -141,6 +178,7 @@ def on_button_a():
         # a tour fault must show something on the display, not die
         # silently. KeyboardInterrupt is excluded above.
         print("main: tour fault:", exc)
+        _log_fault("tour", exc)
         display.show(Image.SAD)
         sleep(FAULT_SHOW_MS)
     display.clear()
@@ -159,6 +197,7 @@ def on_button_b():
     except Exception as exc:  # noqa: BLE001 -- deliberate broad catch;
         # same reasoning as on_button_a()'s own guard.
         print("main: straight-drive fault:", exc)
+        _log_fault("straight-drive", exc)
         display.show(Image.SAD)
         sleep(FAULT_SHOW_MS)
     display.clear()
