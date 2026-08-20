@@ -187,8 +187,15 @@ legs of this gate are stakeholder acceptance (§9).
 
 > **Source layout (reorganised 2026-08-20, out of process).** `src/` is
 > split into packages: `core/` (boot, comms, wire, msgs, config,
-> radio_shim, wifi_at, telemetry), `hardware/` (motion), `devices/`
-> (line, otos) and `demos/`. Two files stay at `src/` root by
+> radio_shim, wifi_at, telemetry), `hardware/` (motion) and
+> `devices/` (line, otos). The demo scripts (`demo_square.py`,
+> `demo_util.py`) stay at `src/` root: bench-measured on tovez,
+> importing `demo_square` through a package faults EVERY button press
+> with "memory allocation failed, allocating 3072 bytes", where a flat
+> import drives 4/4 presses cleanly. Free heap at boot is the same
+> either way (17.0 vs 17.3 KB), so it is the package import path's own
+> cost and fragmentation at press time, not headroom. Two further
+> files stay at `src/` root by
 > construction: `main.py`, which `mp_main()` probes for on the
 > FILESYSTEM and which must never be frozen; and `boot.py`, a
 > three-line shim re-exporting `core.boot.run`, because `build.sh`

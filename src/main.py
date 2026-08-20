@@ -53,7 +53,6 @@ ROBOT_CONFIG_PATH = "robot.json"
 
 # LANDMINE -- see module docstring's deploy-format paragraph and
 # docs/bench-log-zetuv-2026-08-19.md.
-TOUR_MODULE_NAME = "demo_square"
 
 STRAIGHT_DRIVE_DISTANCE_MM = 500.0  # [mm] button B's commanded distance
 
@@ -81,6 +80,33 @@ def robot_ready():
     return True
 
 
+def _demo_square():
+    """Import the frozen demo module.
+
+    Presses used to force a fresh reload so each press re-read
+    ``robot.json``'s geometry. REMOVED, bench-measured on tovez: the
+    reload costs ~5.5 KB of a ~17 KB boot heap and leaves it fragmented,
+    after which ``run_single_leg()``'s own 3 KB allocation fails with
+    MemoryError and the press does nothing at all.
+
+    CONSEQUENCE: editing ``robot.json`` no longer takes effect on the
+    next press -- reset the board to re-read it.
+
+    LANDMINE: ``demo_square`` must stay a ROOT-LEVEL module, not a
+    package submodule. Bench-measured: with it under a ``demos``
+    package, every press faulted with "memory allocation failed,
+    allocating 3072 bytes" while the same firmware with a flat
+    ``import demo_square`` drove 4/4 presses cleanly. Free heap at boot
+    was the same either way (17.4 KB vs 17.3 KB) -- the package import
+    path simply costs more and fragments worse at exactly the moment
+    the drive needs a contiguous block.
+    """
+    import gc
+    gc.collect()
+    import demo_square
+    return demo_square
+
+
 def run_tour():
     """Fresh (re)import of ``demo_square``, then an explicit
     ``demo_square.run()`` call -- see module docstring. Popping first
@@ -88,11 +114,7 @@ def run_tour():
     ``robot.json``'s current geometry every press. Raises whatever
     ``demo_square.run()`` raises; the caller (``on_button_a``) handles
     that."""
-    import gc
-    gc.collect()  # heap is tight; defragment before the module reload
-    sys.modules.pop(TOUR_MODULE_NAME, None)
-    from demos import demo_square
-    demo_square.run()
+    _demo_square().run()
 
 
 def run_straight_drive():
@@ -103,11 +125,7 @@ def run_straight_drive():
     use, reused rather than reimplemented. Raises whatever
     ``demo_square.run_single_leg()`` raises; the caller (``on_button_b``)
     handles that."""
-    import gc
-    gc.collect()  # heap is tight; defragment before the module reload
-    sys.modules.pop(TOUR_MODULE_NAME, None)
-    from demos import demo_square
-    demo_square.run_single_leg(STRAIGHT_DRIVE_DISTANCE_MM)
+    _demo_square().run_single_leg(STRAIGHT_DRIVE_DISTANCE_MM)
 
 
 def on_button_a():

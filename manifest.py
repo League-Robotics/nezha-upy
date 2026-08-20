@@ -50,7 +50,7 @@
 # patches `main.c` to `mp_import_name()` this module and call its
 # `run()` explicitly.
 #
-# `src/demos/demo_square.py` (sprint 002 ticket 002) IS frozen below.
+# `src/demo_square.py` (sprint 002 ticket 002) IS frozen below.
 # It was deliberately absent for several sprints -- it is a bench demo
 # SCRIPT, not a framework module -- and was added later. As of sprint 006 ticket 001, a bare `import demo_square` no
 # longer auto-runs anything by itself (its own module docstring's
@@ -59,14 +59,17 @@
 # this freeze list regardless: freezing would need a full `--clean`
 # rebuild+reflash unrelated to this ticket's own scope, and its
 # standalone bench-debug entry point
-# (`mpremote run src/demos/demo_square.py`, source upload + execute) still
+# (`mpremote run src/demo_square.py`, source upload + execute) still
 # needs no freezing at all. See that module's own docstring and
 # `tests/test_manifest_freeze.py`'s `_BENCH_ONLY_MODULES` for the same
 # reasoning encoded as a test.
 
 # PACKAGE LAYOUT (out-of-process reorganisation, 2026-08-20): src/ is
 # split into `core` (boot/protocol/transports/telemetry/config),
-# `hardware` (drivetrain control), `devices` (I2C sensors) and `demos`.
+# `hardware` (drivetrain control) and `devices` (I2C sensors). The demo
+# scripts stay at root: bench-measured, importing demo_square through a
+# package costs enough heap at press time to fault the drive with
+# MemoryError (3072 bytes) where a flat import drives cleanly.
 # Each package's `__init__.py` MUST be frozen alongside its modules or
 # the package is not importable at all on device.
 #
@@ -80,6 +83,8 @@ freeze(
     "../../../src",
     (
         "boot.py",
+        "demo_square.py",
+        "demo_util.py",
         "core/__init__.py",
         "core/boot.py",
         "core/comms.py",
@@ -94,8 +99,5 @@ freeze(
         "devices/__init__.py",
         "devices/line.py",
         "devices/otos.py",
-        "demos/__init__.py",
-        "demos/demo_square.py",
-        "demos/demo_util.py",
     ),
 )

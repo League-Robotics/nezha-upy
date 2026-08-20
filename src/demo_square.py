@@ -6,7 +6,7 @@ shape.
 Run standalone (with zetuv connected and ``diffdrive`` reachable over
 USB)::
 
-    mpremote connect /dev/cu.usbmodemXXXXXXX run src/demos/demo_square.py
+    mpremote connect /dev/cu.usbmodemXXXXXXX run src/demo_square.py
 
 (resolve the port via ``mbdeploy list``, matched by UID, never a board
 name alone).
@@ -90,7 +90,7 @@ PI = 3.14159265358979323846
 
 ROBOT_CONFIG_PATH = "robot.json"  # bare, no leading slash -- see main.py
 
-from demos import demo_util
+import demo_util
 # Split-module aliases (compile-heap ceiling; see demo_util).
 _scan_number = demo_util._scan_number
 geometry_from_robot_config = demo_util.geometry_from_robot_config

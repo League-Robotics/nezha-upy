@@ -1,4 +1,4 @@
-"""`src/demos/demo_square.py`'s offline-testable segment-generation logic
+"""`src/demo_square.py`'s offline-testable segment-generation logic
 (the TOUR_SQUARE shape -- 4 straight legs + 4 left pivots, interleaved)
 against known geometry constants. The hardware-touching half
 (`run()`/`_run_segment()`, which call `diffdrive` directly) is not
@@ -15,7 +15,7 @@ if str(SRC_DIR) not in sys.path:
 
 import pytest
 
-from demos import demo_square  # noqa: E402
+import demo_square  # noqa: E402
 
 
 def test_on_device_is_false_under_cpython():
@@ -188,13 +188,15 @@ def test_run_single_leg_default_distance_matches_leg_distance():
 
 def test_module_does_not_auto_run_on_plain_import():
     # A plain import must never itself invoke run()/run_single_leg() --
-    # __name__ is the module's own dotted name for any import, never
+    # __name__ is the module's own name for any import, never
     # "__main__". Made explicit here rather than relying on it being an
     # accidental side effect of no diffdrive being available off-device.
     # The != "__main__" assertion is the one carrying the meaning; the
-    # equality pins the package path after the src/ split.
+    # equality pins that demo_square stays a ROOT-LEVEL module -- see
+    # main.py's _demo_square() for why a package submodule faults the
+    # drive with MemoryError on device.
     assert demo_square.__name__ != "__main__"
-    assert demo_square.__name__ == "demos.demo_square"
+    assert demo_square.__name__ == "demo_square"
 
 
 # --- config-driven wiring ------------------------------------------------
