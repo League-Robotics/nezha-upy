@@ -1,123 +1,55 @@
 """boot -- frozen boot module: assembles the firmware layer at power-on
-(sprint 001 ticket 010, sprint.md's Architecture Revision 2026-08-19 /
-``docs/design/specification.md`` Sec 5/6/7.2, UC-002/UC-007/UC-011).
+(UC-002/UC-007/UC-011; see ``docs/design/specification.md`` Sec 5/6/7.2).
 
-**Gap this closes**: tickets 004-007 each built one milestone's piece
-(native diffdrive module, wire codec, protocol engine, WiFi transport,
-Python firmware layer) but none of them owned assembling those pieces
-into a running image at power-on -- see ``docs/bench-acceptance-
-procedures.md``'s (now-rewritten) former A.3 section for the exact gap
-this module closes, and ``comms.PumpTimer``'s own docstring for the
-"actual timer source" this module supplies.
+LANDMINE: ``main.c``'s ``mp_main()`` looks for ``main.py`` via a
+DIRECT, unconditional filesystem stat (``mp_import_stat()`` ->
+``uos_mbfs_import_stat()``), with NO frozen-module fallback -- a
+frozen module named ``main`` would never be found. This module is
+therefore named ``boot`` and frozen normally via ``manifest.py``
+(reachable via ``import boot`` through the normal frozen-module
+resolution path, unlike ``mp_main()``'s direct filesystem-only probe).
+``build.sh`` patches ``main.c`` to ``mp_import_name(MP_QSTR_boot, ...)``
+then call this module's ``run()``, placed immediately after
+``mp_init()`` and BEFORE the existing ``main.py``-or-REPL branch,
+wrapped in its own ``nlr_push``/``nlr_pop`` pair so any exception here
+is printed and boot continues into the REPL regardless -- boot must
+never block it.
 
-**How this module gets to run at all -- grounded, not assumed**: the
-ticket that created this module explicitly required confirming
-``micropython-microbit-v2``'s real boot hook rather than assuming
-``main.py`` is correct by convention. Reading
-``micropython-microbit-v2/src/codal_port/main.c``'s ``mp_main()``
-directly: it checks for ``main.py`` via ``mp_import_stat(main_py) ==
-MP_IMPORT_STAT_FILE``, and that function (``main.c``'s own
-``mp_import_stat()``) is a **direct, unconditional call to
-``uos_mbfs_import_stat()``** (``microbitfs.c``) -- the on-device
-**filesystem** stat, with **no frozen-module fallback**. A frozen
-``main.py`` would therefore NEVER be found by this check; freezing a
-module under that name would silently never run at boot. This module is
-instead named ``boot`` (this file, ``src/boot.py``) and frozen normally
-via ``manifest.py`` (an ordinary frozen module, reachable by ``import
-boot`` exactly like ``comms``/``config``/etc. already are -- frozen-
-module imports go through the normal ``mp_import_name()`` resolution
-path, which DOES check the frozen table, unlike ``mp_main()``'s own
-direct filesystem-only ``main.py`` probe). ``build.sh``'s own "Wire the
-frozen boot module into main.c's power-on sequence" step patches
-``main.c`` to explicitly ``mp_import_name(MP_QSTR_boot, ...)`` then call
-this module's ``run()`` -- placed immediately after ``mp_init()`` and
-BEFORE the existing ``main.py``-or-``from microbit import *`` branch, so
-a student's own filesystem ``main.py`` (the standard micro:bit drag-and
--drop workflow) still runs afterward, on top of an already-assembled
-engine, unchanged. The call is wrapped in its own ``nlr_push``/``nlr_pop``
-pair in ``main.c`` (mirroring ``microbit_pyexec_file()``'s own pattern in
-the same file) as a last-resort safety net: if anything in this module
-raises an exception this module's own fail-closed handling below does
-not already catch, the exception is printed and boot continues into the
-REPL regardless -- boot must never block it (ticket's own step 6).
+This module has NO import-time side effects -- all work happens inside
+``run()``, called explicitly. That is what lets
+``tests/test_boot_sequence.py`` ``import boot`` under CPython and call
+``run()`` repeatedly with injected fakes, matching this codebase's
+duck-typed-dependency-injection testing convention.
 
-**This module has NO import-time side effects.** All work happens
-inside ``run()``, called explicitly (never via a bare ``import boot``
-auto-running anything) -- this is what lets ``tests/test_boot_sequence.py``
-``import boot`` under CPython and call ``run()`` repeatedly with
-injected fakes, matching every other module in this codebase's own
-duck-typed-dependency-injection testing convention (see e.g.
-``radio_shim.RadioLink``, ``wifi_at.WifiAtLink``, ``motion.MoveQueue``).
-
-**The six steps** (ticket's own enumeration; ``run()``'s body performs
-them in this exact order):
-
+The six steps ``run()`` performs, in order:
   1. Load the robot's JSON config, fail-closed.
-  2. ``diffdrive.configure/begin/start`` -- only if step 1 succeeded AND
-     a diffdrive-shaped module is actually available (native build
-     variant, or an injected stub under test). Also wires
-     ``motion.RobotDispatch`` (``motion.MoveQueue`` + ``config.
-     ConfigDispatch``) as ``comms.Comms``'s dispatch, gated on the SAME
-     condition -- this is "assembling", not new logic: ``motion.py``'s
-     own docstring already names ``RobotDispatch`` as "the single
-     composite object wired as ``comms.Comms(..., dispatch=...)``".
+  2. ``diffdrive.configure/begin/start`` -- only if step 1 succeeded
+     AND a diffdrive-shaped module is available. Also wires
+     ``motion.RobotDispatch`` as ``comms.Comms``'s dispatch.
   3. Bring up ``comms.Comms`` and the radio transport unconditionally;
-     bring up the WiFi transport only when ``wifi_secrets.json`` is
-     present (``wifi_at.load_secrets()`` returns ``(None, None)``
-     otherwise -- not an error, per that function's own docstring).
-  4. Start the scheduled pump, wired to ``microbit.run_every()`` -- see
-     ``PUMP_PERIOD_MS`` / ``_BootPumpTimer`` below for why this hook and
-     not a new native timer.
+     bring up WiFi only when ``wifi_secrets.json`` is present.
+  4. Start the scheduled pump, wired to ``microbit.run_every()``.
   5. ``comms.send_banner()`` then ``comms.send_ready()`` -- always,
-     regardless of step 1/2's outcome (the fail-closed acceptance
-     criterion: "comms/REPL still available (banner still emits...)").
-  6. Boot must not block: nothing in ``run()`` performs a blocking wait
-     (no ``time.sleep``, no polling loop) -- enforced by construction,
-     every call here is either non-blocking-by-contract (``RadioLink.
-     begin()``, ``WifiAtLink.__init__``) or a plain one-shot native call
-     (``diffdrive.configure/begin/start``, all documented as returning
-     immediately in ``native/README.md``).
+     regardless of step 1/2's outcome (fail-closed: comms/REPL must
+     stay available even on a bad config).
+  6. Boot must not block: nothing in ``run()`` performs a blocking
+     wait -- every call is non-blocking by contract or a one-shot
+     native call documented as returning immediately.
 
-**On-device config path convention (this module's own decision, flagged
-here rather than guessed silently)**: no document in this repo pins an
-exact on-device filesystem path for the robot's JSON. ``build.sh`` has
-no per-robot build flag anywhere (grepped, confirmed) and the M6
-RAM/flash checkpoint measures ONE hex's footprint -- so the built image
-is robot-AGNOSTIC; per-robot specialization is entirely a filesystem-
-content concern, decided at bench-flash time (out of this ticket's
-scope, same division ``data/tovez.json`` etc. already establish: "the
-robot JSON... the on-device filesystem holds robot JSON + student code;
-frozen modules hold the code"). A frozen, robot-agnostic module
-therefore needs ONE fixed, generic on-device path, not a robot-specific
-filename ``config.py``'s own docstring example (``"/tovez.json"``) would
-only work for one specific robot. This module fixes that path as
-``CONFIG_PATH = "robot.json"   # BARE name: this port ENOENTs the
-                              # leading-slash form (bench-confirmed)`` -- whichever robot's JSON content is
-copied onto a given unit's filesystem at bench time, it goes under this
-one name. ``docs/bench-acceptance-procedures.md``'s ticket-010 revision
-records this convention for the bench operator.
+On-device config path: ``CONFIG_PATH = "robot.json"`` -- one fixed,
+robot-agnostic, bare (no leading slash) name; this port ENOENTs the
+leading-slash form. Whichever robot's JSON is copied onto a unit's
+filesystem at bench time goes under this name.
 
-**Banner/ID/VERSION content (this module's own decision)**: spec Sec 10
-open item 1 explicitly leaves "the version value... flag if any host
-tool pins the old value" as a non-blocking, decide-during-execution
-item, and ``comms.Comms``'s own docstring says a banner is passed in
-"already-formatted" -- the exact byte content was always deferred to
-whoever constructs ``Comms``, i.e. this module. ``tests/test_comms_
-loopback.py``'s own ``BANNER = "DEVICE:NEZHA2:robot:testbot:12345"``
-(ticket 005's own M3 gate fixture) is the only grounded evidence of the
-real shape in this repo; this module reproduces that shape with real
-per-robot data: ``identity.robot_name`` (a ``REQUIRED_KEYS`` field, so
-always present on a successful config load) and ``connection.
-serial_last_6`` (present in every copied robot JSON --
-``data/tovez.json``'s own value, "f137c0", is independently confirmed
-in ``docs/bench-acceptance-procedures.md`` -- optional in the schema, so
-defaulted rather than required here). Not independently re-verified
-byte-for-byte against radio-robot's real C++ source (not available in
-this repo) -- flagged, not silently assumed exact.
+Banner/ID content mirrors ``tests/test_comms_loopback.py``'s
+``BANNER = "DEVICE:NEZHA2:robot:testbot:12345"`` fixture, with real
+per-robot data (``identity.robot_name``, ``connection.serial_last_6``)
+-- not independently re-verified byte-for-byte against radio-robot's
+real C++ source.
 
 MicroPython-only modules (``diffdrive``, ``microbit``, ``utime``) are
-import-guarded so this module imports under CPython (this ticket's own
-offline gate).
+import-guarded so this module imports under CPython (the offline test
+gate).
 """
 
 try:
@@ -151,29 +83,21 @@ __all__ = [
     "run",
 ]
 
-# See module docstring "On-device config path convention".
-CONFIG_PATH = "robot.json"   # BARE name: this port ENOENTs the
-                              # leading-slash form (bench-confirmed)
+CONFIG_PATH = "robot.json"  # bare name -- leading slash ENOENTs on this port
 
-# Matches wifi_at.load_secrets()'s own default -- gitignored, provided
-# locally at bench time (CLAUDE.md: "No secrets in the repo").
+# Gitignored, provided locally at bench time (CLAUDE.md: no secrets in repo).
 SECRETS_PATH = "wifi_secrets.json"
 
-# Matches MICROBIT_RADIO_DEFAULT_CHANNEL (micropython-microbit-v2/src/
-# codal_port/drv_radio.h) -- the radio module's own stock default,
-# verified directly against that header. Used only when config load
-# failed (step 3 brings up radio UNCONDITIONALLY, per the ticket's own
-# wording, even with no valid per-robot channel to read).
+# Matches MICROBIT_RADIO_DEFAULT_CHANNEL (micropython-microbit-v2's
+# drv_radio.h) -- used only when config load failed (step 3 still
+# brings up radio unconditionally).
 DEFAULT_RADIO_CHANNEL = 7
 
-# The scheduled-pump tick period -- matches config.DEFAULT_CYCLE_PERIOD_MS
-# (the kernel's own native cadence, vendor/differential_drive.h's
-# cyclePeriod default) so the pump keeps pace with fresh diffdrive
-# output roughly once per kernel cycle.
+# Matches the kernel's own native cadence (vendor/differential_drive.h
+# cyclePeriod default) so the pump keeps pace with fresh diffdrive output.
 PUMP_PERIOD_MS = config.DEFAULT_CYCLE_PERIOD_MS
 
-# See module docstring "Banner/ID/VERSION content" -- spec Sec 10 open
-# item 1's own "decide during execution" instruction.
+# See module docstring "Banner/ID content" -- spec Sec 10 open item 1.
 VERSION = "nezha-upy-0.1"
 
 _DEFAULT_SERIAL_SUFFIX = "000000"
@@ -189,10 +113,9 @@ def _now_ms():
 
 
 def _identity_lines(robot_config, version):
-    """Build the (banner, id_line) pair -- see module docstring
-    "Banner/ID/VERSION content". ``robot_config`` may be ``None`` (the
-    fail-closed path) -- the fail-closed acceptance criterion requires
-    the banner to still emit, so this never raises."""
+    """Build the (banner, id_line) pair -- see module docstring.
+    ``robot_config`` may be ``None`` (fail-closed path); this never
+    raises, since the banner must still emit either way."""
     if robot_config is not None:
         robot_name = robot_config["identity"]["robot_name"]
         connection = robot_config.get("connection") or {}
@@ -208,15 +131,10 @@ def _identity_lines(robot_config, version):
 class _BootPumpTimer(comms.PumpTimer):
     """``comms.PumpTimer``, extended to also drive ``wifi_at``'s own
     per-cycle ``pump()`` (AT servicing + READY-on-new-peer-edge) from
-    the SAME ``micropython.schedule()`` tick -- composing PumpTimer's
-    already-published ``tick()``/``_pump_now()`` shape rather than
-    modifying it: ``comms.py`` is not in this ticket's file scope (its
-    own ``PumpTimer`` has no seam for a second per-cycle callback, and
-    editing a ticket-005-owned, already-tested module to add one would
-    be out of scope here). ``tick()`` itself is inherited unchanged --
-    still only ever queues via ``micropython.schedule()``, still
-    degrades to a synchronous call under CPython (no ``micropython``
-    module there), per ``PumpTimer``'s own docstring."""
+    the SAME ``micropython.schedule()`` tick, by composing
+    ``tick()``/``_pump_now()`` rather than modifying ``comms.py``.
+    ``tick()`` is inherited unchanged -- still degrades to a
+    synchronous call under CPython (no ``micropython`` module there)."""
 
     def __init__(self, comms_obj, now_fn, wifi_link=None):
         comms.PumpTimer.__init__(self, comms_obj, now_fn)
@@ -230,11 +148,9 @@ class _BootPumpTimer(comms.PumpTimer):
 
 class BootResult:
     """Everything ``run()`` assembled -- plain attributes (no
-    ``dataclasses``, matching ``comms.Status``/``otos.OtosReading``'s
-    own precedent), returned so ``tests/test_boot_sequence.py`` can
-    assert on each piece directly instead of reaching into module-level
-    globals (this module keeps none -- no boot-time state survives
-    outside the returned result and whatever objects it references)."""
+    ``dataclasses``, matching ``comms.Status``/``otos.OtosReading``),
+    so tests can assert on each piece directly. This module keeps no
+    module-level state; nothing survives boot outside this object."""
 
     def __init__(self):
         self.robot_config = None
@@ -256,13 +172,11 @@ def run(config_path=CONFIG_PATH, secrets_path=SECRETS_PATH,
         version=VERSION, pump_period_ms=PUMP_PERIOD_MS):
     """Perform the six-step boot sequence (see module docstring) and
     return a ``BootResult``. Every hardware-touching dependency is an
-    injectable parameter defaulting to the real on-device object (or
-    ``None``/a no-op degrade off-device) -- see each parameter's use
-    below; this is what lets this same function serve both ``main.c``'s
-    boot call (all defaults) and this ticket's CPython unit tests (fakes
-    injected for whichever piece a given test scenario needs to control).
-    Never blocks and never raises for the documented fail-closed case
-    (a bad/missing config) -- see step 6 in the module docstring."""
+    injectable parameter, defaulting to the real on-device object (or
+    a no-op degrade off-device) -- this lets the same function serve
+    both ``main.c``'s boot call (all defaults) and CPython unit tests
+    (fakes injected per scenario). Never blocks and never raises for
+    the fail-closed case (a bad/missing config)."""
     if now_fn is None:
         now_fn = _now_ms
     if wifi_serial_factory is None:
@@ -287,15 +201,11 @@ def run(config_path=CONFIG_PATH, secrets_path=SECRETS_PATH,
     if result.robot_config is not None and diffdrive_module is not None:
         kwargs = config.diffdrive_configure_kwargs(result.robot_config)
         diffdrive_module.configure(**kwargs)
-        # DELIBERATELY no begin()/start() here (bench 2026-08-19): the
-        # binding's configure() is placement-new -- a later consumer
-        # (e.g. the button demo, which supplies PID/Stage-A gains boot's
-        # kwargs don't carry) re-configures, and doing that UNDER a live
-        # kernel fiber orphans the fiber and kills all motion (observed:
-        # drive 'ok' with zero encoder movement). Boot stages a valid
-        # config; the FIRST motion consumer begins/starts the fiber.
-        # Wire-driven motion at boot (no consumer) will need a guarded
-        # reconfigure in the binding first -- flagged in the bench log.
+        # LANDMINE: deliberately no begin()/start() here -- a later
+        # consumer re-configures with its own gains, and doing that
+        # under a live kernel fiber orphans it and kills all motion
+        # (bench log). Boot stages a valid config; the FIRST motion
+        # consumer begins/starts the fiber.
         result.diffdrive_ready = True
 
         move_queue = motion.MoveQueue(diffdrive_module)
@@ -323,29 +233,19 @@ def run(config_path=CONFIG_PATH, secrets_path=SECRETS_PATH,
         result.comms.add_transport(result.wifi_link)
 
     # --- Step 4: scheduled pump, wired to a real timer source. ---------
-    # microbit.run_every() (micropython-microbit-v2/src/codal_port/
-    # modmicrobit.c) is the port's own periodic-callback mechanism, built
-    # on drv_softtimer's soft-timer heap -- serviced from
-    # microbit_hal_timer_callback() (drv_system.c, a 6ms hardware timer
-    # callback) which calls straight into mp_call_function_0() on the
-    # registered Python callback. That is exactly the "hardware timer
-    # IRQ" PumpTimer.tick()'s own docstring anticipates as its periodic
-    # source ("tick() ONLY EVER queues the real work via
-    # micropython.schedule(), never runs it directly") -- tick() is safe
-    # to call from run_every's callback for precisely that reason: it
-    # does the minimal, allocation-light micropython.schedule() call and
-    # returns, deferring all heap-touching work (comms.pump(),
-    # wifi_at.pump()) to the next safe main-context point. No native
-    # module change needed -- this hook already ships in the port.
+    # microbit.run_every() is serviced from a hardware timer IRQ
+    # (drv_system.c) -- safe to call tick() from there because tick()
+    # only ever queues via micropython.schedule() and returns,
+    # deferring all heap-touching work (comms.pump(), wifi_at.pump())
+    # to the next safe main-context point (see PumpTimer's docstring).
     result.pump_timer = _BootPumpTimer(result.comms, now_fn, wifi_link=result.wifi_link)
     if run_every is not None:
         run_every(callback=result.pump_timer.tick, ms=pump_period_ms)
 
     # --- Step 5: banner/boot/READY -- always, regardless of steps 1/2.
-    # FAIL-SOFT (bench 2026-08-19): a transport fault here used to
-    # propagate out of run(), and the port scrolls uncaught boot
-    # exceptions on the LED display forever -- the robot LOOKS bricked.
-    # Boot must never die for a diagnostics banner.
+    # LANDMINE: fail-soft here -- an uncaught exception scrolls forever
+    # on the LED display (robot looks bricked). Boot must never die for
+    # a diagnostics banner (bench log).
     try:
         result.comms.send_banner()
         result.comms.send_ready()
@@ -353,10 +253,7 @@ def run(config_path=CONFIG_PATH, secrets_path=SECRETS_PATH,
         print("BOOT: banner/ready send failed (continuing):", exc)
 
     # --- Step 6: boot must not block. -----------------------------------
-    # Nothing above performs a blocking wait -- every call is either
-    # non-blocking by its own contract (RadioLink.begin(), WifiAtLink.
-    # __init__, PumpTimer.tick()'s schedule-and-return) or a one-shot
-    # native call documented as returning immediately (native/README.md).
-    # run() returning here IS the "REPL stays live" guarantee: main.c's
-    # boot call site runs this before the REPL loop even starts.
+    # Every call above is non-blocking by contract or a one-shot native
+    # call documented as returning immediately (native/README.md).
+    # run() returning here is the "REPL stays live" guarantee.
     return result
