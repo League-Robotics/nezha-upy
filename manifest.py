@@ -69,6 +69,8 @@ freeze(
     (
         "boot.py",
         "comms.py",
+        "demo_square.py",
+        "demo_util.py",
         "config.py",
         "line.py",
         "motion.py",

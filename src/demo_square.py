@@ -401,58 +401,22 @@ ROBOT_CONFIG_PATH = "robot.json"   # bare, no leading slash -- mirrors
                                     # on this port even though the same
                                     # file opens fine under the bare form)
 
-
-def _scan_number(text, key):
-    """Return the numeric value following ``"key":`` in ``text``, or
-    ``None`` if the key is absent or its value does not parse as a
-    float. Whitespace after the colon is tolerated; the value ends at
-    the first ``,``, ``}``, or ``]``."""
-    i = text.find('"' + key + '"')
-    if i < 0:
-        return None
-    i = text.find(":", i)
-    if i < 0:
-        return None
-    j = i + 1
-    while j < len(text) and text[j] in " \t\r\n":
-        j += 1
-    k = j
-    while k < len(text) and text[k] not in ",}]":
-        k += 1
-    try:
-        return float(text[j:k])
-    except ValueError:
-        return None
+import demo_util
+# Split-module aliases (compile-heap ceiling; see demo_util).
+_scan_number = demo_util._scan_number
+geometry_from_robot_config = demo_util.geometry_from_robot_config
+_wiring_from_robot_config = demo_util._wiring_from_robot_config
+balanced_duties = demo_util.balanced_duties
+BALANCE_GAIN = demo_util.BALANCE_GAIN
+BALANCE_TRIM_MAX = demo_util.BALANCE_TRIM_MAX
+BALANCE_KI = demo_util.BALANCE_KI
+BALANCE_BIAS_MAX = demo_util.BALANCE_BIAS_MAX
+BALANCE_BIAS_SEED = demo_util.BALANCE_BIAS_SEED
 
 
-def geometry_from_robot_config(path=ROBOT_CONFIG_PATH):
-    """Sprint 006 ticket 001: narrow, fail-SOFT read of ONLY
-    ``wheels.wheel_diameter_mm``/``wheels.ticks_per_rev`` from the robot
-    config JSON at ``path`` -- see module docstring's "Config-driven
-    geometry" section for why this is a dedicated lightweight parse
-    rather than ``config.load_robot_config()`` (two independent,
-    bench-grounded, concrete reasons stated there). Returns
-    ``(wheel_diameter_mm, ticks_per_rev)`` as floats on success;
-    ``None`` on ANY problem -- missing/unreadable file, either key not
-    found, non-numeric value, or non-positive. NEVER raises; the caller
-    falls back to the hardcoded constants below.
 
-    Implementation is a dependency-free string scan, not a JSON parse:
-    this image ships no json/ujson module (bench-confirmed), and both
-    keys appear exactly once in the deployed compact config (their only
-    JSON home is the wheels group)."""
-    try:
-        with open(path, "r") as f:
-            text = f.read()
-        wheel_diameter_mm = _scan_number(text, "wheel_diameter_mm")
-        ticks_per_rev = _scan_number(text, "ticks_per_rev")
-    except OSError:
-        return None
-    if wheel_diameter_mm is None or ticks_per_rev is None:
-        return None
-    if wheel_diameter_mm <= 0.0 or ticks_per_rev <= 0.0:
-        return None
-    return wheel_diameter_mm, ticks_per_rev
+
+
 
 
 # Config-driven, with a hardcoded fallback -- see module docstring's
@@ -571,23 +535,6 @@ SETTLE_MS = 1200              # TOUR_SQUARE's own rest-to-rest settle
 # (bench 2026-08-19), tovez's own calibrated config says
 # fwd_sign_left=-1 -- hardcoding either would silently mis-drive the
 # other robot.
-def _wiring_from_robot_config(path=ROBOT_CONFIG_PATH):
-    """Fail-soft read of motors.left_port/right_port/fwd_sign_left/
-    fwd_sign_right from the deployed compact config. Returns a 4-tuple
-    of ints, or None on any missing/non-integer value. NEVER raises."""
-    try:
-        with open(path, "r") as f:
-            text = f.read()
-    except OSError:
-        return None
-    vals = []
-    for key in ("left_port", "right_port", "fwd_sign_left",
-                "fwd_sign_right"):
-        v = _scan_number(text, key)
-        if v is None or v != int(v):
-            return None
-        vals.append(int(v))
-    return tuple(vals)
 
 
 _CONFIG_WIRING = _wiring_from_robot_config() if _ON_DEVICE else None
@@ -648,24 +595,19 @@ def _mean_abs_delta(out, start_left, start_right):
     return (abs(delta_left) + abs(delta_right)) / 2.0, delta_left, delta_right
 
 
-BALANCE_GAIN = 0.02      # [%/tick] P-gain: duty trim per tick of
                           # left/right progress mismatch (OOP bench
                           # session 2026-08-19 -- open-loop duty alone
                           # veers: right out-ticked left ~30% on legs,
                           # stakeholder-rejected; this controller locks
                           # the two tick counts together)
-BALANCE_TRIM_MAX = 8.0   # [%] trim authority cap per wheel
-BALANCE_KI = 0.004       # [%/tick per poll] integral: kills the P-only
                           # steady-state offset (bench: P-only left a
                           # standing ~6% tick imbalance ≈ 14 deg/leg arc)
-BALANCE_BIAS_MAX = 8.0   # [%] integral wind-up clamp
 
 # Learned feedforward bias, carried ACROSS segments of the same kind
 # and across runs within a boot. Seeded from the bench-measured plant
 # asymmetry (stage-0 baseline 2026-08-19: right/port-1 out-runs
 # left/port-2 ~1.5x at 15% duty -- friction, port-swap-proven a
 # physical-motor property; negative bias pre-speeds the left).
-BALANCE_BIAS_SEED = -3.5   # [%]
 _segment_bias = {"leg": BALANCE_BIAS_SEED, "pivot": BALANCE_BIAS_SEED}
 
 # Two-phase segment drive: full duty to CREEP_START_FRACTION of target,
@@ -722,34 +664,6 @@ if _ON_DEVICE:
     _load_state()
 
 
-def balanced_duties(duty_left, duty_right, delta_left, delta_right,
-                    gain=BALANCE_GAIN, trim_max=BALANCE_TRIM_MAX,
-                    bias=0.0):
-    """Encoder-balancing P-controller: returns ``(duty_left, duty_right)``
-    trimmed so the wheel whose |tick progress| leads is slowed and the
-    laggard sped up, keeping legs straight and pivots symmetric. Signs
-    of the commanded duties are preserved (works for pivots' opposed
-    duties); a zero commanded duty stays zero; trimmed magnitudes are
-    clamped to [0, MAX_DUTY_PERCENT]. Pure function -- offline-testable."""
-    err = abs(delta_left) - abs(delta_right)   # [ticks] >0: left ahead
-    trim = gain * err + bias
-    if trim > trim_max:
-        trim = trim_max
-    elif trim < -trim_max:
-        trim = -trim_max
-
-    def _apply(duty, t):
-        if duty == 0.0:
-            return 0.0
-        sign = 1.0 if duty > 0.0 else -1.0
-        mag = abs(duty) + t
-        if mag < 0.0:
-            mag = 0.0
-        elif mag > MAX_DUTY_PERCENT:
-            mag = MAX_DUTY_PERCENT
-        return sign * mag
-
-    return _apply(duty_left, -trim), _apply(duty_right, trim)
 
 
 def _run_segment(index, segment):
@@ -770,9 +684,21 @@ def _run_segment(index, segment):
 
     bias = _segment_bias.get(segment["kind"], BALANCE_BIAS_SEED)
     lead = _coast_lead.get(segment["kind"], 40.0)
-    duty_l0, duty_r0 = balanced_duties(
-        segment["duty_left"], segment["duty_right"], 0.0, 0.0, bias=bias)
-    status = diffdrive.driveDuty(duty_l0, duty_r0, SEGMENT_LEASE_MS)
+    if _velocity_mode:
+        # Kernel PID owns straightness/symmetry -- no Python trim.
+        if segment["kind"] == "leg":
+            vel_cmd = CRUISE_VELOCITY if segment["duty_left"] > 0 else -CRUISE_VELOCITY
+            twist_cmd = 0.0
+        else:
+            vel_cmd = 0.0
+            twist_cmd = PIVOT_TWIST if segment["duty_right"] > 0 else -PIVOT_TWIST
+        status = diffdrive.drive(vel_cmd, twist_cmd, SEGMENT_LEASE_MS)
+    else:
+        vel_cmd = 0.0
+        twist_cmd = 0.0
+        duty_l0, duty_r0 = balanced_duties(
+            segment["duty_left"], segment["duty_right"], 0.0, 0.0, bias=bias)
+        status = diffdrive.driveDuty(duty_l0, duty_r0, SEGMENT_LEASE_MS)
 
     elapsed_ms = 0
     since_refresh_ms = 0
@@ -793,32 +719,39 @@ def _run_segment(index, segment):
         if mean_delta >= segment["target_ticks"] - lead:
             reached = True
             break
-        # Two-phase duty: full to this kind's creep fraction, then creep.
-        if mean_delta >= (segment["target_ticks"]
-                          * CREEP_START_FRACTION[segment["kind"]]):
-            base = CREEP_DUTY_PERCENT
+        in_creep = mean_delta >= (segment["target_ticks"]
+                                  * CREEP_START_FRACTION[segment["kind"]])
+        if _velocity_mode:
+            # Kernel PID path: refresh drive() every poll (lease
+            # renewal); creep = reduced commanded speed near target.
+            scale = (CREEP_VELOCITY_FRACTION[segment["kind"]]
+                     if in_creep else 1.0)
+            refresh_status = diffdrive.drive(
+                vel_cmd * scale, twist_cmd * scale, SEGMENT_LEASE_MS)
         else:
-            base = None
-        # Encoder-balancing PI trim, re-issued EVERY poll (50 ms) --
-        # keeps the segment straight/symmetric and renews the lease far
-        # inside SEGMENT_LEASE_MS. The integral bias is carried across
-        # segments of the same kind (see _segment_bias above).
-        err = abs(delta_left) - abs(delta_right)
-        bias += BALANCE_KI * err
-        if bias > BALANCE_BIAS_MAX:
-            bias = BALANCE_BIAS_MAX
-        elif bias < -BALANCE_BIAS_MAX:
-            bias = -BALANCE_BIAS_MAX
-        if base is None:
-            duty_base_l = segment["duty_left"]
-            duty_base_r = segment["duty_right"]
-        else:
-            duty_base_l = base if segment["duty_left"] > 0 else -base
-            duty_base_r = base if segment["duty_right"] > 0 else -base
-        duty_l, duty_r = balanced_duties(
-            duty_base_l, duty_base_r, delta_left, delta_right, bias=bias)
-        refresh_status = diffdrive.driveDuty(duty_l, duty_r,
-                                             SEGMENT_LEASE_MS)
+            # Legacy raw-duty path (uncalibrated robots): Python
+            # encoder-balancing PI trim, re-issued EVERY poll.
+            err = abs(delta_left) - abs(delta_right)
+            bias += BALANCE_KI * err
+            if bias > BALANCE_BIAS_MAX:
+                bias = BALANCE_BIAS_MAX
+            elif bias < -BALANCE_BIAS_MAX:
+                bias = -BALANCE_BIAS_MAX
+            if in_creep:
+                duty_base_l = (CREEP_DUTY_PERCENT
+                               if segment["duty_left"] > 0
+                               else -CREEP_DUTY_PERCENT)
+                duty_base_r = (CREEP_DUTY_PERCENT
+                               if segment["duty_right"] > 0
+                               else -CREEP_DUTY_PERCENT)
+            else:
+                duty_base_l = segment["duty_left"]
+                duty_base_r = segment["duty_right"]
+            duty_l, duty_r = balanced_duties(
+                duty_base_l, duty_base_r, delta_left, delta_right,
+                bias=bias)
+            refresh_status = diffdrive.driveDuty(duty_l, duty_r,
+                                                 SEGMENT_LEASE_MS)
         since_refresh_ms = 0
 
     diffdrive.neutral()
@@ -859,22 +792,107 @@ def _require_on_device(caller_name):
             "(run this on zetuv via mpremote, not under CPython)" % (caller_name,))
 
 
+# --- Velocity mode (the kernel's OWN per-wheel PID) -------------------
+# The kernel was vendored precisely so control law lives in C++ -- raw
+# driveDuty() bypassed it and forced the Python balance band-aids above
+# (stakeholder-rejected). Gains below are tovez's calibrated
+# wheel_control values converted mm->counts with the bench-measured
+# 3.8424 counts/mm (the JSON values are mm-era; the rebaked kernel is
+# counts-native). fullDutyVelocity is bench-derived: 15%->~1050 c/s,
+# 25%->~1915 c/s per wheel => ~86 c/s per % => ~8500 c/s at 100%.
+VELOCITY_GAINS = {
+    "full_duty_velocity": 8500.0,   # [counts/s] bench-extrapolated
+    "pid_kp": 0.0,                  # tovez ships pure-I
+    "pid_ki": 12.0,                 # [1/s] (doubled from tovez's 6.0: faster residual wind at demo timescales)
+    "pid_i_max": 230.0,             # [counts/s]  (60 mm/s * 3.8424)
+    "pid_kaff": 0.0,
+    "pid_max": 384.0,               # [counts/s]  (100 mm/s * 3.8424)
+    "pos_err_max": 60.0,            # [counts] (widened for faster I authority)
+    "v_min": 77.0,                  # [counts/s]  (20 mm/s * 3.8424)
+    "bias_max": 91.0,               # [counts/s]  (23.8 mm/s * 3.8424)
+    "tau_adapt": 30.0,              # [s]
+    "a_steady": 115.0,              # [counts/s^2] (30 * 3.8424)
+    "stall_speed": 58.0,            # [counts/s]  (15 mm/s * 3.8424)
+    "stall_demand": 154.0,          # [counts/s]  (40 mm/s * 3.8424)
+    "stall_window": 500.0,          # [ms]
+    # Stage-A per-wheel feedforward, bench-fitted (PID probe 2026-08-19:
+    # commanded 1300 c/s -> L 1180 / R 1500 at neutral gain). KERNEL
+    # SEMANTICS (differential_drive.cpp correctedCommand): command is
+    # DIVIDED by gain, so gain = plant_speed/commanded: L 1180/1300 =
+    # 0.908, R 1500/1300 = 1.154. (First attempt inverted these and
+    # measurably WORSENED the split -- which confirmed the mechanism.)
+    "wheel_gain_left": 0.908,
+    "wheel_gain_right": 1.154,
+    "wheel_intercept_left": 0.0,
+    "wheel_intercept_right": 0.0,
+}
+CRUISE_VELOCITY = 1300.0    # [counts/s] leg speed (~15%-duty-equivalent)
+PIVOT_TWIST = 800.0         # [counts/s] pivot half-difference (CCW +)
+CREEP_VELOCITY_FRACTION = {"leg": 0.4, "pivot": 0.85}
+# pivot creep stays high: the left wheel's REVERSE breakaway needs
+# ~15%+ duty-equivalent; a 0.4x creep twist stalls it and the corner
+# rotates around the left wheel (bench, PID run 1).
+
+_velocity_mode = False      # set by _configure_and_start from ready flag
+
+
+def _gain_overrides(path=ROBOT_CONFIG_PATH):
+    """Optional per-robot overrides: a "demo_velocity" object in
+    robot.json whose keys match VELOCITY_GAINS/CRUISE/PIVOT names.
+    Lets gain tuning iterate by config re-copy, no reflash (the demo
+    modules are frozen). Fail-soft: absent file/group/ujson -> {}."""
+    try:
+        import ujson
+        with open(path, "r") as f:
+            doc = ujson.loads(f.read())
+        group = doc.get("demo_velocity", {})
+        return group if isinstance(group, dict) else {}
+    except (ImportError, OSError, ValueError):
+        return {}
+
+
 def _configure_and_start(caller_name):
     """Shared ``diffdrive.configure()``/``begin()``/``start()``
     bracketing -- ``run()`` (button A, full tour) and ``run_single_leg()``
     (button B, sprint 006 ticket 001) both call this identically, so the
     wiring facts (ports/signs/duty rail) can never drift between the two
-    entry points. Bypasses config.py/boot.py -- see module docstring for
-    why."""
-    cfg = diffdrive.configure(
-        left_port=LEFT_PORT, right_port=RIGHT_PORT,
-        fwd_sign_left=FWD_SIGN_LEFT, fwd_sign_right=FWD_SIGN_RIGHT,
-        max_duty=MAX_DUTY_PERCENT, full_duty_velocity=0.0,
-        cycle_period_ms=CYCLE_PERIOD_MS)
+    entry points.
+
+    Tries VELOCITY mode first (kernel per-wheel PID, VELOCITY_GAINS);
+    the kernel's own ready flag ("begun + calibrated") is the authority
+    for whether it took. Falls back to raw duty mode (the legacy path)
+    if the binding predates the PID kwargs or calibration is absent."""
+    global _velocity_mode, CRUISE_VELOCITY, PIVOT_TWIST
+    _velocity_mode = False
+    gains = dict(VELOCITY_GAINS)
+    if _ON_DEVICE:
+        ov = _gain_overrides()
+        for k, v in ov.items():
+            if k == "cruise_velocity":
+                CRUISE_VELOCITY = float(v)
+            elif k == "pivot_twist":
+                PIVOT_TWIST = float(v)
+            elif k in gains:
+                gains[k] = float(v)
+    try:
+        cfg = diffdrive.configure(
+            left_port=LEFT_PORT, right_port=RIGHT_PORT,
+            fwd_sign_left=FWD_SIGN_LEFT, fwd_sign_right=FWD_SIGN_RIGHT,
+            max_duty=MAX_DUTY_PERCENT,
+            cycle_period_ms=CYCLE_PERIOD_MS, **gains)
+    except TypeError:
+        cfg = diffdrive.configure(
+            left_port=LEFT_PORT, right_port=RIGHT_PORT,
+            fwd_sign_left=FWD_SIGN_LEFT, fwd_sign_right=FWD_SIGN_RIGHT,
+            max_duty=MAX_DUTY_PERCENT, full_duty_velocity=0.0,
+            cycle_period_ms=CYCLE_PERIOD_MS)
     print("demo_square: %s configure" % (caller_name,), cfg)
     print("demo_square: %s begin" % (caller_name,), diffdrive.begin())
     print("demo_square: %s start" % (caller_name,), diffdrive.start())
     time.sleep_ms(100)
+    _velocity_mode = bool(diffdrive.output().get("ready", False))
+    print("demo_square: %s mode" % (caller_name,),
+          "VELOCITY(PID)" if _velocity_mode else "raw-duty fallback")
 
 
 def run():

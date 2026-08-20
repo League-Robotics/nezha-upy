@@ -65,9 +65,9 @@
     "duty_per_speed_left": 0.001182,
     "duty_per_speed_right": 0.001182,
     "crawl_pulse": 0.0,
-    "wheel_gain_left_accel": 0.800,
+    "wheel_gain_left_accel": 0.8,
     "wheel_intercept_left_accel": 0.0,
-    "wheel_gain_left_decel": 0.800,
+    "wheel_gain_left_decel": 0.8,
     "wheel_intercept_left_decel": 0.0,
     "wheel_gain_right_accel": 0.9567,
     "wheel_intercept_right_accel": 0.0,
@@ -145,7 +145,7 @@
   "otos": {
     "offset_x": -47.7,
     "offset_y": 3.5,
-    "offset_yaw": -0.0770,
+    "offset_yaw": -0.077,
     "linear_scale": 1.0,
     "angular_scale": 0.9908,
     "_ekf_r_otos_theta": 0.01,
@@ -202,5 +202,11 @@
         -32.0
       ]
     }
+  },
+  "demo_velocity": {
+    "pivot_twist": 1300.0,
+    "pid_i_max": 600.0,
+    "wheel_gain_right": 1.21,
+    "_note": "demo_square velocity-mode overrides (OOP bench 2026-08-19): pivot_twist raised 800->1300 c/s + pid_i_max 230->600 so the left wheel's stickier REVERSE breakaway is exceeded during pivots; wheel_gain_right trimmed 1.154->1.21 from PID run-1 leg residuals (right still ~5% ahead). Tunable by config re-copy, no reflash (demo modules are frozen)."
   }
 }

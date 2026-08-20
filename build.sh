@@ -253,6 +253,24 @@ if "MICROPY_NLR_SETJMP" not in src:
     with open(path, "w") as f:
         f.write(src)
     print("  MICROPY_NLR_SETJMP=1 applied")
+if "MICROPY_PY_UJSON" not in src:
+    src = src.replace(
+        "#define MICROPY_NLR_SETJMP                      (1)",
+        """#define MICROPY_NLR_SETJMP                      (1)
+
+// json module (as ujson): src/config.py's robot-JSON loader imports
+// ujson; this port's default ROM level leaves it out. Bench-confirmed
+// absent 2026-08-19 (help('modules') on zetuv/tovez) -- the frozen
+// config module was unusable on-device without it.
+#define MICROPY_PY_UJSON                        (1)""")
+    # ujson.loads embeds an mp_obj_stringio_t (extmod/modujson.c), which
+    # only exists when MICROPY_PY_IO is on -- flip the port's (0) default.
+    src = src.replace(
+        "#define MICROPY_PY_IO                           (0)",
+        "#define MICROPY_PY_IO                           (1)")
+    with open(path, "w") as f:
+        f.write(src)
+    print("  MICROPY_PY_UJSON=1 + MICROPY_PY_IO=1 applied")
 else:
     print("  MICROPY_NLR_SETJMP already set")
 PYEOF
@@ -814,6 +832,25 @@ Q(fwd_sign_right)
 Q(max_duty)
 Q(full_duty_velocity)
 Q(cycle_period_ms)
+Q(v_min)
+Q(bias_max)
+Q(tau_adapt)
+Q(a_steady)
+Q(deficit_threshold)
+Q(deficit_window)
+Q(pid_kp)
+Q(pid_ki)
+Q(pid_i_max)
+Q(pid_kaff)
+Q(pid_max)
+Q(pos_err_max)
+Q(stall_speed)
+Q(stall_demand)
+Q(stall_window)
+Q(wheel_gain_left)
+Q(wheel_gain_right)
+Q(wheel_intercept_left)
+Q(wheel_intercept_right)
 Q(address)
 Q(write_data)
 Q(read_len)

@@ -35,7 +35,7 @@ SRC_DIR = REPO_ROOT / "src"
 
 # Bench/demo scripts and on-device-main.py copies, never frozen -- see
 # this module's own docstring.
-_BENCH_ONLY_MODULES = {"demo_square.py", "main_zetuv_demo.py"}
+_BENCH_ONLY_MODULES = {"main_zetuv_demo.py"}
 
 
 def _actual_src_modules():

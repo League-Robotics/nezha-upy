@@ -2350,3 +2350,47 @@ new = 128 × (observed_turn_deg / 90).
 
 Device re-armed (A = tour, B = 50 cm straight, both on the rebuilt
 controller). 228 offline tests green.
+
+## 55. THE PID — kernel closed-loop velocity mode wired end to end (stakeholder-directed)
+
+Stakeholder: "you're supposed to be running PIDs on these things...
+this robot has never had the stickiness problem before." Correct on
+both counts — the robot was always driven through the kernel's
+per-wheel velocity PID by the real firmware; every demo run in this
+log until now used raw open-loop driveDuty(), bypassing the vendored
+control law entirely. Full accounting in the session report.
+
+Changes:
+1. native/moddiffdrive.cpp configure(): +19 kwargs — the full
+   DiffDrive::Config velocity-PID surface (pid_kp/ki/i_max/kaff/max,
+   pos_err_max, v_min, bias/tau/a_steady, deficit_*, stall_*) plus
+   Stage-A per-wheel feedforward (wheel_gain/intercept L/R). qstrs
+   added in build.sh.
+2. Firmware: MICROPY_PY_UJSON=1 + MICROPY_PY_IO=1 (ujson.loads needs
+   stringio) — config parsing now possible on-device.
+3. demo_square: velocity mode via diffdrive.drive(v, twist) when the
+   kernel reports ready (calibrated); Python balance controller retired
+   to a raw-duty fallback path for uncalibrated robots. Compile-heap
+   ceiling hit twice (12.6 KB, 10.9 KB stripped) → demo_util.py split +
+   BOTH demo modules frozen into the manifest (zero compile heap;
+   robot.json carries all iteration knobs incl. a new demo_velocity
+   override group).
+4. Gains (bench-fitted, tovez): fullDutyVelocity 8500 c/s (measured
+   duty→speed extrapolation; config.py's travel_calib×10 constant is
+   NOT trusted — flagged); Stage-A wheel_gain L 0.908 / R 1.154→1.21
+   (kernel DIVIDES by gain — first attempt inverted, measurably
+   worsened the split, confirming the mechanism); pid_ki 12, i_max 600,
+   pos_err_max 60; pivot_twist 1300 c/s (left wheel's REVERSE breakaway
+   needs ~15% duty-equivalent; 800 stalled it and corners rotated about
+   the left wheel); pivot creep fraction 0.85.
+
+Verification (two consecutive tours, kernel PID, no Python balancing):
+Run 1 — legs L/R within 0.5–3.4%, means ±1%; pivots 401/373/397/405
+(target 386, ±5%). Run 2 — legs ±1.4% of target, L/R within 1.2–3.8%;
+pivots 398/410/386/376 (±6%). Left now reverses properly on pivots
+(−308..−356). Residual: pivot rotation center offset ~16 mm toward the
+left wheel (reverse-direction plant asymmetry; Stage-A is
+direction-agnostic) — next lever if corner placement matters.
+
+Device re-armed: A = tour (kernel PID), B = 50 cm straight (same).
+228 offline tests green.

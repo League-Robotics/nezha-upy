@@ -169,6 +169,32 @@ extern "C" mp_obj_t diffdrive_configure_fn(size_t n_args, const mp_obj_t* pos_ar
     kArgMaxDuty,
     kArgFullDutyVelocity,
     kArgCyclePeriodMs,
+    // Velocity-PID + wheel-control fields (DiffDrive::Config, same
+    // order as config.py's WHEEL_CONTROL_FIELDS mapping). Defaults 0 =
+    // kernel defaults; omitting them reproduces the pre-PID behavior.
+    kArgVMin,
+    kArgBiasMax,
+    kArgTauAdapt,
+    kArgASteady,
+    kArgDeficitThreshold,
+    kArgDeficitWindow,
+    kArgPidKp,
+    kArgPidKi,
+    kArgPidIMax,
+    kArgPidKaff,
+    kArgPidMax,
+    kArgPosErrMax,
+    kArgStallSpeed,
+    kArgStallDemand,
+    kArgStallWindow,
+    // Stage-A per-wheel feedforward correction (Config.wheelGain/
+    // wheelIntercept, applied to BOTH accel/decel slots): the fast
+    // lever that removes steady plant asymmetry so the I-term only
+    // handles residuals. Defaults 1/0 = neutral.
+    kArgWheelGainLeft,
+    kArgWheelGainRight,
+    kArgWheelInterceptLeft,
+    kArgWheelInterceptRight,
   };
   static const mp_arg_t allowed[] = {
       {MP_QSTR_left_port, MP_ARG_INT | MP_ARG_REQUIRED, {.u_int = 0}},
@@ -178,6 +204,25 @@ extern "C" mp_obj_t diffdrive_configure_fn(size_t n_args, const mp_obj_t* pos_ar
       {MP_QSTR_max_duty, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
       {MP_QSTR_full_duty_velocity, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
       {MP_QSTR_cycle_period_ms, MP_ARG_INT, {.u_int = 24}},
+      {MP_QSTR_v_min, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
+      {MP_QSTR_bias_max, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
+      {MP_QSTR_tau_adapt, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
+      {MP_QSTR_a_steady, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
+      {MP_QSTR_deficit_threshold, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
+      {MP_QSTR_deficit_window, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
+      {MP_QSTR_pid_kp, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
+      {MP_QSTR_pid_ki, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
+      {MP_QSTR_pid_i_max, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
+      {MP_QSTR_pid_kaff, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
+      {MP_QSTR_pid_max, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
+      {MP_QSTR_pos_err_max, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
+      {MP_QSTR_stall_speed, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
+      {MP_QSTR_stall_demand, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
+      {MP_QSTR_stall_window, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
+      {MP_QSTR_wheel_gain_left, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(1)}},
+      {MP_QSTR_wheel_gain_right, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(1)}},
+      {MP_QSTR_wheel_intercept_left, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
+      {MP_QSTR_wheel_intercept_right, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
   };
   mp_arg_val_t args[MP_ARRAY_SIZE(allowed)];
   mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed), allowed, args);
@@ -206,6 +251,33 @@ extern "C" mp_obj_t diffdrive_configure_fn(size_t n_args, const mp_obj_t* pos_ar
   cfg.maxDuty = mp_obj_get_float(args[kArgMaxDuty].u_obj);
   cfg.fullDutyVelocity = mp_obj_get_float(args[kArgFullDutyVelocity].u_obj);
   cfg.cyclePeriod = static_cast<uint32_t>(args[kArgCyclePeriodMs].u_int);
+  cfg.vMin = mp_obj_get_float(args[kArgVMin].u_obj);
+  cfg.biasMax = mp_obj_get_float(args[kArgBiasMax].u_obj);
+  cfg.tauAdapt = mp_obj_get_float(args[kArgTauAdapt].u_obj);
+  cfg.aSteady = mp_obj_get_float(args[kArgASteady].u_obj);
+  cfg.deficitThreshold = mp_obj_get_float(args[kArgDeficitThreshold].u_obj);
+  cfg.deficitWindow = mp_obj_get_float(args[kArgDeficitWindow].u_obj);
+  cfg.kp = mp_obj_get_float(args[kArgPidKp].u_obj);
+  cfg.ki = mp_obj_get_float(args[kArgPidKi].u_obj);
+  cfg.iMax = mp_obj_get_float(args[kArgPidIMax].u_obj);
+  cfg.kaff = mp_obj_get_float(args[kArgPidKaff].u_obj);
+  cfg.pidMax = mp_obj_get_float(args[kArgPidMax].u_obj);
+  cfg.posErrMax = mp_obj_get_float(args[kArgPosErrMax].u_obj);
+  cfg.stallSpeed = mp_obj_get_float(args[kArgStallSpeed].u_obj);
+  cfg.stallDemand = mp_obj_get_float(args[kArgStallDemand].u_obj);
+  cfg.stallWindow = mp_obj_get_float(args[kArgStallWindow].u_obj);
+  const float wheelGainLeft = mp_obj_get_float(args[kArgWheelGainLeft].u_obj);
+  const float wheelGainRight = mp_obj_get_float(args[kArgWheelGainRight].u_obj);
+  const float wheelInterceptLeft = mp_obj_get_float(args[kArgWheelInterceptLeft].u_obj);
+  const float wheelInterceptRight = mp_obj_get_float(args[kArgWheelInterceptRight].u_obj);
+  cfg.wheelGain[0][0] = wheelGainLeft;
+  cfg.wheelGain[0][1] = wheelGainLeft;
+  cfg.wheelGain[1][0] = wheelGainRight;
+  cfg.wheelGain[1][1] = wheelGainRight;
+  cfg.wheelIntercept[0][0] = wheelInterceptLeft;
+  cfg.wheelIntercept[0][1] = wheelInterceptLeft;
+  cfg.wheelIntercept[1][0] = wheelInterceptRight;
+  cfg.wheelIntercept[1][1] = wheelInterceptRight;
   const DiffDrive::DifferentialDrive::Status status = g_kernel->setConfig(cfg);
 
   g_watchdog = new (g_watchdogStorage) Native::Watchdog(*g_kernel, broker);
