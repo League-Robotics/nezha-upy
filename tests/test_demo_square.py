@@ -213,3 +213,40 @@ def test_module_does_not_auto_run_on_plain_import():
     # already have failed to collect -- this test makes that guarantee
     # explicit rather than relying on it being an accidental side effect.
     assert demo_square.__name__ == "demo_square"
+
+
+# --- OOP bench session 2026-08-19: config-driven wiring -------------------
+
+def test_wiring_from_robot_config_happy_path(tmp_path):
+    config_path = tmp_path / "robot.json"
+    config_path.write_text('{"motors": {"left_port": 2, "right_port": 1, '
+                            '"fwd_sign_left": -1, "fwd_sign_right": 1}}')
+    result = demo_square._wiring_from_robot_config(str(config_path))
+    assert result == (2, 1, -1, 1)
+
+
+def test_wiring_from_robot_config_missing_key_falls_back(tmp_path):
+    config_path = tmp_path / "robot.json"
+    config_path.write_text('{"motors": {"left_port": 2, "right_port": 1, '
+                            '"fwd_sign_left": -1}}')
+    assert demo_square._wiring_from_robot_config(str(config_path)) is None
+
+
+def test_wiring_from_robot_config_non_integer_rejected(tmp_path):
+    config_path = tmp_path / "robot.json"
+    config_path.write_text('{"motors": {"left_port": 2.5, "right_port": 1, '
+                            '"fwd_sign_left": 1, "fwd_sign_right": 1}}')
+    assert demo_square._wiring_from_robot_config(str(config_path)) is None
+
+
+def test_wiring_from_robot_config_missing_file():
+    assert demo_square._wiring_from_robot_config(
+        "/does/not/exist/robot.json") is None
+
+
+def test_module_level_wiring_falls_back_off_device():
+    # Under CPython, _ON_DEVICE is False -> the module never reads a
+    # real /robot.json; the zetuv bench-measured fallbacks apply.
+    assert demo_square.WIRING_SOURCE == "hardcoded fallback"
+    assert (demo_square.LEFT_PORT, demo_square.RIGHT_PORT) == (2, 1)
+    assert (demo_square.FWD_SIGN_LEFT, demo_square.FWD_SIGN_RIGHT) == (1, 1)

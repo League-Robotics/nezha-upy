@@ -159,8 +159,9 @@
   },
   "wheels": {
     "wheel_diameter_mm": 80.77,
-    "ticks_per_rev": 360,
-    "ticks_per_mm": 1.4187
+    "ticks_per_rev": 975.0,
+    "ticks_per_mm": 3.8424,
+    "_wheels_note": "CORRECTED 2026-08-19 (OOP bench session, docs/bench-log-zetuv-2026-08-19.md): ticks_per_rev 360 -> 975.0, ticks_per_mm 1.4187 -> 3.8424. The 360/1.4187 pair was the unverified template default disproven on the same Nezha kit hardware by the zetuv bench measurements (975 ticks per wheel revolution, empirical, from the stakeholder's 270-degree observation). wheel_diameter_mm=80.77 UNCHANGED -- stakeholder-confirmed correct 2026-08-19 ('Tovez does in fact have the correct wheel diameter'). ticks_per_mm = 975.0/(pi*80.77) = 3.8424."
   },
   "encoders": {
     "has_encoders": true,

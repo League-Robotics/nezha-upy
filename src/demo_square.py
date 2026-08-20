@@ -500,10 +500,17 @@ OMEGA_MAX_RAD_S = 2.4  # sprint.md's own ceiling -- NOT achievable via
 # Duty / timing -- bench-verified this ticket (see module docstring).
 # ---------------------------------------------------------------------
 MAX_DUTY_PERCENT = 25.0       # diffdrive.configure()'s authority rail
-SEGMENT_DUTY_PERCENT = 6.0    # commanded duty for every segment -- the
-                               # gentlest bench-verified-reliable value,
-                               # not an omega_max-derived one (see the
-                               # module docstring's "Honest limitation")
+SEGMENT_DUTY_PERCENT = 15.0   # commanded duty for every segment.
+                               # Raised 6.0 -> 15.0 (OOP bench session
+                               # 2026-08-19): 6% sat below tovez's LEFT
+                               # wheel's combined-load breakaway (left
+                               # delta 0 while right drove -- per-wheel
+                               # probes healthy at 15%, combined healthy
+                               # at 20-25%). 15% is comfortably above
+                               # both robots' combined breakaway and
+                               # well under MAX_DUTY_PERCENT; segments
+                               # stay encoder-terminated so distance is
+                               # unaffected, only speed.
 CYCLE_PERIOD_MS = 24          # matches ticket 001's own bench convention
 
 SEGMENT_LEASE_MS = 600        # per-driveDuty() safety lease -- REFRESHED
@@ -557,10 +564,41 @@ SEGMENT_TIMEOUT_MS = 6000     # CORRECTED sprint 004 ticket 001: overall
 POLL_INTERVAL_MS = 50
 SETTLE_MS = 1200              # TOUR_SQUARE's own rest-to-rest settle
 
-LEFT_PORT = 2
-RIGHT_PORT = 1
-FWD_SIGN_LEFT = 1
-FWD_SIGN_RIGHT = 1
+# Wiring -- config-driven from /robot.json's motors group (same
+# dependency-free scan as the geometry above), falling back to zetuv's
+# bench-measured values. Wiring is PER-ROBOT: zetuv measured +1/+1
+# (bench 2026-08-19), tovez's own calibrated config says
+# fwd_sign_left=-1 -- hardcoding either would silently mis-drive the
+# other robot.
+def _wiring_from_robot_config(path=ROBOT_CONFIG_PATH):
+    """Fail-soft read of motors.left_port/right_port/fwd_sign_left/
+    fwd_sign_right from the deployed compact config. Returns a 4-tuple
+    of ints, or None on any missing/non-integer value. NEVER raises."""
+    try:
+        with open(path, "r") as f:
+            text = f.read()
+    except OSError:
+        return None
+    vals = []
+    for key in ("left_port", "right_port", "fwd_sign_left",
+                "fwd_sign_right"):
+        v = _scan_number(text, key)
+        if v is None or v != int(v):
+            return None
+        vals.append(int(v))
+    return tuple(vals)
+
+
+_CONFIG_WIRING = _wiring_from_robot_config() if _ON_DEVICE else None
+WIRING_SOURCE = "robot.json" if _CONFIG_WIRING is not None else "hardcoded fallback"
+
+if _CONFIG_WIRING is not None:
+    LEFT_PORT, RIGHT_PORT, FWD_SIGN_LEFT, FWD_SIGN_RIGHT = _CONFIG_WIRING
+else:
+    LEFT_PORT = 2       # zetuv, bench-measured (sprint 002)
+    RIGHT_PORT = 1      # zetuv, bench-measured (sprint 002)
+    FWD_SIGN_LEFT = 1   # zetuv, bench-measured (sprint 002)
+    FWD_SIGN_RIGHT = 1  # zetuv, bench-measured (sprint 002)
 
 
 def _leg_ticks(distance_mm, ticks_per_mm):

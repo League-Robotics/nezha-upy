@@ -2230,3 +2230,45 @@ A = square tour (legs now also 1724 ticks), B = 50 cm straight.
 travel X mm; next `wheel_diameter_mm = 90 × (X / 500)`. Edit
 `data/zetuv.json`, re-strip + re-copy `/robot.json`, reset. No code
 changes needed.
+
+## 52. OOP session continued: tovez becomes the calibration robot
+
+Stakeholder switched the bench target to tovez ("let's move over to
+tovez"). zetuv disconnected again (4th USB drop today) — left as-is.
+
+**Tovez flashed** with a fresh `--clean --with-diffdrive --with-wifi`
+build (BUILD_EXIT_CODE:0, gate tests 5/5) by UID
+`...a8fdb5e413abb276...`; its previous (non-MicroPython) firmware was
+erased with stakeholder approval.
+
+**Config-driven WIRING added** (`_wiring_from_robot_config()`): wiring
+is per-robot — zetuv measured +1/+1, tovez's calibrated config says
+fwd_sign_left=-1 — so `demo_square` now scans motors.left_port/
+right_port/fwd_sign_left/fwd_sign_right from `/robot.json` too
+(fallback: zetuv's bench-measured values). `data/tovez.json`'s wheels
+trio corrected (ticks_per_rev 360 → 975.0 empirical, ticks_per_mm →
+3.8424; diameter 80.77 stakeholder-confirmed).
+
+**On-device verification (tovez)**: GEOMETRY robot.json 3.8424;
+WIRING robot.json 2/1/-1/+1. Per-wheel probes healthy (left-only +860,
+right-only +1264, correct signs).
+
+**New finding — combined-drive breakaway, root-caused by probes**: the
+50 mm probe leg stalled the LEFT wheel (delta 0) while right drove —
+same signature as sprint-002's zetuv anomaly. Probes: combined 25%
+both wheels fine (2073/2489); staggered 20% fine (2133/1805). Cause:
+`SEGMENT_DUTY_PERCENT = 6.0` sat below tovez's left wheel's
+COMBINED-LOAD breakaway (fine solo, stalls under shared load).
+Fix: 6.0 → 15.0 (encoder-terminated segments — distance unaffected,
+only speed; still well under the 25% authority rail).
+
+**Full square tour on tovez — PASS**: all 8 segments reached. Legs
+1934–1985 mean ticks vs 1921 target (+0.7–3.3%), ~1.45 s each;
+pivots 388–432 vs 386, correctly counter-rotating (left negative /
+right positive = left pivot with tovez's signs). Right-outpaces-left
+asymmetry persists on legs (right ~+30% ticks vs left) — the square
+veers; open-loop duty, known behavior.
+
+**Device state**: reset, armed at idle prompt. A = square tour,
+B = 50 cm straight. Calibration loop: press B, measure travel X mm,
+next wheel_diameter_mm = 80.77 × (X / 500) for tovez.
