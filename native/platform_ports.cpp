@@ -25,11 +25,22 @@ uint64_t PlatformClock::nowMicros() const {
 }
 
 void PlatformSleeper::sleepMillis(uint32_t duration) {
-  codal::fiber_sleep(duration);
+  if (stepMode_) {
+    mp_hal_delay_ms(duration);
+  } else {
+    codal::fiber_sleep(duration);
+  }
 }
 
 void PlatformSleeper::yield() {
-  codal::schedule();
+  // Unreachable in step mode today -- the kernel only calls yield() from
+  // run()'s fiber loop (differential_drive.cpp:375), and step mode never
+  // runs it. Branched anyway so the port stays correct if that changes.
+  if (stepMode_) {
+    mp_hal_delay_ms(1);
+  } else {
+    codal::schedule();
+  }
 }
 
 namespace {

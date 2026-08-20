@@ -25,15 +25,25 @@ class PlatformClock final : public DiffDrive::Clock {
   mutable bool primed_ = false;
 };
 
-// DiffDrive::Sleeper -- settle/pace sleeps + cooperative yield, over
-// CODAL fiber_sleep()/schedule(). FIBER-ONLY: called only from the
-// kernel's own fiber (via FiberLauncher below), never the VM or GC hook
-// -- a fiber switch triggered from VM bytecode dispatch or the GC stack
-// scan is the landmine this class never touches (see watchdog.h).
+// DiffDrive::Sleeper -- settle/pace sleeps + cooperative yield. Mode-aware:
+// fiber mode (default) uses CODAL fiber_sleep()/schedule(), called only
+// from the kernel's own fiber (via FiberLauncher below) -- a fiber switch
+// triggered from VM bytecode dispatch or the GC stack scan is the landmine
+// this path never touches (see watchdog.h). Step mode uses
+// mp_hal_delay_ms(), called from main context by diffdrive.step() -- this
+// reaches microbit_hal_idle() so the comms pump runs during a settle.
+// stepMode_ is set once, at mode-latch time (moddiffdrive.cpp), never
+// after; fiber-mode behavior is therefore unchanged from before this mode
+// existed.
 class PlatformSleeper final : public DiffDrive::Sleeper {
  public:
   void sleepMillis(uint32_t duration) override;  // [ms]
   void yield() override;
+
+  void setStepMode(bool stepMode) { stepMode_ = stepMode; }
+
+ private:
+  bool stepMode_ = false;  // false = fiber mode (default, unchanged)
 };
 
 // DiffDrive::FiberLauncher -- starts the kernel loop on its own CODAL

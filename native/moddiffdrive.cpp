@@ -11,9 +11,16 @@
 // leaves use, so Python and kernel I2C traffic share one clearance
 // ledger (spec Section 5). See native/README.md for the full contract.
 //
+// Two mutually exclusive execution modes, latched by whichever of
+// start()/step() is called first (see Mode below): fiber mode (kernel on
+// its own CODAL fiber) and step mode (host drives one kernel cycle per
+// step() call, inline, at main context -- no fiber, no fiber switch).
+//
 // Returns status strings rather than raising from C++ logic on expected
 // refusal paths -- C++/MP NLR interaction is fragile here; mp_arg_parse's
-// own exceptions still apply for malformed calls.
+// own exceptions still apply for malformed calls. Mode-latch and
+// reentrancy violations are host-usage-contract errors, not expected
+// refusals, and raise directly (mp_raise_msg).
 
 extern "C" {
 #include "py/obj.h"
@@ -43,6 +50,20 @@ constexpr uint32_t kBindingLeaseMaxMs = 5000;
 Native::PlatformClock g_clock;
 Native::PlatformSleeper g_sleeper;
 Native::PlatformFiberLauncher g_launcher;
+
+// Mode latch: whichever of start()/step() is called first wins for the
+// rest of the boot; the other then raises (vendor/differential_drive.h's
+// FiberLauncher contract, :86-89). No reset -- start() is itself
+// irreversible (no stop(), run() never returns), so the latch is
+// boot-scoped by construction.
+enum class Mode { kUnlatched, kFiber, kStep };
+Mode g_mode = Mode::kUnlatched;
+
+// step() reentrancy guard -- a scheduled callback firing during the
+// settle delay's mp_hal_delay_ms() (step mode only) could otherwise
+// re-enter step(). Same shape as robot_v5_service()'s inProgress guard,
+// reference/modrobot/modrobot.cpp:1478-1487.
+bool g_stepInFlight = false;
 
 // The kernel's two Motor leaves and the DifferentialDrive object cannot
 // be default-constructed (real references/config only exist at
@@ -252,7 +273,43 @@ extern "C" mp_obj_t diffdrive_start_fn(void) {
   if (g_kernel == nullptr) {
     return statusObj(DiffDrive::DifferentialDrive::Status::kRefusedUnconfigured);
   }
+  if (g_mode == Mode::kStep) {
+    mp_raise_msg(&mp_type_RuntimeError,
+                 MP_ERROR_TEXT("start() refused: step() already latched step mode this boot"));
+  }
+  if (g_mode == Mode::kUnlatched) {
+    g_mode = Mode::kFiber;
+    g_sleeper.setStepMode(false);
+  }
   return statusObj(g_kernel->start());
+}
+
+// diffdrive.step() -- one full kernel cycle inline in the caller's
+// context (vendor/differential_drive.h:344-351); no fiber, no fiber
+// switch. Latches step mode on first call (see Mode above). Blocks
+// ~9-10 ms per call (two 4 ms encoder settles via the mode-aware
+// Sleeper) -- accepted cost for a cooperative teaching mode, paced by
+// the caller against cyclePeriod().
+extern "C" mp_obj_t diffdrive_step_fn(void) {
+  if (g_kernel == nullptr) {
+    return statusObj(DiffDrive::DifferentialDrive::Status::kRefusedUnconfigured);
+  }
+  if (g_mode == Mode::kFiber) {
+    mp_raise_msg(&mp_type_RuntimeError,
+                 MP_ERROR_TEXT("step() refused: start() already latched fiber mode this boot"));
+  }
+  if (g_stepInFlight) {
+    mp_raise_msg(&mp_type_RuntimeError,
+                 MP_ERROR_TEXT("step() re-entered while a step is already in flight"));
+  }
+  if (g_mode == Mode::kUnlatched) {
+    g_mode = Mode::kStep;
+    g_sleeper.setStepMode(true);
+  }
+  g_stepInFlight = true;
+  g_kernel->step();
+  g_stepInFlight = false;
+  return mp_const_none;
 }
 
 extern "C" mp_obj_t diffdrive_drive_fn(mp_obj_t velocityObj, mp_obj_t twistObj,
@@ -366,6 +423,17 @@ extern "C" mp_obj_t diffdrive_cycleOverrunCount_fn(void) {
     return mp_obj_new_int_from_uint(0);
   }
   return mp_obj_new_int_from_uint(g_kernel->output().cycleOverrunCount);
+}
+
+// Read-only: the kernel's actual configured cycle period [ms], frozen at
+// begin() (vendor/differential_drive.cpp:331-336, setConfig()'s
+// post-begin re-clamp at :294-298). Lets a step-mode caller pace against
+// the real value instead of a duplicated constant.
+extern "C" mp_obj_t diffdrive_cyclePeriod_fn(void) {
+  if (g_kernel == nullptr) {
+    return mp_obj_new_int_from_uint(0);
+  }
+  return mp_obj_new_int_from_uint(g_kernel->config().cyclePeriod);
 }
 
 // robotio.i2c_xfer(address, write_data=b'', read_len=0, repeated=False,
