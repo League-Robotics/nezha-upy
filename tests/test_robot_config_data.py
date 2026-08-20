@@ -1,25 +1,14 @@
 """Offline validation tests for the one-time-copied robot config data.
 
-See data/README.md for the copy's provenance and for the two
-deviations applied from the radio-robot-elite source (gopiv.json's
-wiring fix, tovez.json's radio channel).
+See data/README.md for provenance and the two deviations applied from
+the source (gopiv.json's wiring fix, tovez.json's radio channel).
 
-Schema-validation note: `data/robot_config.schema.json`'s own
-top-level `description` field says the per-robot JSON does not yet
-validate against it as a whole document -- the JSON reshape that would
-make that true is separate, later work (radio-robot-elite sprint 132
-ticket 017). This was independently confirmed while writing this
-ticket: `jsonschema.validate()` rejects every one of the four
-per-robot files, because the schema's `additionalProperties: false`
-(top level and within several groups) rejects fields the files still
-carry that the schema doesn't model yet -- extra top-level groups
-(`wheels`, `encoders`, `schema_version`, ...) and free-text `_note`
-documentation fields embedded inside otherwise-modeled groups. So
-rather than a whole-document `jsonschema.validate()`, this module
-checks the schema's field-level type/range constraints group by group,
-for whichever fields are actually present -- the "hand-rolled
-required-key check" ticket 002's acceptance criteria allow as the
-alternative to strict jsonschema validation.
+Schema note: `data/robot_config.schema.json` doesn't yet validate the
+per-robot files as whole documents -- they still carry fields
+(`additionalProperties: false` groups/top level) the schema doesn't
+model. So this module checks the schema's field-level type/range
+constraints group by group, for whichever fields are actually present,
+instead of a whole-document `jsonschema.validate()` call.
 """
 
 import json
@@ -68,9 +57,8 @@ class TestSchemaFieldConstraints(unittest.TestCase):
     def _assert_type(self, value, spec):
         json_type = spec.get("type")
         if json_type == "integer":
-            # JSON Schema's "integer" is a JSON number with no fractional
-            # part -- a whole-numbered float (60.0) is valid, matching
-            # jsonschema.Draft7Validator's own behavior. Only reject
+            # JSON Schema "integer" allows a whole-numbered float (60.0),
+            # matching jsonschema.Draft7Validator -- only reject
             # non-numbers, bools, and genuine fractions.
             self.assertNotIsInstance(value, bool)
             self.assertIsInstance(value, (int, float))
@@ -120,8 +108,8 @@ class TestSchemaFieldConstraints(unittest.TestCase):
 
 
 class TestGopivWiringFix(unittest.TestCase):
-    """Acceptance criterion: gopiv.json carries the true wiring
-    (left_port: 2, right_port: 1, fwd_sign_left: 1, fwd_sign_right: -1)."""
+    """gopiv.json must carry the true wiring: left_port 2, right_port
+    1, fwd_sign_left 1, fwd_sign_right -1."""
 
     def test_gopiv_true_wiring(self):
         motors = load("gopiv.json")["motors"]
@@ -132,7 +120,7 @@ class TestGopivWiringFix(unittest.TestCase):
 
 
 class TestTovezRadioChannel(unittest.TestCase):
-    """Acceptance criterion: tovez.json specifies radio channel 3."""
+    """tovez.json must specify radio channel 3."""
 
     def test_tovez_radio_channel_3(self):
         connection = load("tovez.json")["connection"]
@@ -140,9 +128,8 @@ class TestTovezRadioChannel(unittest.TestCase):
 
 
 class TestZetuvRadioChannel(unittest.TestCase):
-    """Acceptance criterion: zetuv.json specifies radio channel 3
-    (sprint 002 ticket 001 -- ticket-directed bench channel, matching
-    tovez's own bench convention)."""
+    """zetuv.json must specify radio channel 3, matching tovez's bench
+    convention."""
 
     def test_zetuv_radio_channel_3(self):
         connection = load("zetuv.json")["connection"]
@@ -150,11 +137,9 @@ class TestZetuvRadioChannel(unittest.TestCase):
 
 
 class TestZetuvWiring(unittest.TestCase):
-    """Acceptance criterion (sprint 002 ticket 001): zetuv.json's motors
-    block reflects the BENCH-MEASURED left_port/right_port/fwd_sign_left/
-    fwd_sign_right values, not tovez_nocal.json's inherited placeholders
-    -- see docs/bench-log-zetuv-2026-08-19.md for the pulse-by-pulse
-    observation log this determination rests on."""
+    """zetuv.json's motors block must carry BENCH-MEASURED
+    left_port/right_port/fwd_sign_left/fwd_sign_right values, not
+    tovez_nocal.json's inherited placeholders."""
 
     def test_zetuv_motors_wiring_measured(self):
         motors = load("zetuv.json")["motors"]
@@ -168,7 +153,7 @@ class TestZetuvWiring(unittest.TestCase):
 
 
 class TestNoWifiCredentials(unittest.TestCase):
-    """Guard against accidentally-copied secrets (ticket 002 hard rule)."""
+    """Guard against accidentally-copied secrets."""
 
     FORBIDDEN_SUBSTRINGS = (
         "password",

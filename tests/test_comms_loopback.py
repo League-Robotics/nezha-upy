@@ -1,9 +1,5 @@
 """M3 gate: `src/comms.py` under CPython, driven via a loopback transport
-against a host-side v5 client built on `src/wire.py`/`src/msgs.py`
-(ticket 003). See `docs/design/specification.md` Sec 4/5/6 and
-`clasi/sprints/001-python-first-firmware-image-m0-m6/tickets/
-005-v5-protocol-engine-comms-py-radio-shim-py-m3.md` for the acceptance
-criteria this file encodes:
+against a host-side v5 client built on `src/wire.py`/`src/msgs.py`.
 
   - byte-exact banner/ack sequences;
   - dispatch order matches `dispatchLine()`: relay sigils dropped first;
@@ -12,7 +8,7 @@ criteria this file encodes:
   - telemetry emit-policy defaults: AUTO, silent-while-parked, 25 ms
     period, pending-ack-forces-emission;
   - the comms.py-to-firmware-layer dispatch interface, exercised via a
-    stub (no dependency on ticket 004's native module).
+    stub.
 """
 
 import sys
@@ -37,10 +33,10 @@ ID_LINE = "ID:nezha:testprofile:v0"
 # --- loopback transport -----------------------------------------------
 #
 # Two `LoopbackTransport`s sharing a pair of `wire.ByteStreamDemuxer`s --
-# stands in for the real serial/radio transport, per the ticket's own
-# "CPython loopback harness" plan. Each side's `send()`/`send_reliable()`
-# appends the '\n' delimiter itself (matching the Transport contract
-# comms.py documents), and `read_line()` demuxes whatever the peer wrote.
+# stands in for the real serial/radio transport. Each side's
+# `send()`/`send_reliable()` appends the '\n' delimiter itself (matching
+# the Transport contract comms.py documents), and `read_line()` demuxes
+# whatever the peer wrote.
 
 class _Pipe:
     def __init__(self):
@@ -152,11 +148,9 @@ def test_unknown_verb_is_malformed_not_a_relay_line():
 # --- dispatch order: TLM/SEED/DBG intercepted before the binary branch --
 
 def test_tlm_is_intercepted_before_the_binary_branch():
-    """TLM is flagged binary=True in msgs.VERBS (a TLM REPLY frame is
-    binary-framed), but the INBOUND command is a cleartext mode verb,
-    intercepted before dispatchLine()'s `if entry.binary` branch. Proof:
-    non-COBS garbage after `TLM:` must NOT bump malformed_count (which
-    is what would happen if it fell through to decode_binary_frame)."""
+    """TLM is flagged binary=True in msgs.VERBS, but the inbound command
+    is intercepted before dispatchLine()'s `if entry.binary` branch --
+    non-COBS garbage after `TLM:` must NOT bump malformed_count."""
     assert msgs.VERB_BY_NAME["TLM"].binary is True
     c, host = make_comms()
     host.send(b"TLM:this is not cobs data at all!!")
@@ -198,9 +192,9 @@ def test_tlm_unrecognized_arg_replies_with_help():
 
 
 def test_seed_is_intercepted_before_the_binary_branch():
-    """SEED is flagged binary=False, but it is NOT routed through the
-    generic cleartext dispatch switch either (no HELLO/PING/... case for
-    it) -- it is intercepted earlier still, exactly like TLM/DBG."""
+    """SEED is flagged binary=False, but also not routed through the
+    generic cleartext dispatch switch -- intercepted earlier still,
+    like TLM/DBG."""
     assert msgs.VERB_BY_NAME["SEED"].binary is False
     c, host = make_comms()
     host.send(b"SEED:10,-20,1.5")
@@ -273,10 +267,9 @@ def _binary_line(verb, payload):
 
 
 class RecordingDispatch:
-    """The firmware-layer dispatch stub this ticket's own gate backs the
-    interface with (see comms.py's module docstring: "ticket 007's
-    motion.py/config.py back this interface with the real moddiffdrive
-    calls ... this ticket's own test backs it with a recording stub")."""
+    """The firmware-layer dispatch stub this gate backs the interface
+    with -- motion.py/config.py back it with the real moddiffdrive
+    calls; here it's a recording stub."""
 
     def __init__(self, ack=None):
         self.calls = []
@@ -322,9 +315,8 @@ def test_dispatch_stub_return_value_pushes_an_ack():
 
 
 def test_null_dispatch_is_the_default_and_sends_no_ack():
-    """No firmware layer wired (this ticket's own gate) -- NullDispatch
-    must not crash, and must not fabricate an ack (no corr_id exists to
-    ack with, since msgs.py has no field tables yet)."""
+    """No firmware layer wired -- NullDispatch must not crash, and must
+    not fabricate an ack."""
     emitted = []
     c, host = make_comms(emit_callback=lambda now, acks: emitted.append(acks))
     host.send(_binary_line("STOP", b""))
@@ -332,8 +324,8 @@ def test_null_dispatch_is_the_default_and_sends_no_ack():
     assert c.malformed_count == 0
     assert emitted == []  # nothing forced an emission -- and definitely no ack
 
-    # Force a telemetry frame (TLM:NOW) to inspect the ack list NullDispatch
-    # left behind: still empty.
+    # Force TLM:NOW to inspect the ack list NullDispatch leaves behind:
+    # still empty.
     host.send(b"TLM:NOW")
     c.pump(1)
     assert emitted == [[]]
@@ -362,10 +354,8 @@ def test_ack_ring_depth_is_12_oldest_evicted():
 
 
 def test_ack_repeats_exactly_3_then_stops_forcing_unsolicited_emission():
-    """mode OFF, never active -- with NO pending ack and no force, emit()
-    must NOT call the callback at all (this also exercises "ack forces
-    emission" from the OTHER side: once repeats are exhausted, it no
-    longer forces one)."""
+    """mode OFF, never active -- a pending ack forces exactly
+    ACK_REPEATS emissions, then stops forcing them."""
     emitted = []
     tp = comms.TelemetryPolicy(emit_callback=lambda now, acks: emitted.append((now, acks)))
     tp.mode = comms.TLM_MODE_OFF
@@ -380,8 +370,7 @@ def test_ack_repeats_exactly_3_then_stops_forcing_unsolicited_emission():
     for _, acks in emitted:
         assert acks == [9 << 4]
 
-    # The 4th call, still mode OFF / not active / not forced: the ack's
-    # repeats are exhausted, so nothing forces this emission -- silent.
+    # 4th call: repeats exhausted, nothing forces this emission -- silent.
     tp.emit(now=now, force=False)
     assert len(emitted) == comms.ACK_REPEATS  # unchanged
 

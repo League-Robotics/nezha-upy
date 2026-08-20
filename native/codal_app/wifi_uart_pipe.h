@@ -1,23 +1,18 @@
 // wifi_uart_pipe.h -- Native::WifiUartPipe: the raw UARTE1 byte-pipe
-// shim (ticket 006, M4). See native/wifi_uart_fwd.h for the split of
-// responsibility (this file is byte-in/byte-out ONLY -- no AT parsing).
+// shim. Byte-in/byte-out only -- no AT parsing (see
+// native/wifi_uart_fwd.h).
 //
-// Lives under native/codal_app/ (copied by build.sh's --with-wifi step
-// into micropython-microbit-v2/src/codal_app/, the CMake-driven CODAL
-// build) rather than native/ proper, because it needs full CODAL access
-// (NRF52Serial, uBit.io.*) that native/codal_fwd.h's own header
-// documents codal_port's plain Makefile build does NOT provide.
-// reference/modrobot/wifi_stdio.cpp already established this exact
-// codal_app/ placement for the same reason.
+// Lives under native/codal_app/ (copied by build.sh's --with-wifi step)
+// because it needs full CODAL access (NRF52Serial, uBit.io.*) that
+// native/codal_fwd.h's plain-Makefile build does not provide.
 #pragma once
 
 #include "wifi_uart_fwd.h"
 
 namespace Native {
 
-// Raw byte pipe over the module's UARTE1 link. Non-blocking, main-
-// context-only (the scheduled pump, via wifi_at.py's calls into the
-// wifiuart MicroPython module) -- never called from a VM/GC hook.
+// Raw byte pipe over the module's UARTE1 link. Non-blocking,
+// main-context-only -- never called from a VM/GC hook.
 class WifiUartPipe {
  public:
   static WifiUartPipe& instance();
@@ -32,9 +27,8 @@ class WifiUartPipe {
 
   bool started_ = false;
 
-  // Staged-read buffer -- mirrors wifi_stdio.cpp's own nextByte()
-  // pattern: refill from the UARTE's RX ring in bursts, serve one byte
-  // at a time from here in between refills.
+  // Staged-read buffer: refill from the UARTE's RX ring in bursts, serve
+  // one byte at a time from here between refills.
   static constexpr size_t kStageBuffer = 128;
   uint8_t stage_[kStageBuffer] = {};
   int stageLen_ = 0;

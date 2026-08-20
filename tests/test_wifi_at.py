@@ -1,18 +1,15 @@
 """M4 gate (offline legs): `src/wifi_at.py`'s AT state machine against a
-scripted fake serial object -- the mock-serial oracle sequences here
-mirror `reference/modrobot/wifi_stdio.cpp`'s own AT dialogue (join/
-CIPMUX/UDP setup), per this ticket's own acceptance criteria:
+scripted fake serial object -- the mock-serial oracle sequences mirror
+`reference/modrobot/wifi_stdio.cpp`'s own AT dialogue (join/CIPMUX/UDP
+setup):
 
   - `CIPMUX=1` sequencing (issued, in order, before the join completes);
   - one-`CIPSEND`-per-datagram, never per-character;
   - the >=50 ms TLM-throttle timer logic;
   - READY-on-new-peer-edge handling.
 
-See `docs/design/specification.md` Sec 3/5/8 and
-`clasi/sprints/001-python-first-firmware-image-m0-m6/tickets/
-006-wifi-transport-uarte1-shim-wifi-at-py-udp-plane-m4.md` for the
-acceptance criteria this file encodes. No hardware, no radio, no WiFi
-module required -- `FakeSerial` below is a scripted software stand-in.
+No hardware, no radio, no WiFi module required -- `FakeSerial` below is
+a scripted software stand-in.
 """
 import sys
 from pathlib import Path
@@ -32,10 +29,9 @@ PASSWORD = "testpass"
 class FakeSerial:
     """Scripted fake WiFi module -- the wifi_stdio.cpp AT-sequence
     oracle, driven by a lookup table keyed on each command's own prefix
-    (everything before the first '='), default reply "OK" for anything
-    unlisted. Records every write() call's raw bytes (`self.writes`) so
-    tests can assert command ordering and per-call granularity (one
-    CIPSEND per datagram, never per-character)."""
+    (before the first '='), default reply "OK" for anything unlisted.
+    Records every write() call's raw bytes (`self.writes`) so tests can
+    assert command ordering and per-call granularity."""
 
     def __init__(self, replies=None):
         self._replies = dict(replies or {})
@@ -71,9 +67,8 @@ class FakeSerial:
 
     def _handle_write(self, data):
         if self._awaiting_payload:
-            # This write is the payload following a '>' prompt --
-            # exactly one AT+CIPSEND per datagram, so exactly one
-            # "SEND OK" per payload write.
+            # Payload write following a '>' prompt -- one SEND OK per
+            # payload write.
             self._awaiting_payload = False
             self.queue("SEND OK\r\n")
             return
@@ -135,8 +130,7 @@ def test_configure_sequence_issues_cipmux_1_before_join_and_server():
     link, serial = make_link()
     run_until_ready(link)
 
-    # Extract just the AT command lines (drop CIPSEND payload writes,
-    # which don't start with "AT").
+    # Extract AT command lines only (drop CIPSEND payload writes).
     commands = [w.split(b"\r\n")[0] for w in serial.writes if w.startswith(b"AT")]
 
     assert b"AT+CIPMUX=1" in commands
@@ -147,14 +141,11 @@ def test_configure_sequence_issues_cipmux_1_before_join_and_server():
     join_index = commands.index(b"AT+CWJAP?")
     server_index = commands.index(b"AT+CIPSERVER=1,7654")
 
-    # CIPMUX=1 must be issued (and matched) before the join query and
-    # before the TCP REPL server / UDP socket bring-up -- mirrors
-    # wifi_stdio.cpp's own serviceConfigure() -> serviceJoin() ->
-    # serviceServer() ordering.
+    # CIPMUX=1 must precede the join query and the server/UDP bring-up
+    # -- mirrors wifi_stdio.cpp's own ordering.
     assert cipmux_index < join_index < server_index
 
-    # Full step order matches _CONFIGURE_STEPS exactly (RST first, the
-    # module-reboot-before-configuring discipline).
+    # Full step order matches _CONFIGURE_STEPS (RST first).
     assert commands[0] == b"AT+RST"
     assert commands.index(b"AT+CIPMUX=1") > commands.index(b"AT+CWMODE=1")
 
@@ -168,9 +159,9 @@ def test_reaches_ready_and_opens_v5_udp_socket():
 
 
 def test_no_at_command_is_ever_sent_one_byte_at_a_time():
-    """Landmine-ledger item: per-char AT sends flood the module. Every
-    write() call during the ENTIRE bring-up must carry a whole command
-    (or a whole scripted payload), never a single byte."""
+    """Landmine: per-char AT sends flood the module. Every write() call
+    during bring-up must carry a whole command/payload, never a single
+    byte."""
     link, serial = make_link()
     run_until_ready(link)
     for chunk in serial.writes:
@@ -183,8 +174,8 @@ def test_one_cipsend_per_datagram_never_per_character():
     link, serial = make_link()
     run_until_ready(link)
 
-    # Learn a v5 peer the same way the real module would: an inbound
-    # +IPD frame on the v5 link teaches WifiAtLink the peer address.
+    # An inbound +IPD frame on the v5 link teaches WifiAtLink the peer
+    # address.
     serial.queue(build_ipd(wifi_at.V5_LINK, "10.0.0.5", 9999, b"HELLO"))
     run_ticks(link, count=5)
     assert link.read_line() == b"HELLO"
@@ -195,13 +186,11 @@ def test_one_cipsend_per_datagram_never_per_character():
     run_ticks(link, count=20)
 
     new_writes = serial.writes[writes_before:]
-    # Exactly two write() calls for this one datagram: the AT+CIPSEND
-    # command, then the payload -- never decomposed further.
+    # Exactly two write() calls per datagram: AT+CIPSEND, then payload.
     assert len(new_writes) == 2, "expected exactly 2 write() calls for one datagram, got %r" % (new_writes,)
     command_write, payload_write = new_writes
     assert command_write.startswith(b"AT+CIPSEND=4,%d,\"10.0.0.5\",9999" % len(payload))
     assert payload_write == payload
-    # The mock never received a per-character send for either piece.
     assert len(command_write) > 1
     assert len(payload_write) == len(payload) > 1
 
@@ -347,8 +336,7 @@ def test_pump_sends_ready_on_new_peer_edge_via_comms():
     assert comms.ready_count == 0
 
     serial.queue(build_ipd(wifi_at.V5_LINK, "10.0.0.5", 9999, b"HELLO"))
-    # Drain the queued bytes via the pump itself (service() is what
-    # calls _pump_incoming()).
+    # Drain via pump itself (service() calls _pump_incoming()).
     now = 5
     for _ in range(10):
         wifi_at.pump(link, now, comms=comms)

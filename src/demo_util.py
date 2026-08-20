@@ -1,8 +1,8 @@
 """demo_util -- config-scan + duty-balance helpers split out of
-demo_square (OOP bench session 2026-08-19): demo_square outgrew this
-port's on-device compile-heap ceiling (~11-13 KB stripped source), so
-the shared helpers live here and compile separately. Pure-Python,
-CPython+MicroPython clean, no hardware access at import."""
+demo_square: demo_square outgrew this port's on-device compile-heap
+ceiling (~11-13 KB stripped source), so the shared helpers live here
+and compile separately. Pure-Python, CPython+MicroPython clean, no
+hardware access at import."""
 
 ROBOT_CONFIG_PATH = "robot.json"
 MAX_DUTY_PERCENT = 25.0   # [%] duty clamp; MUST match demo_square's rail
@@ -31,12 +31,10 @@ def _scan_number(text, key):
         return None
 
 def geometry_from_robot_config(path=ROBOT_CONFIG_PATH):
-    """Sprint 006 ticket 001: narrow, fail-SOFT read of ONLY
-    ``wheels.wheel_diameter_mm``/``wheels.ticks_per_rev`` from the robot
-    config JSON at ``path`` -- see module docstring's "Config-driven
-    geometry" section for why this is a dedicated lightweight parse
-    rather than ``config.load_robot_config()`` (two independent,
-    bench-grounded, concrete reasons stated there). Returns
+    """Narrow, fail-SOFT read of ONLY ``wheels.wheel_diameter_mm``/
+    ``wheels.ticks_per_rev`` from the robot config JSON at ``path`` --
+    a dedicated lightweight parse rather than ``config.load_robot_config()``
+    since this image ships no json/ujson module (see below). Returns
     ``(wheel_diameter_mm, ticks_per_rev)`` as floats on success;
     ``None`` on ANY problem -- missing/unreadable file, either key not
     found, non-numeric value, or non-positive. NEVER raises; the caller

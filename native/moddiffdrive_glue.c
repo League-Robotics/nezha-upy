@@ -13,6 +13,7 @@ extern mp_obj_t diffdrive_configure_fn(size_t n_args, const mp_obj_t *pos_args,
                                         mp_map_t *kw_args);
 extern mp_obj_t diffdrive_begin_fn(void);
 extern mp_obj_t diffdrive_start_fn(void);
+extern mp_obj_t diffdrive_step_fn(void);
 extern mp_obj_t diffdrive_drive_fn(mp_obj_t velocityObj, mp_obj_t twistObj,
                                     mp_obj_t leaseObj);
 extern mp_obj_t diffdrive_driveDuty_fn(mp_obj_t dutyLeftObj, mp_obj_t dutyRightObj,
@@ -22,6 +23,7 @@ extern mp_obj_t diffdrive_estop_fn(void);
 extern mp_obj_t diffdrive_output_fn(void);
 extern mp_obj_t diffdrive_lastError_fn(void);
 extern mp_obj_t diffdrive_cycleOverrunCount_fn(void);
+extern mp_obj_t diffdrive_cyclePeriod_fn(void);
 
 extern mp_obj_t robotio_i2c_xfer_fn(size_t n_args, const mp_obj_t *pos_args,
                                      mp_map_t *kw_args);
@@ -29,6 +31,7 @@ extern mp_obj_t robotio_i2c_xfer_fn(size_t n_args, const mp_obj_t *pos_args,
 STATIC MP_DEFINE_CONST_FUN_OBJ_KW(diffdrive_configure_obj, 0, diffdrive_configure_fn);
 STATIC MP_DEFINE_CONST_FUN_OBJ_0(diffdrive_begin_obj, diffdrive_begin_fn);
 STATIC MP_DEFINE_CONST_FUN_OBJ_0(diffdrive_start_obj, diffdrive_start_fn);
+STATIC MP_DEFINE_CONST_FUN_OBJ_0(diffdrive_step_obj, diffdrive_step_fn);
 STATIC MP_DEFINE_CONST_FUN_OBJ_3(diffdrive_drive_obj, diffdrive_drive_fn);
 STATIC MP_DEFINE_CONST_FUN_OBJ_3(diffdrive_driveDuty_obj, diffdrive_driveDuty_fn);
 STATIC MP_DEFINE_CONST_FUN_OBJ_0(diffdrive_neutral_obj, diffdrive_neutral_fn);
@@ -37,12 +40,14 @@ STATIC MP_DEFINE_CONST_FUN_OBJ_0(diffdrive_output_obj, diffdrive_output_fn);
 STATIC MP_DEFINE_CONST_FUN_OBJ_0(diffdrive_lastError_obj, diffdrive_lastError_fn);
 STATIC MP_DEFINE_CONST_FUN_OBJ_0(diffdrive_cycleOverrunCount_obj,
                                   diffdrive_cycleOverrunCount_fn);
+STATIC MP_DEFINE_CONST_FUN_OBJ_0(diffdrive_cyclePeriod_obj, diffdrive_cyclePeriod_fn);
 
 STATIC const mp_rom_map_elem_t diffdrive_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_diffdrive)},
     {MP_ROM_QSTR(MP_QSTR_configure), MP_ROM_PTR(&diffdrive_configure_obj)},
     {MP_ROM_QSTR(MP_QSTR_begin), MP_ROM_PTR(&diffdrive_begin_obj)},
     {MP_ROM_QSTR(MP_QSTR_start), MP_ROM_PTR(&diffdrive_start_obj)},
+    {MP_ROM_QSTR(MP_QSTR_step), MP_ROM_PTR(&diffdrive_step_obj)},
     {MP_ROM_QSTR(MP_QSTR_drive), MP_ROM_PTR(&diffdrive_drive_obj)},
     {MP_ROM_QSTR(MP_QSTR_driveDuty), MP_ROM_PTR(&diffdrive_driveDuty_obj)},
     {MP_ROM_QSTR(MP_QSTR_neutral), MP_ROM_PTR(&diffdrive_neutral_obj)},
@@ -51,6 +56,7 @@ STATIC const mp_rom_map_elem_t diffdrive_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_lastError), MP_ROM_PTR(&diffdrive_lastError_obj)},
     {MP_ROM_QSTR(MP_QSTR_cycleOverrunCount),
      MP_ROM_PTR(&diffdrive_cycleOverrunCount_obj)},
+    {MP_ROM_QSTR(MP_QSTR_cyclePeriod), MP_ROM_PTR(&diffdrive_cyclePeriod_obj)},
 };
 STATIC MP_DEFINE_CONST_DICT(diffdrive_module_globals, diffdrive_module_globals_table);
 

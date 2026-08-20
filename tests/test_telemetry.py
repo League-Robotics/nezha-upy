@@ -1,8 +1,5 @@
 """M5 gate: `src/telemetry.py`'s 22-field frame assembly against a
-synthetic sensor/kernel-state fixture. See
-`clasi/sprints/001-python-first-firmware-image-m0-m6/tickets/
-007-python-firmware-layer-config-telemetry-motion-otos-line-m5.md`'s
-acceptance criteria this file encodes: the watchdog fault bit and
+synthetic sensor/kernel-state fixture -- the watchdog fault bit and
 `cycleOverrunCount_` must be present and populated."""
 
 import sys

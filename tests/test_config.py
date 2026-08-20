@@ -1,14 +1,11 @@
 """M5 gate: `src/config.py`'s fail-closed key validation and the
 `wheel_control` -> `DiffDrive::Config` mapping (travel_calib x10).
-See `clasi/sprints/001-python-first-firmware-image-m0-m6/tickets/
-007-python-firmware-layer-config-telemetry-motion-otos-line-m5.md`'s
-acceptance criteria this file encodes:
 
   - fail-closed key validation against data/tovez.json, data/gopiv.json,
     and a deliberately-malformed fixture (refusal asserted);
   - wheel_control -> DiffDrive::Config mapping (travel_calib x10)
     against known input/output pairs;
-  - the CONFIG/SET_FIELD/GET_CONFIG dispatch wiring (Gate section).
+  - the CONFIG/SET_FIELD/GET_CONFIG dispatch wiring.
 """
 
 import sys
@@ -64,8 +61,8 @@ def test_non_numeric_required_key_is_refused():
 
 
 def test_bool_is_not_accepted_as_numeric():
-    # JSON `true`/`false` decode to Python bool, a subclass of int --
-    # explicitly rejected (see config.py's own comment on this).
+    # JSON true/false decode to Python bool, a subclass of int --
+    # explicitly rejected.
     text = (
         '{"identity": {"robot_name": "x"}, "connection": {"radio_channel": true}, '
         '"motors": {"left_port": 2, "right_port": 1, "fwd_sign_left": 1, '
@@ -85,8 +82,8 @@ def test_tovez_wheel_control_mapping_known_pairs():
     robot_config = config.load_robot_config(str(DATA_DIR / "tovez.json"))
     mapped = config.wheel_control_to_diffdrive_config(robot_config)
 
-    # Direct 1:1 renamed fields -- known input/output pairs straight from
-    # data/tovez.json's own wheel_control group.
+    # Direct 1:1 renamed fields -- known pairs from data/tovez.json's
+    # wheel_control group.
     assert mapped["vMin"] == 20.0
     assert mapped["biasMax"] == 23.8
     assert mapped["tauAdapt"] == 30.0

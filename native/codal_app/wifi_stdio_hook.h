@@ -1,23 +1,12 @@
-// wifi_stdio_hook.h -- Native::WifiStdioHook: the small stdio TCP-REPL
-// mirror bridge (ticket 006, M4). See native/wifi_uart_fwd.h for the
-// split of responsibility: this class owns two small ring buffers and
-// nothing else -- no AT dialogue, no +IPD parsing, no knowledge of the
-// WiFi module at all. wifi_at.py demuxes the AT link's own bytes
-// (parsing +IPD headers to tell the TCP REPL link's payload apart from
-// the v5 UDP link's) and pushes/pulls through this surface once per
-// pump tick.
-//
-// Reuses reference/modrobot/wifi_stdio.cpp's own coalescing-ring
-// pattern (drop-oldest on overflow, bounded fixed-size buffers) for
-// both the stdin-inject and stdout-capture directions -- see that
-// file's own tx_/rx_ ring comments, ported here rather than re-derived.
+// wifi_stdio_hook.h -- Native::WifiStdioHook: the stdio TCP-REPL mirror
+// bridge. Owns two small coalescing ring buffers (drop-oldest on
+// overflow) and nothing else -- no AT dialogue, no +IPD parsing.
+// wifi_at.py demuxes the AT link's own bytes and pushes/pulls through
+// this surface once per pump tick.
 //
 // Lives under native/codal_app/ (copied by build.sh's --with-wifi step)
-// for the same CODAL-header reason wifi_uart_pipe.h documents -- though
-// this particular class touches no CODAL type itself, it is patched
-// into codal_app/mphalport.cpp's stdio HAL functions, so it has to live
-// where that file's own build can see it without an extra include-path
-// hop.
+// so it can be patched into codal_app/mphalport.cpp's stdio HAL
+// functions directly.
 #pragma once
 
 #include "wifi_uart_fwd.h"
@@ -49,9 +38,7 @@ class WifiStdioHook {
     size_t tail = 0;
     size_t count = 0;
 
-    // Drop-oldest on overflow -- matches wifi_stdio.cpp's own rx_/tx_
-    // ring policy (a REPL byte lost to a full ring is not worth
-    // wedging the mirror over).
+    // Drop-oldest on overflow.
     size_t push(const uint8_t* data, size_t len) {
       size_t n = 0;
       for (; n < len; ++n) {

@@ -1,5 +1,13 @@
 ---
-status: pending
+status: done
+sprint: '006'
+tickets:
+- 006-006
+- 006-007
+- 006-008
+- 006-009
+- 006-011
+- 006-012
 ---
 
 # Generator-driven control loop mode (addition, not replacement)

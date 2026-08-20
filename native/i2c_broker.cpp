@@ -5,19 +5,15 @@ extern "C" {
 #include "microbithal.h"  // microbit_hal_i2c_writeto/readfrom
 }
 
-#include "codal_fwd.h"  // codal::fiber_sleep() -- see codal_fwd.h's own
-                         // header for why this is a forward-declare
-                         // header, not "main.h"
+#include "codal_fwd.h"  // codal::fiber_sleep(); forward-declare only,
+                         // see codal_fwd.h
 
-// Both write()/read() may run on TWO different execution contexts: the
-// kernel's own CODAL fiber (Nezha 0x10 traffic, NezhaMotor::tick() et al)
-// and the main Python execution context (robotio.i2c_xfer(), a plain
-// builtin call). A clearance wait therefore uses codal::fiber_sleep()
-// (a bare CODAL primitive, safe from any fiber, exactly what the
-// microbit_hal_idle() yield patch already relies on) rather than
-// mp_hal_delay_ms(), whose loop calls mp_handle_pending() -- MicroPython
-// VM/exception-scheduling state that must not be touched from a fiber
-// other than the one MicroPython itself is running on.
+// write()/read() run from two execution contexts: the kernel's own
+// CODAL fiber (Nezha traffic) and the main Python context
+// (robotio.i2c_xfer()). A clearance wait uses codal::fiber_sleep()
+// (safe from any fiber) rather than mp_hal_delay_ms(), whose loop
+// touches MicroPython VM state that only the main-context fiber may
+// touch.
 
 namespace Native {
 
@@ -46,10 +42,8 @@ void I2cBroker::waitForClearance(uint8_t addr7, uint32_t preClear) {
     entryDeadline = preDeadline;
   }
   const uint32_t now = mp_hal_ticks_us();
-  // Unsigned wraparound-safe: (entryDeadline - now) as int32_t is correct
-  // as long as the actual gap never exceeds ~35 minutes, true for every
-  // clearance window this bus ever schedules (postClear tops out at a few
-  // ms).
+  // Unsigned-wraparound-safe as int32_t as long as the gap stays under
+  // ~35 minutes -- true for every clearance window this bus schedules.
   const int32_t remainingUs =
       static_cast<int32_t>(entryDeadline - now);
   if (remainingUs <= 0) {

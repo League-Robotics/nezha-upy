@@ -1,6 +1,9 @@
 # Bench acceptance procedures + student-facing API contract (M6)
 
-Sprint 001, ticket 009. This document is itself a documentation
+Sprint 001, ticket 009 (Part A/B as originally written); Part B §B.1
+extended by sprint 006, ticket 008, to cover the additive
+generator/step-driven mode (ticket 007) alongside the original
+background/fiber mode. This document is itself a documentation
 deliverable — it does not run any hardware step. It writes down the
 procedure the **stakeholder** runs on hardware, per the sprint's
 constraint that no hardware step is a ticket acceptance criterion the
@@ -86,6 +89,19 @@ Per stakeholder decision 2026-08-19 (`docs/design/specification.md`
 - **WiFi module**: **power-cycle it** before any step that touches the
   WiFi transport (step A.7 below) — its AT state persists across nRF
   reflashes, so a fresh flash of the micro:bit does **not** reset it.
+- **Known defect — TLM flood blocks the `mpremote` REPL handshake**: a
+  booted robot streams `TLM:0:0:0` over USB serial at ~19 Hz and does
+  **not** stop on `TLM:OFF` (measured on the bench 2026-08-20). This is
+  not a cable or hardware fault — the board is demonstrably listening
+  the whole time (`PING`/`ID`/`VER` all answer normally) — some emitter
+  is running without consulting `Comms.telemetry.mode`. The flood is
+  enough to make `mpremote` report the misleading "port in use by
+  another program" error instead of connecting, because it never gets
+  a quiet moment to complete its handshake. Tracked separately, not
+  fixed by this sprint: `clasi/issues/tlm-stream-ignores-tlm-off.md`.
+  If a REPL connection (USB, either mode — see Part B §B.1) refuses to
+  come up and the port otherwise looks fine, suspect this before
+  suspecting the cable or the board.
 
 ### A.3 Boot wiring assembles the engine automatically at power-on
 
@@ -99,8 +115,15 @@ module's own docstring for the full mechanism) runs automatically on
 every power-on, before the REPL loop starts:
 
 1. Loads the robot's JSON config, fail-closed.
-2. `diffdrive.configure/begin/start` — only if the config loaded
-   successfully.
+2. `diffdrive.configure(...)` — only if the config loaded successfully.
+   **Correction (sprint 006 ticket 008, reading `src/boot.py`'s own
+   step-2 comment):** boot deliberately does **not** call
+   `begin()`/`start()` itself — re-configuring under an already-live
+   kernel fiber would orphan it, so boot only stages a valid config and
+   leaves `begin()`/committing to a mode (Part B §B.1) to the first real
+   motion consumer. This section previously said
+   `configure/begin/start`; that was inaccurate for as long as
+   `boot.py` has existed (ticket 010) — not a recent behavior change.
 3. Brings up `comms.Comms` + the radio transport unconditionally; brings
    up the WiFi transport only when `wifi_secrets.json` is present.
    Also wires `motion.RobotDispatch` (`motion.MoveQueue` +
@@ -438,7 +461,26 @@ authoritative version — including the full loop-ownership reasoning —
 lives in `src/motion.py`'s module docstring; this section is a
 cross-reference and summary, not a fork of it.
 
-### B.1 The idle-reaching contract
+### B.1 The mode contract: two ways to move the wheels
+
+The open item above is resolved at the *mechanism* level by sprint 006
+(`docs/design/specification.md` §10 item 4): this project ships **two**
+ways to drive `diffdrive` from Python, mutually exclusive per boot
+(§B.1.3). They are laid out here side by side because the wrong mental
+model for one is exactly the failure mode of the other.
+
+**Shared setup, either mode**: `boot.py` runs
+`diffdrive.configure(...)` from `/robot.json` automatically at
+power-on (Part A §A.3), but deliberately does **not** call
+`begin()`/`start()` itself — `src/boot.py`'s own step-2 comment
+explains why: doing that under a live kernel fiber before the caller's
+own gains are set would orphan it, so boot only stages a valid config
+and leaves `begin()`/committing-to-a-mode to the first real motion
+consumer. So by the time you get a REPL prompt, `diffdrive` is
+configured but neither mode is latched yet — both examples below start
+from `diffdrive.begin()` (needed either way) and diverge from there.
+
+#### B.1.1 Background (fiber) mode — wheel control requires reaching idle
 
 **Wheel control requires the Python program to reach idle.** The
 vendored `DiffDrive` kernel (`vendor/differential_drive.h`) runs its
@@ -459,7 +501,42 @@ control back to the scheduler. This is the "realistic trigger" spec
 §7.2 identifies: the natural way a student writes a polling loop is
 already the failure mode, not just the pathological busy-wait a
 programmer might reach for when deliberately trying to break
-something.
+something. The zero-only starvation watchdog (§B.2) is the safety
+backstop for this case — it is not a substitute for the contract
+itself, and it is not a cadence guarantee.
+
+```python
+# Background (fiber) mode -- the kernel drives the wheels on its own
+# CODAL fiber once you commit to it with start(). diffdrive is already
+# configured (boot.py, from /robot.json); begin()/start() are not
+# called yet (see "Shared setup" above).
+diffdrive.begin()
+diffdrive.start()             # latches background mode for the rest of this boot
+
+diffdrive.driveDuty(5.0, 5.0, 500)   # both wheels move -- the kernel fiber paces this on its own
+
+import radio
+radio.on()
+
+# WRONG -- starves the kernel fiber. radio.receive() returns
+# immediately without ever giving control back to the scheduler, so
+# this "looks" non-blocking but is exactly as starving as `while True:
+# pass`. Wheel control (and the comms pump that services wire
+# commands) stops responding.
+while True:
+    p = radio.receive()
+
+# RIGHT -- give control back every iteration so the kernel fiber (and
+# the comms pump) actually get scheduled. Any call that blocks via
+# mp_hal_delay_ms() reaches microbit_hal_idle() -- utime.sleep_ms() is
+# the simplest one (the same mechanism the native binding's own
+# step-mode Sleeper uses to reach idle during a settle, sprint 006
+# Architecture Overview).
+import utime
+while True:
+    p = radio.receive()
+    utime.sleep_ms(5)
+```
 
 **Resolved loop-ownership decision** (ticket 007, `src/motion.py`'s
 module docstring, spec open item 4): this project does **not** ship an
@@ -474,22 +551,145 @@ cadence, not Python** — regardless of how student code is shaped. What
 `comms.py`'s scheduled pump — the same mechanism that already services
 wire commands every cycle.
 
-A known, explicitly-flagged gap (not built this sprint): a
-stakeholder-approved but not-yet-ticketed proposal
-(`clasi/issues/generator-driven-control-loop-mode-addition-not-replacement.md`,
-status `pending`) would add a *second*, additive execution mode where
-move commands are Python generators and each `next()` runs one kernel
-step inline. Its prerequisite native bindings do not exist in
-`native/moddiffdrive.cpp` today (no `step()` binding) — this is future
-work, recorded here so a reader of this contract knows the "no
-`on_tick()`" decision is scoped to what actually shipped, not a claim
-that no other execution model is ever coming.
+#### B.1.2 Generator (step-driven) mode — wheels move while you iterate
+
+**Wheels move while you iterate.** Each `next()` on a `motion.py` move
+handle runs exactly one `diffdrive.step()` cycle inline, in your own
+calling context — no fiber, no fiber switch — and yields
+`diffdrive.output()`. This is the mirror image of background mode's
+contract — background mode fails when your code *doesn't* yield;
+generator mode simply stops advancing when your code *doesn't keep
+asking for the next cycle*.
+
+**Stopping is explicit: call `stop()`, or use `with` (ticket 012).**
+`motion.drive()` returns a `MoveHandle`, not a bare generator. A bare
+`break` out of `for state in motion.drive(...):`, by itself, does
+**not** stop the wheels — MicroPython's mark-and-sweep GC does not
+promptly close a suspended generator the way CPython's refcounting
+does, so nothing runs the `finally` block and the last commanded duty
+stays in effect (measured on real hardware, ticket 009). The documented
+contract:
+
+- **Primary idiom — `with`:** `with motion.drive(...) as move:` —
+  `__exit__` calls `move.stop()` no matter how the block is left
+  (falls through, `break`s, or an exception propagates out of it),
+  stopping the wheels immediately (one landing cycle, ≤~24 ms).
+- **Alternative — explicit `stop()`:** for code that doesn't fit a
+  `with` block, call `move.stop()` yourself before/instead of
+  `break`ing out of the loop.
+
+Both paths close the wrapped generator, which runs the same `finally`
+block that already ran on normal completion — one `neutral()` plus one
+landing `step()` so the staged zero actually reaches the bus. `stop()`
+is idempotent: safe to call twice, safe after the move already
+completed normally.
+
+```python
+# Generator (step-driven) mode -- diffdrive is already configured and
+# begun (see "Shared setup" above); NOT started -- the first step()
+# call, made inside motion.drive() below, latches generator mode for
+# the rest of this boot instead.
+import motion
+
+with motion.drive(diffdrive, v=200.0, twist=0.0, duration_ms=2000) as move:
+    for state in move:
+        print(state["positionLeft"], state["positionRight"])
+        if state["positionLeft"] >= 400.0:
+            break   # __exit__ still calls move.stop() -- neutral() + one
+                    # landing step() land before this loop's caller resumes
+
+# Equivalent without `with`, for code that can't use a block:
+move = motion.drive(diffdrive, v=200.0, twist=0.0, duration_ms=2000)
+for state in move:
+    if state["positionLeft"] >= 400.0:
+        break
+move.stop()   # required -- a bare break above does NOT stop the wheels
+```
+
+`v`/`twist` are `[counts/s]`, matching `diffdrive.drive()`'s own units
+(`motion.py` never converts them — same convention `Move` uses for
+background mode). `duration_ms` is milliseconds, never seconds, same
+landmine-guarded convention as everywhere else in this API (§B.3). The
+example values above are illustrative, not yet independently confirmed
+on real hardware (that confirmation is ticket 009's re-run, parked on
+this ticket and 011 both landing); the *shape* of the examples — the
+`with motion.drive(...) as move: for state in move: ... break` idiom
+and the explicit `move.stop()` alternative — is exact: both were
+executed, unmodified, against the same `_StubDiffDrive`/`_FakeClock`
+fake-diffdrive stub `tests/test_motion.py` uses, and confirmed to call
+`neutral()` exactly once and land exactly one landing `step()` —
+matching `tests/test_motion.py::test_movehandle_with_stops_on_break` and
+`tests/test_motion.py::test_movehandle_stop_lands_neutral`.
+
+**If a student forgets to call `stop()`/use `with`** — a bare `break`
+with no `stop()`, or the handle simply going out of scope — the wheels
+are not left spinning forever: the starvation watchdog (§B.2) is a
+**failsafe** that zeros the duty within ~250 ms even though nothing in
+Python ever closed the generator. This is a safety net, *not* the
+documented behavior — a student relying on the watchdog instead of
+`stop()`/`with` is relying on a backstop, not the contract.
+`tests/test_motion.py::test_bare_break_without_stop_leaves_duty_commanded`
+exists specifically to keep this gap visible rather than let a future
+change quietly assert the opposite.
+
+An abandoned generator (stopped iterating without calling `stop()` —
+an exception elsewhere in your code, or the generator reference simply
+dropped) is not left running: each cycle renews a short lease
+(`cyclePeriod() * motion.GEN_LEASE_PERIODS`, about 3 cycles) on the
+underlying `drive()` call, so the kernel decays it to neutral on its
+own within that short window even if your Python never runs another
+line. If Python has stalled entirely (never reaching idle at all), the
+same zero-only starvation watchdog that backstops background mode
+(§B.2) is the fallback — mode-independent, keyed off `Output.cycleCount`
+either way.
+
+#### B.1.3 Mutual exclusivity: the mode latch (hard constraint)
+
+**The two modes are mutually exclusive per boot, and this is enforced
+at the native layer, not a convention.** Whichever of `start()` or
+`step()` (the latter called for you inside `motion.drive()`) is called
+*first* wins for the rest of this boot; there is no runtime switch and
+no `stop()`-then-restart-in-the-other-mode. The losing entry point
+raises `RuntimeError`, by design — this is not a bug to work around:
+
+```python
+diffdrive.begin()
+diffdrive.start()          # latches BACKGROUND mode
+
+diffdrive.step()
+# Traceback (most recent call last):
+#   ...
+# RuntimeError: step() refused: start() already latched fiber mode this boot
+```
+
+```python
+diffdrive.begin()
+diffdrive.step()           # latches GENERATOR mode
+
+diffdrive.start()
+# Traceback (most recent call last):
+#   ...
+# RuntimeError: start() refused: step() already latched step mode this boot
+```
+
+(Exact messages from `native/moddiffdrive.cpp`'s `diffdrive_step_fn`/
+`diffdrive_start_fn`.) Pick a mode for the whole boot: if you need to
+switch, reset the board. There is no concurrency primitive between the
+two callers, and the vendored kernel was never designed for one — see
+sprint 006's Architecture "Design Rationale" for why a hard latch was
+chosen over an interleaving scheme.
 
 ### B.2 The watchdog visibility contract
 
 A silent stop at 250 ms is indistinguishable from a hardware fault to
 a student debugging a drive routine — so the starvation watchdog's
-response is never silent:
+response is never silent. This applies to **either** mode from §B.1 —
+the watchdog is keyed off `Output.cycleCount` and has no branch on
+which mode latched. Generator mode also has a faster, first-line decay
+of its own (the short per-cycle lease, §B.1.2) that would normally
+retire an abandoned generator before the watchdog's 250 ms threshold
+is even reached; the watchdog below is the shared fallback for both
+modes, not a generator-mode-specific mechanism:
 
 - **Telemetry**: `telemetry.py`'s frame carries `watchdog_fault`
   (bool) as its own top-level field, *and* folds the same signal into
@@ -544,6 +744,13 @@ landmine ledger L4 — a sec/ms slip once ran wheels unsupervised for
   a queue that stops ticking (student loop stalls) decays to neutral
   quickly via ordinary lease expiry — independent of, and faster than,
   the starvation watchdog's own 250 ms detection.
+- Generator mode (§B.1.2) has its own analogous renewal: each
+  `next()` inside `motion.drive()` renews the lease on its own
+  `diffdrive.drive()` call to `cyclePeriod() * motion.GEN_LEASE_PERIODS`
+  (about 3 cycles, ~72 ms at the default 24 ms cycle) — short by
+  design, so an abandoned generator's last-commanded lease expires and
+  the kernel zeroes it well before the starvation watchdog would ever
+  need to act.
 
 ### B.4 The public robot API surface, as built
 
@@ -555,7 +762,10 @@ method tables):
 diffdrive.configure(left_port, right_port, fwd_sign_left=1, fwd_sign_right=1,
                      max_duty=0.0, full_duty_velocity=0.0, cycle_period_ms=24) -> status:str
 diffdrive.begin() -> status:str
-diffdrive.start() -> status:str
+diffdrive.start() -> status:str        # latches BACKGROUND mode (§B.1.3) -- raises RuntimeError if step() already latched
+diffdrive.step() -> None               # latches GENERATOR mode (§B.1.3) -- raises RuntimeError if start() already latched;
+                                        # also raises on re-entry while a step is already in flight
+diffdrive.cyclePeriod() -> int         # [ms] -- read-only; a CALLABLE, not an attribute
 diffdrive.drive(velocity, twist, lease_ms) -> status:str      # [counts/s] [counts/s] [ms]
 diffdrive.driveDuty(dutyLeft, dutyRight, lease_ms) -> status:str  # [%] [%] [ms] (0-100; see A.4's own units-correction note)
 diffdrive.neutral() -> None
@@ -587,11 +797,13 @@ directly "called" by a student typing at the REPL in the way
 `diffdrive.*` is, but importable and usable, and this *is* what a wire
 client drives):
 
-- `motion.py` — `Move`, `MoveQueue`, `RobotDispatch`. The queue and
-  dispatch layer backing MOVE/WHEELS/STOP/ESTOP/GO_TO/CALIBRATE over
-  the wire (Part A §A.8). A student could construct a `MoveQueue`
-  directly against `diffdrive` from the REPL, but the sanctioned,
-  tested path is the wire dispatch one.
+- `motion.py` — `Move`, `MoveQueue`, `RobotDispatch` (background mode:
+  the queue and dispatch layer backing MOVE/WHEELS/STOP/ESTOP/GO_TO/
+  CALIBRATE over the wire, Part A §A.8 — a student could construct a
+  `MoveQueue` directly against `diffdrive` from the REPL, but the
+  sanctioned, tested path is the wire dispatch one) and `drive()`
+  (generator mode, §B.1.2 — the sanctioned student/REPL-driven entry
+  point for this mode; there is no wire-dispatch equivalent for it).
 - `config.py` — `load_robot_config()`, `wheel_control_to_diffdrive_config()`,
   `diffdrive_configure_kwargs()`, `ConfigDispatch`. Per-robot JSON
   loading (fail-closed), the `wheel_control`→`DiffDrive::Config`
@@ -612,8 +824,10 @@ client drives):
   scheduled pump) into a running image automatically at power-on — see
   Part A §A.3.
 - `boot.py` (sprint 001 ticket 010) — the frozen boot module that
-  performs this assembly: fail-closed config load, diffdrive arm,
-  comms/transport/dispatch wiring, scheduled-pump start, banner/READY.
+  performs this assembly: fail-closed config load, `diffdrive.configure()`
+  (arming — `begin()`/committing to a mode — is deliberately left to the
+  first real motion consumer, §B.1's "Shared setup"), comms/transport/
+  dispatch wiring, scheduled-pump start, banner/READY.
   Not directly "called" by a student or a wire client at all — it runs
   once, automatically, before the REPL loop starts. See its own module
   docstring for the full six-step sequence and the grounding evidence
@@ -645,3 +859,9 @@ that is *not* one of the frozen framework modules.
 - `clasi/sprints/001-python-first-firmware-image-m0-m6/tickets/done/`
   — tickets 001, 004, 006, 007 for the offline work Part A §A.1 points
   back to.
+- `clasi/sprints/006-comment-condensation-main-py-rename-generator-control-loop/`
+  — tickets 006 (native `step()`/mode latch), 007 (`motion.py`
+  generator), 008 (this document's Part B §B.1 update) for the
+  generator/step-driven mode.
+- `clasi/issues/tlm-stream-ignores-tlm-off.md` — the known bench-tooling
+  defect flagged in Part A §A.2.

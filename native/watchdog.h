@@ -1,30 +1,22 @@
-// watchdog.h -- Watchdog: the zero-only starvation watchdog required by
-// docs/design/specification.md Sections 5/7.2/8 and this ticket's
-// acceptance criteria.
+// watchdog.h -- Watchdog: the zero-only starvation watchdog (spec
+// Sections 5/7.2/8). Invoked from MICROPY_VM_HOOK_POLL (mpconfigport.h,
+// patched by build.sh's --with-diffdrive step) -- the existing stock
+// hook point, firing roughly every 64 bytecodes.
 //
-// Invoked from MICROPY_VM_HOOK_POLL (mpconfigport.h, patched by
-// build.sh's --with-diffdrive step) -- the ALREADY-EXISTING stock hook
-// point (fires roughly every 64 bytecodes; see native/README.md for why
-// this is the sanctioned integration point and not a new one).
-//
-// HARD SAFETY INVARIANT: poll() and everything it calls must never yield,
-// sleep, or trigger a CODAL fiber switch (no schedule(), no
-// fiber_sleep(), no create_fiber()). Per
-// docs/nezha-upy-review.md Section 1 / spec Section 7.1, a fiber switch
-// from inside VM bytecode dispatch corrupts the heap (CODAL's
-// verify_stack_size() does malloc/free mid-switch, replacing the bytes
-// under MicroPython's nlr_top chain / the GC's conservative stack scan).
+// HARD SAFETY INVARIANT: poll() and everything it calls must never
+// yield, sleep, or trigger a CODAL fiber switch (no schedule(), no
+// fiber_sleep(), no create_fiber()) -- a fiber switch from inside VM
+// bytecode dispatch corrupts the heap (CODAL's verify_stack_size() does
+// malloc/free mid-switch, clobbering MicroPython's nlr_top chain / the
+// GC's conservative stack scan; see docs/nezha-upy-review.md Sec 1).
 // poll()'s only I/O is a synchronous, blocking I2C write via
-// writeNezhaZeroDutyWithRetry() -- ordinary bus wait, no fiber
-// involvement -- and that write only happens on the rare fault path, not
-// on every call.
+// writeNezhaZeroDutyWithRetry() on the rare fault path -- ordinary bus
+// wait, no fiber involvement.
 //
-// Covers BOTH M1 safety-case shapes (busy-wait `while True: pass` and the
-// realistic polling idiom `while True: p = radio.receive()`) identically:
-// neither ever reaches microbit_hal_idle(), so in both cases the kernel
-// fiber never gets scheduled and its Output.cycleCount stops advancing --
-// this watchdog's only signal. It does not distinguish the two shapes and
-// does not need to.
+// Covers both the busy-wait `while True: pass` and the polling idiom
+// `while True: p = radio.receive()` identically: neither reaches
+// microbit_hal_idle(), so the kernel fiber never runs and
+// Output.cycleCount stops advancing -- this watchdog's only signal.
 #pragma once
 
 #include <cstdint>
@@ -40,28 +32,23 @@ class Watchdog {
       : kernel_(kernel), bus_(bus) {}
 
   // Ports to zero if the watchdog trips. Defaults match this codebase's
-  // usual two-wheel wiring (left_port=1, right_port=2, mirroring
-  // reference/modrobot's kLeftPort/kRightPort) until diffdrive.configure()
-  // supplies the robot's real wiring.
+  // usual two-wheel wiring until diffdrive.configure() supplies the
+  // robot's real wiring.
   void setPorts(uint32_t leftPort, uint32_t rightPort) {
     leftPort_ = leftPort;
     rightPort_ = rightPort;
   }
 
-  // Called from MICROPY_VM_HOOK_POLL. Cheap on every call except the rare
-  // fault path: internally throttled so the (comparatively expensive)
-  // DifferentialDrive::output() seq-consistent copy happens at most once
-  // per kPollIntervalUs, not on every one of the ~thousands of hook
-  // firings per second a tight Python loop produces.
+  // Called from MICROPY_VM_HOOK_POLL. Cheap on every call except the
+  // rare fault path: internally throttled to at most one output() copy
+  // per kPollIntervalUs.
   void poll();
 
   bool faultLatched() const { return faultLatched_; }
   uint32_t tripCount() const { return tripCount_; }
 
-  // Test/bench escape hatch -- NOT exposed to Python in this ticket (no
-  // acceptance criterion asks for a clear function; the fault is meant to
-  // stay visible until the next boot, matching the "latch" contract in
-  // spec Section 8). Kept so a future ticket can wire a clear if wanted.
+  // Test/bench escape hatch -- not exposed to Python; the fault stays
+  // latched until reboot by design (spec Section 8).
   void clearFault() { faultLatched_ = false; }
 
  private:
@@ -82,12 +69,10 @@ class Watchdog {
   bool faultLatched_ = false;
   uint32_t tripCount_ = 0;
 
-  // [us] how often poll() actually samples output() -- cheap early-exit
-  // in between. 20 ms is well under the 250 ms stall threshold, so the
-  // stall is still caught within one polling granularity of the deadline.
+  // [us] how often poll() samples output(); well under the 250 ms
+  // stall threshold.
   static constexpr uint32_t kPollIntervalUs = 20000;
-  // [us] stall threshold, per spec Section 5/8 ("cycles stall > 250 ms
-  // with wheels commanded").
+  // [us] stall threshold (spec Section 5/8).
   static constexpr uint32_t kStallThresholdUs = 250000;
   static constexpr int kZeroWriteRetries = 2;
 };

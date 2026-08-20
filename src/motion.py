@@ -1,18 +1,16 @@
 """motion -- move queue, stop conditions, timeout fault, replace
 semantics, GO_TO, CALIBRATE, and the CONFIG-family/motion verb dispatch
-router, M5 (PLAN.md / ``docs/design/specification.md`` Sec 6/7.2, UC-013).
+router, spec Sec 6/7.2, UC-013.
 
-**Every duration in this module is MILLISECONDS.** PLAN.md's landmine
-ledger (L4): a sec/ms slip once ran wheels 8+ minutes unsupervised --
-this is a load-bearing regression risk, not a style note. See
-``MAX_MOVE_DURATION_MS`` and ``tests/test_motion.py``'s own explicit
-ms-vs-seconds regression assertion.
+**Every duration in this module is MILLISECONDS.** A sec/ms slip once
+ran wheels 8+ minutes unsupervised -- this is a load-bearing regression
+risk, not a style note. See ``MAX_MOVE_DURATION_MS`` and
+``tests/test_motion.py``'s explicit ms-vs-seconds regression assertion.
 
 ---
 
 **Teaching-framework loop-ownership decision** (spec Sec 7.2 / Sec 10
-open item 4, "decide before M5" -- this ticket's own explicit
-instruction to resolve or escalate, not guess):
+open item 4):
 
 DECIDED: no ``on_tick()`` callback framework is implemented. This
 module exposes plain, direct function calls (``MoveQueue.enqueue()``/
@@ -21,59 +19,37 @@ verb dispatch (the primary, wire-driven path -- ``RobotDispatch``
 below) or directly from student/REPL code. The vendored kernel
 (``vendor/differential_drive.h``) free-runs its own control cadence on
 a CODAL fiber, independent of Python's call stack (spec Sec 5/7.1) --
-so "loop ownership" for WHEEL MOTION itself resolves to "the kernel
-owns cadence, not Python," regardless of whether student code is
-shaped as ``while True:`` or anything else. What DOES need periodic
-pumping is ``MoveQueue.tick()`` (renews leases, advances the queue,
-detects timeout faults) -- that pumping is FRAMEWORK-owned, via
-``comms.py``'s scheduled pump (ticket 005's ``PumpTimer``/
+so "loop ownership" for wheel motion resolves to "the kernel owns
+cadence, not Python," regardless of how student code is shaped. What
+DOES need periodic pumping is ``MoveQueue.tick()`` (renews leases,
+advances the queue, detects timeout faults) -- that pumping is
+framework-owned, via ``comms.py``'s scheduled pump (``PumpTimer``/
 ``micropython.schedule``), the same mechanism that already services
-wire commands every cycle. This is a rejection of an ``on_tick()``-
-per-move callback registration as unneeded complexity on top of that
-existing pump.
+wire commands every cycle.
 
-Student-facing contract (spec Sec 7.2, restated here since this is
-where the loop-ownership decision lives): wheel control requires
-reaching idle (``microbit_hal_idle()``) for the kernel fiber to be
-scheduled at all -- a tight ``while True:`` loop that never reaches
-idle (including the realistic polling idiom ``while True: p =
-radio.receive()``) starves the kernel fiber. The VM-hook starvation
-watchdog (``native/watchdog.h``, ticket 004) is the safety backstop for
-that case (fault bit surfaced in ``telemetry.py``'s ``watchdog_fault``
-field), not a substitute for the contract itself.
+Student-facing contract: wheel control requires reaching idle
+(``microbit_hal_idle()``) for the kernel fiber to be scheduled at all
+-- a tight ``while True:`` loop that never reaches idle (including the
+realistic polling idiom ``while True: p = radio.receive()``) starves
+the kernel fiber. The VM-hook starvation watchdog (``native/
+watchdog.h``) is the safety backstop for that case (fault bit surfaced
+in ``telemetry.py``'s ``watchdog_fault`` field), not a substitute for
+the contract itself.
 
-KNOWN GAP, flagged not silently dropped: a stakeholder-approved,
-NOT-YET-TICKETED issue
-(``clasi/issues/generator-driven-control-loop-mode-addition-not-
-replacement.md``, status ``pending``, untracked in this sprint's
-``sprint.md`` issue list as of this ticket) proposes a SECOND,
-additive execution mode -- move commands as Python generators, where
-each ``next()`` runs one kernel ``step()`` inline and the generator
-owns pacing (framework-owned cadence inside the generator,
-student-owned loop body -- explicitly "neither ``on_tick()`` nor raw
-student ``while True:``", the same rejection of ``on_tick()`` this
-ticket independently reaches for the surface it DOES implement). That
-mode requires new native bindings (``diffdrive.step()``, a mode
-latch, mode-aware Sleeper, a reentrancy guard, a ``cyclePeriod``
-accessor) that its own text describes as "a small follow-on ticket
-after 004 closes, before ticket 007 needs them" -- confirmed NOT
-present (``native/moddiffdrive.cpp`` exposes no ``step`` binding; no
-such follow-on ticket exists in this sprint's ticket list;
-``mcp__clasi__list_tickets`` shows only 001-009). Building that native
-extension is out of this ticket's own file scope (``native/`` C++ work
-needing its own qstr/glue wiring and a verified rebuild) and is not
-required by this ticket's acceptance criteria (which test the
-background-mode queue/stop/timeout/replace/ms semantics, not
-generator mode). This module therefore implements ONLY the
-background-mode surface; generator mode is deliberately deferred,
-recorded here for a follow-on ticket rather than guessed at or
-silently omitted.
+A second, additive execution mode is implemented below: ``drive()``, a
+generator where each ``next()`` runs one ``diffdrive.step()`` cycle
+inline, the generator owning pacing. Mutually exclusive with the
+background/fiber mode above at the native layer (mode latches on
+whichever of ``start()``/``step()`` is called first this boot, ticket
+006) -- ``MoveQueue``/``RobotDispatch`` above are unchanged either way.
+See ``clasi/issues/generator-driven-control-loop-mode-addition-not-
+replacement.md`` and sprint 006 SUC-001/SUC-002.
 
 ---
 
-Verb payload shapes (this ticket's own hand-decoded, documented
-convention -- ``msgs.py`` has no per-verb protobuf field tables yet,
-same discipline as ``config.py``'s CONFIG-family dispatch):
+Verb payload shapes (hand-decoded convention -- ``msgs.py`` has no
+per-verb protobuf field tables yet, same discipline as ``config.py``'s
+CONFIG-family dispatch):
 
   MOVE:      corr_id:u8, queue_mode:u8 (0=replace,1=append), v:f32-LE,
              twist:f32-LE, duration_ms:u32-LE, has_stop_distance:u8,
@@ -107,23 +83,22 @@ __all__ = [
     "ERR_FAULTED",
     "ERR_DURATION_TOO_LONG",
     "ERR_MALFORMED",
+    "GEN_LEASE_PERIODS",
+    "drive",
+    "MoveHandle",
 ]
 
 MAX_QUEUE_DEPTH = 5
 
 # Policy ceiling on a single queued move's OWN duration_ms -- separate
-# from and much larger than the native binding's 5000 ms per-call LEASE
-# ceiling (a queued move renews its lease repeatedly via tick(), see
-# MoveQueue.tick()'s own comment); this is the ms-not-seconds landmine
-# guard (PLAN.md L4): a move is REFUSED at enqueue time, never silently
-# clamped, if its duration is not a plausible millisecond value. 60000 ms
-# (60 s) is generous for a classroom teaching move while still catching
-# an 8-minute-class of bug (480000+ ms would refuse; more importantly, a
-# units-confused caller who means "8 seconds" but sends a raw "8"
-# (thinking whole seconds) gets an almost-instant move, visibly wrong in
-# the classroom -- not a landmine this ceiling can catch by itself, which
-# is exactly why "every duration is ms" is a documented CONTRACT, not
-# just a bound).
+# from and much larger than the native binding's 5000 ms per-call lease
+# ceiling (a queued move renews its lease repeatedly via tick()). This
+# is the ms-not-seconds landmine guard: a move is REFUSED at enqueue
+# time, never silently clamped, if its duration is not a plausible
+# millisecond value. A units-confused caller sending seconds where ms
+# is expected gets an almost-instant move, visibly wrong in the
+# classroom -- which is why "every duration is ms" is a documented
+# CONTRACT, not just a bound.
 MAX_MOVE_DURATION_MS = 60000
 
 # Per-tick() lease renewal -- well under the native binding's 5000 ms
@@ -133,11 +108,10 @@ MAX_MOVE_DURATION_MS = 60000
 DEFAULT_LEASE_MS = 1000
 
 # Grace window past a move's own duration_ms before a still-not-complete
-# move is treated as a TIMEOUT FAULT rather than an ordinary duration
-# completion crossed by normal tick() jitter -- deliberately reuses the
-# VM-hook starvation watchdog's own 250 ms stall threshold
-# (native/watchdog.h kStallThresholdUs) as a single, cross-referenced
-# "how long is a real stall" constant rather than inventing a second one.
+# move is treated as a TIMEOUT FAULT rather than ordinary tick() jitter
+# -- reuses the VM-hook starvation watchdog's own 250 ms stall threshold
+# (native/watchdog.h kStallThresholdUs) rather than inventing a second
+# "how long is a real stall" constant.
 TIMEOUT_GRACE_MS = 250
 
 QUEUE_MODE_REPLACE = 0
@@ -187,12 +161,11 @@ class MoveQueue:
     (duck-typed: ``drive(v, twist, lease_ms) -> status:str``,
     ``driveDuty(dutyLeft, dutyRight, lease_ms) -> status:str``,
     ``neutral() -> None``, ``estop() -> None``, ``output() -> dict``
-    with at least ``positionLeft``/``positionRight`` -- the REAL
-    ``diffdrive`` native module (ticket 004) or a stub, per this
-    ticket's own Gate wording).
+    with at least ``positionLeft``/``positionRight`` -- the real
+    ``diffdrive`` native module or a stub).
 
     Call ``tick(now_ms)`` every cycle (from ``comms.py``'s scheduled
-    pump, per this module's own loop-ownership decision above) to
+    pump, per the loop-ownership decision in the module docstring) to
     advance the queue, renew leases, and detect timeout faults.
     """
 
@@ -251,18 +224,15 @@ class MoveQueue:
         """Decompose a point-to-point GO_TO into two queued moves: turn
         to face ``(target_x, target_y)``, then drive straight to it --
         computed ONCE from ``current_pose`` (``(x, y, heading_rad)``) at
-        issue time (open-loop within each leg; this is a simple
-        turn-then-drive strategy, NOT the continuously-corrected
-        navigation radio-robot-elite's own evolved ``Motion::Navigator``
-        provides -- that subsystem has no equivalent in the vendored
-        ``DiffDrive`` kernel this port uses, so this is a deliberately
-        scoped-down, documented GO_TO, not a re-derivation of that
-        system). ``speed``: [counts/s] for the straight leg.
-        ``omega``: [counts/s] twist magnitude for the turn leg (sign
-        chosen by the computed turn direction). Returns ``True`` if both
-        legs were queued, ``False`` (no state change) if the queue
-        refused (faulted, or -- with ``QUEUE_MODE_APPEND`` -- already at
-        depth) or the two legs would not both fit."""
+        issue time (open-loop within each leg, a simple turn-then-drive
+        strategy, not continuously-corrected navigation -- the vendored
+        ``DiffDrive`` kernel has no equivalent to radio-robot-elite's
+        ``Motion::Navigator``). ``speed``: [counts/s] for the straight
+        leg. ``omega``: [counts/s] twist magnitude for the turn leg
+        (sign chosen by the computed turn direction). Returns ``True``
+        if both legs were queued, ``False`` (no state change) if the
+        queue refused (faulted, or already at depth) or the two legs
+        would not both fit."""
         if self.fault:
             return False
         x0, y0, heading0 = current_pose
@@ -508,3 +478,154 @@ def _corr_id_or_none(payload):
     if payload:
         return payload[0]
     return None
+
+
+# --- Generator-driven move mode (SUC-001/SUC-002) -----------------------
+# Additive: a new, separate entry point alongside MoveQueue/RobotDispatch
+# above (unchanged). Mode latches natively on the first diffdrive.step()
+# call this boot (ticket 006's start()/step() latch) -- no mode tracking
+# here duplicates that.
+
+try:
+    import utime as _time
+except ImportError:  # CPython -- no utime; shims below stand in for it
+    import time as _time
+
+
+def _ticks_ms():
+    if hasattr(_time, "ticks_ms"):
+        return _time.ticks_ms()
+    return int(_time.monotonic() * 1000)
+
+
+def _ticks_add(ticks, delta):
+    if hasattr(_time, "ticks_add"):
+        return _time.ticks_add(ticks, delta)
+    return ticks + delta
+
+
+def _ticks_diff(a, b):
+    if hasattr(_time, "ticks_diff"):
+        return _time.ticks_diff(a, b)
+    return a - b
+
+
+def _sleep_ms(ms):
+    if hasattr(_time, "sleep_ms"):
+        _time.sleep_ms(ms)
+    else:
+        _time.sleep(ms / 1000.0)
+
+
+# Short lease multiple (~3x cyclePeriod), renewed every next() -- an
+# abandoned generator decays to neutral on its own before the watchdog
+# would ever need to act (SUC-002).
+GEN_LEASE_PERIODS = 3
+
+
+class MoveHandle:
+    """Wraps the generator ``drive()`` builds so stopping can be an
+    explicit method call instead of relying on generator finalization.
+
+    Ticket 012, measured on hardware: a bare ``break`` out of ``for
+    state in motion.drive(...):`` does NOT run the generator's
+    ``finally`` on MicroPython -- mark-and-sweep GC does not promptly
+    close a suspended generator the way CPython's refcounting does, so
+    ``GeneratorExit`` never fires and the wheels keep the last commanded
+    duty until the starvation watchdog trips (~250 ms). ``stop()`` makes
+    the close explicit and reliable instead of implicit and timing-
+    dependent -- it does not duplicate the landing logic, it just
+    guarantees ``close()`` actually happens.
+
+    Two supported idioms, one mechanism (both call ``stop()``):
+
+    * Explicit -- ``move = motion.drive(...); ...; move.stop()``.
+    * Context manager -- ``with motion.drive(...) as move: ...`` --
+      preferred for student code since ``__exit__`` stops the wheels no
+      matter how the block is left (normal exit, ``break``, or an
+      exception).
+
+    ``__iter__``/``__next__`` delegate to the wrapped generator, so
+    plain ``for state in motion.drive(...):`` keeps working unchanged
+    for callers who always let the move run to completion.
+    """
+
+    def __init__(self, gen):
+        self._gen = gen
+        self._stopped = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._gen)
+
+    def stop(self):
+        """Close the inner generator, running its existing ``finally``
+        (``neutral()`` + one landing ``step()``). Idempotent: safe to
+        call twice, after the move already completed normally, or from
+        inside the loop right before ``break``."""
+        if self._stopped:
+            return
+        self._stopped = True
+        self._gen.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.stop()
+        return False  # never suppress an exception raised in the `with` block
+
+
+def drive(diffdrive, v, twist, duration_ms, ticks_ms=_ticks_ms, sleep_ms=_sleep_ms):
+    """Generator-driven move: each ``next()`` runs one ``diffdrive.step()``
+    cycle and yields ``diffdrive.output()``; the generator owns pacing --
+    absolute deadlines against ``diffdrive.cyclePeriod()``, mirroring the
+    vendored kernel's own ``run()`` pacing rule, not a fixed
+    ``sleep(period)`` that drifts under jitter. ``duration_ms``:
+    MILLISECONDS (module docstring's ms-not-seconds landmine --
+    ``0 <= duration_ms <= MAX_MOVE_DURATION_MS``).
+
+    Returns a ``MoveHandle`` (not a bare generator) -- iterate it
+    directly (``for state in motion.drive(...):``), or stop it early
+    with ``move.stop()`` / ``with motion.drive(...) as move:`` (see
+    ``MoveHandle``). A bare ``break`` alone does NOT land a clean
+    neutral on MicroPython (ticket 012) -- ``stop()``/``with`` is the
+    documented contract, not the watchdog's ~250 ms coast.
+
+    On normal completion, or when ``stop()`` closes the generator, the
+    ``finally`` block commands ``neutral()`` and lands one more
+    ``step()`` so the staged zero actually reaches the bus: wheels move
+    only while the caller keeps iterating (and has not stopped).
+
+    ``ticks_ms``/``sleep_ms``: injectable clock seam for offline tests
+    (default: ``utime`` on-device, a ``time.monotonic()``-based shim
+    under CPython) -- same DI pattern as ``comms.PumpTimer``'s ``now_fn``.
+    """
+    return MoveHandle(_drive_gen(diffdrive, v, twist, duration_ms, ticks_ms, sleep_ms))
+
+
+def _drive_gen(diffdrive, v, twist, duration_ms, ticks_ms, sleep_ms):
+    """The generator ``drive()`` wraps in a ``MoveHandle``. Not part of
+    the public surface -- call ``drive()``."""
+    if duration_ms < 0 or duration_ms > MAX_MOVE_DURATION_MS:
+        raise MoveQueueError(
+            "duration_ms out of range (ms, not seconds): %r" % (duration_ms,)
+        )
+    period_ms = diffdrive.cyclePeriod()
+    lease_ms = period_ms * GEN_LEASE_PERIODS
+    end = _ticks_add(ticks_ms(), duration_ms)
+    cycle = ticks_ms()
+    try:
+        while _ticks_diff(end, ticks_ms()) > 0:
+            wait = _ticks_diff(cycle, ticks_ms())
+            if wait > 0:
+                sleep_ms(wait)
+            cycle = _ticks_add(cycle, period_ms)  # absolute deadline, not now()+period
+            diffdrive.drive(v, twist, lease_ms)
+            diffdrive.step()
+            yield diffdrive.output()
+    finally:
+        diffdrive.neutral()
+        diffdrive.step()  # one landing cycle so the staged zero reaches the bus
