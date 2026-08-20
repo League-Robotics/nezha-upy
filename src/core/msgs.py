@@ -12,7 +12,7 @@ binary verb's payload SHAPE are explicitly NOT this registry's concern
 generated ``wire_commands.py`` at seed time.
 
 Deliberately NOT included: per-message protobuf field tables for the
-13 binary verbs' payload bodies. ``src/wire.py``'s COBS+CRC framing is
+13 binary verbs' payload bodies. ``src/core/wire.py``'s COBS+CRC framing is
 schema-agnostic -- it only needs a verb's ASCII name and whether it's
 binary or cleartext, so this registry is already everything wire-level
 framing requires; a payload's own field layout needs a real generated

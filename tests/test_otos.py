@@ -1,4 +1,4 @@
-"""M5 Gate: `src/otos.py` against a fake `robotio.i2c_xfer` with the
+"""M5 Gate: `src/devices/otos.py` against a fake `robotio.i2c_xfer` with the
 captured bus facts (0x17, init/scales, 20 ms read period)."""
 
 import struct
@@ -12,7 +12,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-import otos  # noqa: E402
+from devices import otos  # noqa: E402
 
 
 class _FakeI2c:

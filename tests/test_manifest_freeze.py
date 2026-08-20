@@ -1,9 +1,8 @@
 """M5 gate: `manifest.py` lists every FRAMEWORK `src/*.py` module --
 nothing is silently left on the filesystem-only path.
 
-`_BENCH_ONLY_MODULES` excludes files that must never be frozen:
-`demo_square.py` is a bench demo script, not a framework module, so
-freezing it would force an unrelated rebuild+reflash. `main.py` is the
+`_BENCH_ONLY_MODULES` excludes files that must never be frozen.
+`main.py` is the
 on-device student-code slot -- a FROZEN module literally named `main`
 would never be found by `mp_main()`'s filesystem-only `main.py` probe
 (confirmed against `codal_port/main.c`), so it must stay off the
@@ -24,8 +23,15 @@ _BENCH_ONLY_MODULES = {"main.py"}
 
 
 def _actual_src_modules():
+    """Every .py under src/, as a path relative to src/ with forward
+    slashes -- RECURSIVE, so package modules count. Before the src/
+    split this globbed "*.py"; after it, a non-recursive glob would see
+    only boot.py and main.py and this test would pass vacuously while
+    blind to every module in core/, hardware/, devices/ and demos/."""
     return sorted(
-        p.name for p in SRC_DIR.glob("*.py") if p.name not in _BENCH_ONLY_MODULES
+        p.relative_to(SRC_DIR).as_posix()
+        for p in SRC_DIR.rglob("*.py")
+        if p.relative_to(SRC_DIR).as_posix() not in _BENCH_ONLY_MODULES
     )
 
 
@@ -37,7 +43,10 @@ def _manifest_listed_modules():
     start = code_text.index("freeze(") + len("freeze(")
     end = code_text.rindex(")")
     call_args = code_text[start:end]
-    return sorted(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*\.py)"', call_args))
+    # Slashes matter: entries are package-relative paths like
+    # "core/comms.py". A pattern without "/" silently matches only the
+    # root-level entries and makes this whole test vacuous.
+    return sorted(re.findall(r'"([A-Za-z_][A-Za-z0-9_/]*\.py)"', call_args))
 
 
 def test_manifest_file_exists():

@@ -1,4 +1,4 @@
-"""M5 gate: `src/telemetry.py`'s 22-field frame assembly against a
+"""M5 gate: `src/core/telemetry.py`'s 22-field frame assembly against a
 synthetic sensor/kernel-state fixture -- the watchdog fault bit and
 `cycleOverrunCount_` must be present and populated."""
 
@@ -12,9 +12,9 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-import line  # noqa: E402
-import otos  # noqa: E402
-import telemetry  # noqa: E402
+from devices import line  # noqa: E402
+from devices import otos  # noqa: E402
+from core import telemetry  # noqa: E402
 
 
 EXPECTED_FIELDS = {

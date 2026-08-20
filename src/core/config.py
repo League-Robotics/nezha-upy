@@ -59,7 +59,7 @@ except ImportError:
 
 import struct
 
-import wire
+from core import wire
 
 __all__ = [
     "ConfigError",
@@ -266,7 +266,7 @@ def radio_channel(robot_config):
 
 
 class ConfigDispatch:
-    """Backs ``src/comms.py``'s firmware-layer dispatch interface
+    """Backs ``src/core/comms.py``'s firmware-layer dispatch interface
     (``handle_command(verb_name, payload, now) -> (corr_id, err_code) |
     None``) for the CONFIG/SET_FIELD/GET_CONFIG verbs.
 

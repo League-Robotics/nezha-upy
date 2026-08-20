@@ -105,7 +105,7 @@ Truth = radio-robot `src/protos/` + `src/firm/core/comms.cpp` +
  WiFi TCP :7654 ──┤ REPL mirror (C stdio hook, proven pattern) │
                   │                                            │
  WiFi UDP :7654 ──┤──┐                                         │
- radio (v5/relay)─┤──┤→ src/comms.py — Python v5 engine        │
+ radio (v5/relay)─┤──┤→ src/core/comms.py — Python v5 engine        │
                   │  │   runs as a BOUNDED SCHEDULED PUMP      │
                   │  │   (micropython.schedule off a timer —   │
                   │  │   between-bytecodes, REPL stays live)   │
@@ -136,7 +136,7 @@ Load-bearing design points:
   and the TWIM-errata gap are shared with the kernel's 0x10 traffic.
 - **Codec generated, not hand-written**: radio-robot's
   `src/scripts/gen_messages.py` grows `--emit-upy --out <path>` → this
-  repo's `src/msgs.py` (third renderer over the same descriptor walk).
+  repo's `src/core/msgs.py` (third renderer over the same descriptor walk).
   One schema, three targets; the generated file is committed here and
   refreshed by the sync script.
 - **Kernel boundary across repos**: radio-robot stays the single
@@ -185,19 +185,32 @@ radio.receive()` (§7.2); reset mid-drive → boot zero-write silences.
 **Highest-risk milestone; nothing proceeds until it scores.** Hardware
 legs of this gate are stakeholder acceptance (§9).
 
-**M2 — wire codec offline.** `src/wire.py` (port of wire_codec.py) +
-generated `src/msgs.py`. *Gate:* `tests/` golden-vector suite → 8/8
+> **Source layout (reorganised 2026-08-20, out of process).** `src/` is
+> split into packages: `core/` (boot, comms, wire, msgs, config,
+> radio_shim, wifi_at, telemetry), `hardware/` (motion), `devices/`
+> (line, otos) and `demos/`. Two files stay at `src/` root by
+> construction: `main.py`, which `mp_main()` probes for on the
+> FILESYSTEM and which must never be frozen; and `boot.py`, a
+> three-line shim re-exporting `core.boot.run`, because `build.sh`
+> patches `main.c` to call `mp_import_name(MP_QSTR_boot,
+> mp_const_empty_tuple, 0)` at power-on and an empty fromlist makes a
+> dotted import return the top-level package rather than the submodule.
+> Verified on tovez: after a hard reset `sys.modules` contains `boot`,
+> `core.boot` and boot's whole transitive import closure.
+
+**M2 — wire codec offline.** `src/core/wire.py` (port of wire_codec.py) +
+generated `src/core/msgs.py`. *Gate:* `tests/` golden-vector suite → 8/8
 against the fixture; encode↔decode round-trip against the host pb2 for
 every binary verb; `mpy-cross` compiles every `src/*.py` — **as a lint
 only** (§7.4: this port cannot load `.mpy` from filesystem; module
 shipping is via `manifest.py` freezing, decided at M5).
 
-**M3 — v5 engine + radio (the primary transport).** `src/comms.py`
+**M3 — v5 engine + radio (the primary transport).** `src/core/comms.py`
 mirrors `dispatchLine()` order byte-for-byte; ack ring; telemetry emit
 policy; banner/boot/READY sequence; the **scheduled-pump plumbing**
 (timer → `micropython.schedule(pump)`, bounded work per call, stdin-wait
 patch so pending callbacks run while the REPL blocks; pump budget sized
-against ~14 ms available per cycle, §7.5). `src/radio_shim.py` over MP
+against ~14 ms available per cycle, §7.5). `src/core/radio_shim.py` over MP
 `radio` (`length=250, queue=4, channel=<json>, group=10`), fragment
 reassembly per `microbit_radio_link.cpp`, feeding the engine. *Gate:*
 offline first — comms.py under CPython + loopback vs the host's own
@@ -358,13 +371,13 @@ RAM/flash checkpoint.
 3. Radio-robot-side pieces (`sync_upy.py`, `gen_messages.py
    --emit-upy`) are small OOP changes in radio-robot, outside this
    repo's sprint scope; this repo consumes their output. Until the
-   codegen lands, `src/msgs.py` may be hand-seeded to the descriptor
+   codegen lands, `src/core/msgs.py` may be hand-seeded to the descriptor
    walk with a `GENERATED — do not edit` header and replaced by the
    generator.
 4. Teaching-framework loop ownership (`on_tick()` vs student
    `while True:`) — decide before M5 (§7.2). **Resolved at the
    mechanism level, sprint 006** (`docs/bench-acceptance-procedures.md`
-   Part B §B.1, `src/motion.py`): neither `on_tick()` nor a raw student
+   Part B §B.1, `src/hardware/motion.py`): neither `on_tick()` nor a raw student
    `while True:`. Framework-owned cadence now lives inside the move
    handle itself (`motion.drive()` returns a `MoveHandle`, ticket 007 /
    ticket 012) — each `next()` runs one kernel cycle and the student's

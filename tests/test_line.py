@@ -1,4 +1,4 @@
-"""M5 Gate: `src/line.py` against a fake `robotio.i2c_xfer` with the
+"""M5 Gate: `src/devices/line.py` against a fake `robotio.i2c_xfer` with the
 captured bus facts (0x1A x4 channel reads, 50 ms read period)."""
 
 import sys
@@ -11,7 +11,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-import line  # noqa: E402
+from devices import line  # noqa: E402
 
 
 class _FakeI2c:

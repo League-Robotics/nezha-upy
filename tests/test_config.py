@@ -1,4 +1,4 @@
-"""M5 gate: `src/config.py`'s fail-closed key validation and the
+"""M5 gate: `src/core/config.py`'s fail-closed key validation and the
 `wheel_control` -> `DiffDrive::Config` mapping (travel_calib x10).
 
   - fail-closed key validation against data/tovez.json, data/gopiv.json,
@@ -20,8 +20,8 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-import config  # noqa: E402  (path must be set up first)
-import wire  # noqa: E402
+from core import config  # noqa: E402  (path must be set up first)
+from core import wire  # noqa: E402
 
 
 # --- fail-closed key validation ----------------------------------------

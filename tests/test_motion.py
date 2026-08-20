@@ -1,4 +1,4 @@
-"""M5 gate: `src/motion.py`'s queue/stop-condition/timeout-fault/replace
+"""M5 gate: `src/hardware/motion.py`'s queue/stop-condition/timeout-fault/replace
 logic against a stub diffdrive backend, with an explicit regression
 assertion that durations are treated as milliseconds, not seconds."""
 
@@ -13,7 +13,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-import motion  # noqa: E402
+from hardware import motion  # noqa: E402
 
 
 class _StubDiffDrive:

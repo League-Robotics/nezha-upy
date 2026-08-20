@@ -1,7 +1,7 @@
 """telemetry -- the full 22-field TLM frame assembly, spec Sec 6/7.2/
 7.5, UC-012.
 
-``src/comms.py``'s ``TelemetryPolicy`` owns the ack ring and the
+``src/core/comms.py``'s ``TelemetryPolicy`` owns the ack ring and the
 emit-policy arithmetic (WHEN a primary frame is due) but does not
 build a real frame. This module is that frame assembler: given the
 current sensor/kernel state, it produces the 22 named fields as a

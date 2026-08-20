@@ -35,8 +35,8 @@ from main context. No PEP 604/generic-subscript hints, no f-strings
 (CLAUDE.md).
 """
 
-import msgs
-import wire
+from core import msgs
+from core import wire
 
 try:
     import micropython
@@ -298,7 +298,7 @@ class NullDispatch:
 class TelemetryPolicy:
     """Ack ring + primary-frame emit-policy, decoupled from frame
     CONTENT -- mirrors ``Core::Telemetry`` but does not build the real
-    22-field TLM wire frame (``src/telemetry.py``, pending field
+    22-field TLM wire frame (``src/core/telemetry.py``, pending field
     tables). ``emit_callback(now, acks)``, if given, fires exactly
     when a primary frame would be sent (``acks``: packed ``corr_id <<
     4 | err_code`` ints, oldest first); the caller builds/broadcasts

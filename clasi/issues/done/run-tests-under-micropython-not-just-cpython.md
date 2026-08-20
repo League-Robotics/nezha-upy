@@ -1,5 +1,5 @@
 ---
-status: pending
+status: done
 ---
 
 # Run the test suite under MicroPython, not only CPython

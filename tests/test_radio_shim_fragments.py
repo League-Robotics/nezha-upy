@@ -1,4 +1,4 @@
-"""M3 gate: `src/radio_shim.py`'s RAW250 fragment reassembly against
+"""M3 gate: `src/core/radio_shim.py`'s RAW250 fragment reassembly against
 synthetic on-air byte sequences, offline -- no radio hardware (the
 `radio` module is import-guarded; tests call `RadioLink.feed_frame()`
 directly). Framing: `[SEQ][FLAGS][LEN]` header, MTU 247, per
@@ -13,7 +13,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-import radio_shim  # noqa: E402  (path must be set up first)
+from core import radio_shim  # noqa: E402  (path must be set up first)
 
 
 def _build_frame(seq, flags, payload):

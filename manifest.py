@@ -50,35 +50,52 @@
 # patches `main.c` to `mp_import_name()` this module and call its
 # `run()` explicitly.
 #
-# `src/demo_square.py` (sprint 002 ticket 002) is DELIBERATELY ABSENT
-# from the list below -- it is a bench demo SCRIPT, not a framework
-# module. As of sprint 006 ticket 001, a bare `import demo_square` no
+# `src/demos/demo_square.py` (sprint 002 ticket 002) IS frozen below.
+# It was deliberately absent for several sprints -- it is a bench demo
+# SCRIPT, not a framework module -- and was added later. As of sprint 006 ticket 001, a bare `import demo_square` no
 # longer auto-runs anything by itself (its own module docstring's
 # "Auto-run trigger" section) -- production callers (src/main.py) call
 # `demo_square.run()`/`run_single_leg()` explicitly. It remains off
 # this freeze list regardless: freezing would need a full `--clean`
 # rebuild+reflash unrelated to this ticket's own scope, and its
 # standalone bench-debug entry point
-# (`mpremote run src/demo_square.py`, source upload + execute) still
+# (`mpremote run src/demos/demo_square.py`, source upload + execute) still
 # needs no freezing at all. See that module's own docstring and
 # `tests/test_manifest_freeze.py`'s `_BENCH_ONLY_MODULES` for the same
 # reasoning encoded as a test.
+
+# PACKAGE LAYOUT (out-of-process reorganisation, 2026-08-20): src/ is
+# split into `core` (boot/protocol/transports/telemetry/config),
+# `hardware` (drivetrain control), `devices` (I2C sensors) and `demos`.
+# Each package's `__init__.py` MUST be frozen alongside its modules or
+# the package is not importable at all on device.
+#
+# `src/boot.py` stays a root-level module and is frozen under the bare
+# name `boot`: build.sh patches main.c to `mp_import_name(MP_QSTR_boot,
+# mp_const_empty_tuple, 0)` at power-on, and an empty fromlist makes a
+# dotted import return the top-level package rather than the submodule.
+# It is a three-line shim re-exporting `core.boot.run`.
 
 freeze(
     "../../../src",
     (
         "boot.py",
-        "comms.py",
-        "demo_square.py",
-        "demo_util.py",
-        "config.py",
-        "line.py",
-        "motion.py",
-        "msgs.py",
-        "otos.py",
-        "radio_shim.py",
-        "telemetry.py",
-        "wifi_at.py",
-        "wire.py",
+        "core/__init__.py",
+        "core/boot.py",
+        "core/comms.py",
+        "core/config.py",
+        "core/msgs.py",
+        "core/radio_shim.py",
+        "core/telemetry.py",
+        "core/wifi_at.py",
+        "core/wire.py",
+        "hardware/__init__.py",
+        "hardware/motion.py",
+        "devices/__init__.py",
+        "devices/line.py",
+        "devices/otos.py",
+        "demos/__init__.py",
+        "demos/demo_square.py",
+        "demos/demo_util.py",
     ),
 )

@@ -1,5 +1,5 @@
-"""M3 gate: `src/comms.py` under CPython, driven via a loopback transport
-against a host-side v5 client built on `src/wire.py`/`src/msgs.py`.
+"""M3 gate: `src/core/comms.py` under CPython, driven via a loopback transport
+against a host-side v5 client built on `src/core/wire.py`/`src/core/msgs.py`.
 
   - byte-exact banner/ack sequences;
   - dispatch order matches `dispatchLine()`: relay sigils dropped first;
@@ -21,9 +21,9 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-import comms  # noqa: E402  (path must be set up first)
-import msgs  # noqa: E402
-import wire  # noqa: E402
+from core import comms  # noqa: E402  (path must be set up first)
+from core import msgs  # noqa: E402
+from core import wire  # noqa: E402
 
 
 BANNER = "DEVICE:NEZHA2:robot:testbot:12345"

@@ -1,4 +1,4 @@
-"""M2 gate: `src/wire.py` against `tests/fixtures/wire_golden_vectors.txt`.
+"""M2 gate: `src/core/wire.py` against `tests/fixtures/wire_golden_vectors.txt`.
 
 Checks: all 8 golden vectors decode AND re-encode byte-exact; COBS
 keyed 0x0A and CRC-16/CCITT-FALSE (over `command + ':' + payload`,
@@ -7,7 +7,7 @@ for every binary verb.
 
 Round-trip scope: exercised against the fixture's own recorded bytes
 rather than a host pb2 cross-check, since `google.protobuf` isn't
-installed here. `src/wire.py` treats payloads as opaque bytes, so this
+installed here. `src/core/wire.py` treats payloads as opaque bytes, so this
 is sufficient -- see `test_round_trip_every_binary_verb` below.
 """
 
@@ -23,8 +23,8 @@ FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "wire_golden_vectors.txt"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-import msgs  # noqa: E402  (path must be set up first)
-import wire  # noqa: E402
+from core import msgs  # noqa: E402  (path must be set up first)
+from core import wire  # noqa: E402
 
 
 class GoldenVector:
@@ -167,7 +167,7 @@ def test_decode_frame_rejects_truncated_frame():
 
 
 def test_round_trip_every_binary_verb():
-    """Encode<->decode round-trip for every binary verb `src/msgs.py`
+    """Encode<->decode round-trip for every binary verb `src/core/msgs.py`
     declares, using the fixture's `sweep_0x00_0xff` payload (all 256
     byte values, including 0x00 and 0x0A -- the bytes COBS and the
     frame delimiter care about)."""

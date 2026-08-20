@@ -91,7 +91,7 @@ def run_tour():
     import gc
     gc.collect()  # heap is tight; defragment before the module reload
     sys.modules.pop(TOUR_MODULE_NAME, None)
-    import demo_square
+    from demos import demo_square
     demo_square.run()
 
 
@@ -106,7 +106,7 @@ def run_straight_drive():
     import gc
     gc.collect()  # heap is tight; defragment before the module reload
     sys.modules.pop(TOUR_MODULE_NAME, None)
-    import demo_square
+    from demos import demo_square
     demo_square.run_single_leg(STRAIGHT_DRIVE_DISTANCE_MM)
 
 

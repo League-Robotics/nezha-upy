@@ -27,8 +27,8 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-import boot  # noqa: E402  (path must be set up first)
-import motion  # noqa: E402
+from core import boot  # noqa: E402  (path must be set up first)
+from hardware import motion  # noqa: E402
 
 
 class _StubDiffDrive:

@@ -1,4 +1,4 @@
-"""M4 gate (offline legs): `src/wifi_at.py`'s AT state machine against a
+"""M4 gate (offline legs): `src/core/wifi_at.py`'s AT state machine against a
 scripted fake serial object -- the mock-serial oracle sequences mirror
 `reference/modrobot/wifi_stdio.cpp`'s own AT dialogue (join/CIPMUX/UDP
 setup):
@@ -19,7 +19,7 @@ SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-import wifi_at  # noqa: E402  (path must be set up first)
+from core import wifi_at  # noqa: E402  (path must be set up first)
 
 
 SSID = "testssid"

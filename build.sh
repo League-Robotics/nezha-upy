@@ -30,7 +30,7 @@
 #                     byte-pipe shim + stdio TCP-REPL mirror hook.
 #                     Independent of --with-diffdrive (only depends on
 #                     M0); the AT dialogue itself (join/CIPMUX/
-#                     CIPSERVER/CIPSTART) is Python (src/wifi_at.py),
+#                     CIPSERVER/CIPSTART) is Python (src/core/wifi_at.py),
 #                     not part of this flag -- see native/wifi_uart_fwd.h.
 #   --clean           Delete build directories before building
 #
@@ -258,7 +258,7 @@ if "MICROPY_PY_UJSON" not in src:
         "#define MICROPY_NLR_SETJMP                      (1)",
         """#define MICROPY_NLR_SETJMP                      (1)
 
-// json module (as ujson): src/config.py's robot-JSON loader imports
+// json module (as ujson): src/core/config.py's robot-JSON loader imports
 // ujson; this port's default ROM level leaves it out. Bench-confirmed
 // absent 2026-08-19 (help('modules') on zetuv/tovez) -- the frozen
 // config module was unusable on-device without it.
