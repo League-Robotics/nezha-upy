@@ -554,23 +554,35 @@ wire commands every cycle.
 #### B.1.2 Generator (step-driven) mode — wheels move while you iterate
 
 **Wheels move while you iterate.** Each `next()` on a `motion.py` move
-generator runs exactly one `diffdrive.step()` cycle inline, in your own
+handle runs exactly one `diffdrive.step()` cycle inline, in your own
 calling context — no fiber, no fiber switch — and yields
-`diffdrive.output()`. Stop iterating and the wheels stop: there is no
-background cadence to starve or forget about, because nothing keeps
-running once you stop calling `next()` (the lease-decay note below
-covers the "stopped without a clean `break`" case). This is the
-teachable invariant for this mode, and it is the mirror image of
-background mode's contract — background mode fails when your code
-*doesn't* yield; generator mode simply stops when your code *doesn't
-keep asking for the next cycle*.
+`diffdrive.output()`. This is the mirror image of background mode's
+contract — background mode fails when your code *doesn't* yield;
+generator mode simply stops advancing when your code *doesn't keep
+asking for the next cycle*.
 
-Breaking out of the loop stops cleanly: a `break` (or the generator
-simply going out of scope) raises `GeneratorExit` inside
-`motion.drive()`, which runs its `finally` block — one `neutral()` plus
-one landing `step()` so the staged zero actually reaches the bus —
-before your code moves on. The same `finally` block runs on normal
-completion (the `duration_ms` deadline passing) too.
+**Stopping is explicit: call `stop()`, or use `with` (ticket 012).**
+`motion.drive()` returns a `MoveHandle`, not a bare generator. A bare
+`break` out of `for state in motion.drive(...):`, by itself, does
+**not** stop the wheels — MicroPython's mark-and-sweep GC does not
+promptly close a suspended generator the way CPython's refcounting
+does, so nothing runs the `finally` block and the last commanded duty
+stays in effect (measured on real hardware, ticket 009). The documented
+contract:
+
+- **Primary idiom — `with`:** `with motion.drive(...) as move:` —
+  `__exit__` calls `move.stop()` no matter how the block is left
+  (falls through, `break`s, or an exception propagates out of it),
+  stopping the wheels immediately (one landing cycle, ≤~24 ms).
+- **Alternative — explicit `stop()`:** for code that doesn't fit a
+  `with` block, call `move.stop()` yourself before/instead of
+  `break`ing out of the loop.
+
+Both paths close the wrapped generator, which runs the same `finally`
+block that already ran on normal completion — one `neutral()` plus one
+landing `step()` so the staged zero actually reaches the bus. `stop()`
+is idempotent: safe to call twice, safe after the move already
+completed normally.
 
 ```python
 # Generator (step-driven) mode -- diffdrive is already configured and
@@ -579,11 +591,19 @@ completion (the `duration_ms` deadline passing) too.
 # the rest of this boot instead.
 import motion
 
-for state in motion.drive(diffdrive, v=200.0, twist=0.0, duration_ms=2000):
-    print(state["positionLeft"], state["positionRight"])
+with motion.drive(diffdrive, v=200.0, twist=0.0, duration_ms=2000) as move:
+    for state in move:
+        print(state["positionLeft"], state["positionRight"])
+        if state["positionLeft"] >= 400.0:
+            break   # __exit__ still calls move.stop() -- neutral() + one
+                    # landing step() land before this loop's caller resumes
+
+# Equivalent without `with`, for code that can't use a block:
+move = motion.drive(diffdrive, v=200.0, twist=0.0, duration_ms=2000)
+for state in move:
     if state["positionLeft"] >= 400.0:
-        break   # stops cleanly -- the generator's `finally` block lands
-                # neutral() + one landing step() before this loop exits
+        break
+move.stop()   # required -- a bare break above does NOT stop the wheels
 ```
 
 `v`/`twist` are `[counts/s]`, matching `diffdrive.drive()`'s own units
@@ -591,16 +611,28 @@ for state in motion.drive(diffdrive, v=200.0, twist=0.0, duration_ms=2000):
 background mode). `duration_ms` is milliseconds, never seconds, same
 landmine-guarded convention as everywhere else in this API (§B.3). The
 example values above are illustrative, not yet independently confirmed
-on real hardware (that confirmation is ticket 009's job); the *shape*
-of the example — the `for state in motion.drive(...): ... break` idiom
-— is exact: it was executed, unmodified, against the same
-`_StubDiffDrive`/`_FakeClock` fake-diffdrive stub `tests/test_motion.py`
-uses, and confirmed to yield 3 states, run exactly 4 `step()` cycles
-(3 driving + 1 landing), and call `neutral()` exactly once on `break` —
-matching `tests/test_motion.py::test_generator_finally_lands_neutral_on_break`'s
-own assertions.
+on real hardware (that confirmation is ticket 009's re-run, parked on
+this ticket and 011 both landing); the *shape* of the examples — the
+`with motion.drive(...) as move: for state in move: ... break` idiom
+and the explicit `move.stop()` alternative — is exact: both were
+executed, unmodified, against the same `_StubDiffDrive`/`_FakeClock`
+fake-diffdrive stub `tests/test_motion.py` uses, and confirmed to call
+`neutral()` exactly once and land exactly one landing `step()` —
+matching `tests/test_motion.py::test_movehandle_with_stops_on_break` and
+`tests/test_motion.py::test_movehandle_stop_lands_neutral`.
 
-An abandoned generator (stopped iterating without a clean `break` —
+**If a student forgets to call `stop()`/use `with`** — a bare `break`
+with no `stop()`, or the handle simply going out of scope — the wheels
+are not left spinning forever: the starvation watchdog (§B.2) is a
+**failsafe** that zeros the duty within ~250 ms even though nothing in
+Python ever closed the generator. This is a safety net, *not* the
+documented behavior — a student relying on the watchdog instead of
+`stop()`/`with` is relying on a backstop, not the contract.
+`tests/test_motion.py::test_bare_break_without_stop_leaves_duty_commanded`
+exists specifically to keep this gap visible rather than let a future
+change quietly assert the opposite.
+
+An abandoned generator (stopped iterating without calling `stop()` —
 an exception elsewhere in your code, or the generator reference simply
 dropped) is not left running: each cycle renews a short lease
 (`cyclePeriod() * motion.GEN_LEASE_PERIODS`, about 3 cycles) on the

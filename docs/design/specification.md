@@ -366,19 +366,27 @@ RAM/flash checkpoint.
    mechanism level, sprint 006** (`docs/bench-acceptance-procedures.md`
    Part B §B.1, `src/motion.py`): neither `on_tick()` nor a raw student
    `while True:`. Framework-owned cadence now lives inside the move
-   generator itself (`motion.drive()`, ticket 007) — each `next()` runs
-   one kernel cycle and the student's own loop body runs between
-   `next()` calls — while the pre-existing background/fiber mode is
-   unchanged and still requires the student's code to reach idle. The
-   two modes are additive and mutually exclusive per boot (native mode
-   latch, ticket 006), not a replacement of one by the other. **Still
+   handle itself (`motion.drive()` returns a `MoveHandle`, ticket 007 /
+   ticket 012) — each `next()` runs one kernel cycle and the student's
+   own loop body runs between `next()` calls — while the pre-existing
+   background/fiber mode is unchanged and still requires the student's
+   code to reach idle. The two modes are additive and mutually
+   exclusive per boot (native mode latch, ticket 006), not a
+   replacement of one by the other. Stopping a generator-mode move is
+   **explicit** — `move.stop()`, or `with motion.drive(...) as move:`
+   (ticket 012) — not a bare `break`: ticket 009's bench run measured
+   that MicroPython's GC does not promptly close a suspended generator
+   on `break` alone the way CPython's refcounting does, so `finally`
+   would not run and the wheels would keep the last commanded duty
+   until the ~250 ms starvation watchdog failsafe caught it. **Still
    open**: which mode is the *primary* teaching posture (background vs.
    generator) is explicitly deferred, not decided here — that call
-   belongs to ticket 009, from bench hardware evidence (the safety
-   triple plus a generator-mode drive/break/abandoned-generator leg).
-   Ticket 009 itself is parked, not yet run, pending the stakeholder
-   resolving which robot is the confirmed bench target (two boards on
-   the bench currently self-identify as `tovez`; `zetuv`'s UID has
-   never enumerated — sprint 006 `sprint.md`'s Migration Concerns) — so
-   the primary-posture question has a named precondition, not a
-   scheduled resolution date.
+   belongs to ticket 009's re-run, from bench hardware evidence (the
+   safety triple plus a generator-mode drive/`stop()`-or-`with`/
+   abandoned-generator leg — `break` alone is not the tested contract).
+   Ticket 009 itself is parked, not yet run, pending both this ticket
+   and ticket 011 landing and the stakeholder resolving which robot is
+   the confirmed bench target (two boards on the bench currently
+   self-identify as `tovez`; `zetuv`'s UID has never enumerated —
+   sprint 006 `sprint.md`'s Migration Concerns) — so the primary-posture
+   question has a named precondition, not a scheduled resolution date.

@@ -460,7 +460,7 @@ def test_generator_each_next_runs_exactly_one_kernel_step():
     for expected in range(1, 4):
         next(gen)
         assert diffdrive.step_calls == expected
-    gen.close()
+    gen.stop()
 
 
 def test_generator_pacing_uses_absolute_deadlines_not_drifting_sleep():
@@ -487,7 +487,7 @@ def test_generator_pacing_uses_absolute_deadlines_not_drifting_sleep():
     assert clock.sleep_calls == []
     next(gen)  # cycle 2: wait = period - step_cost, not the full period
     assert clock.sleep_calls == [24 - step_cost_ms]
-    gen.close()
+    gen.stop()
 
 
 def test_generator_lease_renewed_each_cycle_is_short():
@@ -499,7 +499,7 @@ def test_generator_lease_renewed_each_cycle_is_short():
         next(gen)
     expected_lease = 24 * motion.GEN_LEASE_PERIODS
     assert diffdrive.drive_calls == [(2.0, 0.5, expected_lease)] * 3
-    gen.close()
+    gen.stop()
 
 
 def test_generator_finally_lands_neutral_on_normal_completion():
@@ -517,20 +517,149 @@ def test_generator_finally_lands_neutral_on_normal_completion():
     assert diffdrive.step_calls == 5  # 4 driving cycles + 1 landing step in finally
 
 
-def test_generator_finally_lands_neutral_on_break():
+# --- MoveHandle: stop()/with are the CONTRACT; bare break is not (ticket 012) --
+#
+# Measured on hardware (ticket 009): a bare `break` out of `for state in
+# motion.drive(...):` does NOT run the generator's `finally` on
+# MicroPython -- mark-and-sweep GC does not promptly close a suspended
+# generator the way CPython's refcounting does, so `GeneratorExit` never
+# fires. The tests below exercise the DOCUMENTED paths (`stop()`, `with`)
+# directly, by explicit call -- not by letting a generator/handle go out
+# of scope and hoping a runtime finalizes it promptly. That distinction
+# is what makes these tests portable: they prove `MoveHandle.stop()`'s
+# own logic, which no longer depends on when-or-whether a runtime
+# finalizes a generator. CPython finalization TIMING is NOT proof of
+# MicroPython behaviour -- only explicit-call tests (this file) are
+# portable; finalization-timing claims are hardware-only proof (ticket
+# 009's re-run), not something an offline CPython test can establish.
+
+def test_drive_gen_finally_lands_neutral_on_generator_close():
+    """Mechanism-only, not the contract: proves the raw generator's
+    `finally` lands neutral()+step() when explicitly closed. Exercises
+    `_drive_gen` directly (bypassing `MoveHandle`) -- this is the exact
+    mechanism `MoveHandle.stop()` relies on and hardware already proved
+    correct (ticket 009's `gen.close()` bench run); it is NOT proof that
+    a bare `break` triggers it -- see
+    test_bare_break_without_stop_leaves_duty_commanded below."""
     diffdrive = _StubDiffDrive(cycle_period_ms=24)
     clock = _FakeClock()
-    gen = motion.drive(diffdrive, v=1.0, twist=0.0, duration_ms=1000,
-                        ticks_ms=clock.now, sleep_ms=clock.sleep)
+    gen = motion._drive_gen(diffdrive, v=1.0, twist=0.0, duration_ms=1000,
+                             ticks_ms=clock.now, sleep_ms=clock.sleep)
     next(gen)
     next(gen)
     assert diffdrive.step_calls == 2
     assert diffdrive.neutral_calls == 0
 
-    gen.close()  # simulates `break` out of `for state in motion.drive(...): ...`
+    gen.close()
 
     assert diffdrive.neutral_calls == 1
     assert diffdrive.step_calls == 3  # 2 driving cycles + 1 landing step
+
+
+def test_movehandle_stop_lands_neutral():
+    """The documented explicit-stop idiom: `move.stop()`, not
+    `gen.close()`, not a bare `break`."""
+    diffdrive = _StubDiffDrive(cycle_period_ms=24)
+    clock = _FakeClock()
+    move = motion.drive(diffdrive, v=1.0, twist=0.0, duration_ms=1000,
+                         ticks_ms=clock.now, sleep_ms=clock.sleep)
+    next(move)
+    next(move)
+    assert diffdrive.step_calls == 2
+    assert diffdrive.neutral_calls == 0
+
+    move.stop()
+
+    assert diffdrive.neutral_calls == 1
+    assert diffdrive.step_calls == 3  # 2 driving cycles + 1 landing step
+
+
+def test_movehandle_stop_twice_is_idempotent():
+    diffdrive = _StubDiffDrive(cycle_period_ms=24)
+    clock = _FakeClock()
+    move = motion.drive(diffdrive, v=1.0, twist=0.0, duration_ms=1000,
+                         ticks_ms=clock.now, sleep_ms=clock.sleep)
+    next(move)
+    move.stop()
+    move.stop()  # must not raise, must not re-run finally
+    assert diffdrive.neutral_calls == 1
+    assert diffdrive.step_calls == 2  # 1 driving cycle + 1 landing step
+
+
+def test_movehandle_stop_after_natural_completion_is_a_noop():
+    diffdrive = _StubDiffDrive(cycle_period_ms=24)
+    clock = _FakeClock()
+    move = motion.drive(diffdrive, v=1.0, twist=0.0, duration_ms=72,
+                         ticks_ms=clock.now, sleep_ms=clock.sleep)
+    with pytest.raises(StopIteration):
+        while True:
+            next(move)
+    assert diffdrive.neutral_calls == 1  # finally already ran on natural completion
+
+    move.stop()  # must not raise, must not re-run finally
+
+    assert diffdrive.neutral_calls == 1
+
+
+def test_movehandle_with_stops_on_normal_exit():
+    diffdrive = _StubDiffDrive(cycle_period_ms=24)
+    clock = _FakeClock()
+    with motion.drive(diffdrive, v=1.0, twist=0.0, duration_ms=1000,
+                       ticks_ms=clock.now, sleep_ms=clock.sleep) as move:
+        next(move)
+        next(move)
+    assert diffdrive.neutral_calls == 1
+    assert diffdrive.step_calls == 3  # 2 driving cycles + 1 landing step
+
+
+def test_movehandle_with_stops_on_break():
+    diffdrive = _StubDiffDrive(cycle_period_ms=24)
+    clock = _FakeClock()
+    with motion.drive(diffdrive, v=1.0, twist=0.0, duration_ms=1000,
+                       ticks_ms=clock.now, sleep_ms=clock.sleep) as move:
+        for _state in move:
+            if diffdrive.step_calls >= 2:
+                break  # __exit__ still runs -- stop() is not conditional on how we leave
+    assert diffdrive.neutral_calls == 1
+    assert diffdrive.step_calls == 3  # 2 driving cycles + 1 landing step
+
+
+def test_movehandle_with_stops_on_exception_and_does_not_suppress_it():
+    diffdrive = _StubDiffDrive(cycle_period_ms=24)
+    clock = _FakeClock()
+
+    class _Boom(Exception):
+        pass
+
+    with pytest.raises(_Boom):
+        with motion.drive(diffdrive, v=1.0, twist=0.0, duration_ms=1000,
+                           ticks_ms=clock.now, sleep_ms=clock.sleep) as move:
+            next(move)
+            raise _Boom("student code raised inside the with block")
+
+    assert diffdrive.neutral_calls == 1  # __exit__ still stopped the move
+    assert diffdrive.step_calls == 2  # 1 driving cycle + 1 landing step
+
+
+def test_bare_break_without_stop_leaves_duty_commanded():
+    """Known, ACCEPTED gap (ticket 012) -- do not "fix" this test to
+    assert the opposite. `move` stays referenced by this test function
+    across the `break`, so this is not a GC-timing test: it proves that
+    breaking out of the loop, by itself, triggers nothing -- no implicit
+    close, on any Python. Only `stop()`/`with` (tested above) run
+    `finally`. On hardware this residual duty is what the ~250 ms
+    starvation watchdog exists to catch -- a FAILSAFE for the
+    forgot-to-stop case, not the contract itself."""
+    diffdrive = _StubDiffDrive(cycle_period_ms=24)
+    clock = _FakeClock()
+    move = motion.drive(diffdrive, v=1.0, twist=0.0, duration_ms=1000,
+                         ticks_ms=clock.now, sleep_ms=clock.sleep)
+    for _state in move:
+        if diffdrive.step_calls >= 2:
+            break
+    # No stop() called -- finally has NOT run. This is the documented gap.
+    assert diffdrive.step_calls == 2
+    assert diffdrive.neutral_calls == 0
 
 
 def test_generator_zero_duration_still_lands_clean_neutral():

@@ -85,6 +85,7 @@ __all__ = [
     "ERR_MALFORMED",
     "GEN_LEASE_PERIODS",
     "drive",
+    "MoveHandle",
 ]
 
 MAX_QUEUE_DEPTH = 5
@@ -522,6 +523,61 @@ def _sleep_ms(ms):
 GEN_LEASE_PERIODS = 3
 
 
+class MoveHandle:
+    """Wraps the generator ``drive()`` builds so stopping can be an
+    explicit method call instead of relying on generator finalization.
+
+    Ticket 012, measured on hardware: a bare ``break`` out of ``for
+    state in motion.drive(...):`` does NOT run the generator's
+    ``finally`` on MicroPython -- mark-and-sweep GC does not promptly
+    close a suspended generator the way CPython's refcounting does, so
+    ``GeneratorExit`` never fires and the wheels keep the last commanded
+    duty until the starvation watchdog trips (~250 ms). ``stop()`` makes
+    the close explicit and reliable instead of implicit and timing-
+    dependent -- it does not duplicate the landing logic, it just
+    guarantees ``close()`` actually happens.
+
+    Two supported idioms, one mechanism (both call ``stop()``):
+
+    * Explicit -- ``move = motion.drive(...); ...; move.stop()``.
+    * Context manager -- ``with motion.drive(...) as move: ...`` --
+      preferred for student code since ``__exit__`` stops the wheels no
+      matter how the block is left (normal exit, ``break``, or an
+      exception).
+
+    ``__iter__``/``__next__`` delegate to the wrapped generator, so
+    plain ``for state in motion.drive(...):`` keeps working unchanged
+    for callers who always let the move run to completion.
+    """
+
+    def __init__(self, gen):
+        self._gen = gen
+        self._stopped = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._gen)
+
+    def stop(self):
+        """Close the inner generator, running its existing ``finally``
+        (``neutral()`` + one landing ``step()``). Idempotent: safe to
+        call twice, after the move already completed normally, or from
+        inside the loop right before ``break``."""
+        if self._stopped:
+            return
+        self._stopped = True
+        self._gen.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.stop()
+        return False  # never suppress an exception raised in the `with` block
+
+
 def drive(diffdrive, v, twist, duration_ms, ticks_ms=_ticks_ms, sleep_ms=_sleep_ms):
     """Generator-driven move: each ``next()`` runs one ``diffdrive.step()``
     cycle and yields ``diffdrive.output()``; the generator owns pacing --
@@ -531,15 +587,28 @@ def drive(diffdrive, v, twist, duration_ms, ticks_ms=_ticks_ms, sleep_ms=_sleep_
     MILLISECONDS (module docstring's ms-not-seconds landmine --
     ``0 <= duration_ms <= MAX_MOVE_DURATION_MS``).
 
-    On normal completion OR ``break``/``GeneratorExit``, the ``finally``
-    block commands ``neutral()`` and lands one more ``step()`` so the
-    staged zero actually reaches the bus: wheels move only while the
-    caller keeps iterating.
+    Returns a ``MoveHandle`` (not a bare generator) -- iterate it
+    directly (``for state in motion.drive(...):``), or stop it early
+    with ``move.stop()`` / ``with motion.drive(...) as move:`` (see
+    ``MoveHandle``). A bare ``break`` alone does NOT land a clean
+    neutral on MicroPython (ticket 012) -- ``stop()``/``with`` is the
+    documented contract, not the watchdog's ~250 ms coast.
+
+    On normal completion, or when ``stop()`` closes the generator, the
+    ``finally`` block commands ``neutral()`` and lands one more
+    ``step()`` so the staged zero actually reaches the bus: wheels move
+    only while the caller keeps iterating (and has not stopped).
 
     ``ticks_ms``/``sleep_ms``: injectable clock seam for offline tests
     (default: ``utime`` on-device, a ``time.monotonic()``-based shim
     under CPython) -- same DI pattern as ``comms.PumpTimer``'s ``now_fn``.
     """
+    return MoveHandle(_drive_gen(diffdrive, v, twist, duration_ms, ticks_ms, sleep_ms))
+
+
+def _drive_gen(diffdrive, v, twist, duration_ms, ticks_ms, sleep_ms):
+    """The generator ``drive()`` wraps in a ``MoveHandle``. Not part of
+    the public surface -- call ``drive()``."""
     if duration_ms < 0 or duration_ms > MAX_MOVE_DURATION_MS:
         raise MoveQueueError(
             "duration_ms out of range (ms, not seconds): %r" % (duration_ms,)
