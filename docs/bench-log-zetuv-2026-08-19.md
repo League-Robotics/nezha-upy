@@ -2452,3 +2452,185 @@ ticket 002's scope, next). `src/main.py` stays OUT of `manifest.py`'s
 freeze list, unchanged: a frozen module literally named `main` would
 never be found by `mp_main()`'s filesystem-only probe. Offline gate
 only this session — `uv run pytest` green, unchanged pass count.
+
+---
+
+# Sprint 006 ticket 009 session: generator-mode drive bench leg —
+# mode-latch and break-stop defects found, fixed by 011/012, re-verified
+# on tovez (wheels on blocks)
+
+Sprint 006, ticket 009
+(`clasi/sprints/006-comment-condensation-main-py-rename-generator-control-loop/tickets/009-hardware-bench-leg-generator-mode-drive-break-mid-move-stop-abandoned-generator-watchdog-zero.md`).
+Two sessions folded into this entry: the first run (which threw a
+recorded exception) and the final re-verification run after tickets
+011 and 012 landed. Robot on blocks throughout both sessions — no
+wheel ever contacted the ground, so no travel-distance-in-mm check was
+possible or attempted at any point; every result below is an encoder-
+count, duty, cycle-count, or watchdog/lease-flag reading.
+
+## 58. Target identity — tovez, confirmed from the device itself before any drive command
+
+Per Step 1 of this ticket's own procedure (`config/devices.json` is
+explicitly untrusted as the sole source): **tovez**, UID
+`9906360200052820a8fdb5e413abb276...`, confirmed three independent
+ways — `config/devices.json`'s own UID map (corroborating only, not
+authoritative), the device's own on-device `robot.json`
+(`{"identity":{"robot_name":"tovez"}}`, the authoritative self-report
+this ticket's Step 1.2 requires), and the v5 cleartext protocol's `ID`
+response. `data/tovez.json` applied: `wheel_diameter_mm` 89.81,
+`ticks_per_rev` 3600.0, `ticks_per_mm` 12.7602, `trackwidth` 115 — the
+same root-caused figures §56 above already fixed for this fleet, not a
+fresh or re-derived number. zetuv was not present on the bus either
+session; no board other than tovez was evaluated as a candidate, so
+this ticket's "refuse if no board matches" branch (Step 1.4) was never
+exercised — the confirmed target matched on the first check.
+
+## 59. First run — two defects found (full record is the ticket's own `exception:` frontmatter block, not duplicated here)
+
+Thrown 2026-08-20T16:51:31Z, `thrown_by: programmer`. Summary only —
+see the ticket file's `exception:` block for the complete attempted/
+conflict text:
+
+1. **Mode latch defect**: a *refused* `start()` (called before
+   `begin()`) consumed the native module's one-shot step/velocity mode
+   latch, permanently locking out step mode for the rest of that boot
+   — a refusal was being treated as a claim.
+2. **Break-mid-move stop defect**: MicroPython does not run a
+   generator's `finally` block on a bare `break` out of its iterating
+   `for` loop the way `gen.close()` does. `close()` landed duty 0/0
+   correctly every time; a bare `break` left the wheels at the last
+   commanded duty (17/17) with `cycleCount` still climbing. The
+   offline suite stayed green throughout because its own test asserted
+   the `close()` path, not `break` — the actual student idiom.
+
+**New procedural finding this session, general to future bench work**:
+the first flash used a hex built mid-sprint at ticket 006 — it carried
+the native `diffdrive.step()` binding but was paired with the
+pre-ticket-007 frozen `motion.py`, which has no `drive()` at all. An
+image can carry half of a two-sided feature (native binding present,
+Python surface absent) and still import cleanly, so "it imported" is
+not evidence the feature is complete on that image. **Bench discipline
+going forward**: before trusting any image for a ticket that spans a
+native/Python pair, assert BOTH `hasattr(diffdrive, 'step')` AND
+`hasattr(motion, 'drive')` (or the equivalent pair for whatever feature
+is under test), not either alone.
+
+## 60. Fixes landed (011, 012) and reflash
+
+- Ticket 011 (`85d2ed4`): the mode latch is no longer claimed by a
+  *refused* `start()`/`step()` — only a call that actually begins a
+  mode may claim it.
+- Ticket 012 (`a8e5408`): `motion.drive()` returns a `MoveHandle`
+  wrapping the generator, with explicit `stop()` and context-manager
+  (`with ... as move:`) support — the two documented, supported ways
+  to guarantee the landing `finally` runs, given MicroPython's
+  break-does-not-close-the-generator behavior found in §59.
+
+Reflashed HEAD `85d2ed4` (both fixes present in the same build — 011's
+native latch fix plus 012's frozen `MoveHandle`). Applying §59's own
+lesson directly, verified on-device **before** any drive command:
+`hasattr(diffdrive, 'step')` True, `hasattr(motion, 'drive')` True,
+both halves of the feature present on this image; `diffdrive.cyclePeriod()
+== 24`.
+
+## 61. Defect retests, final run — both PASS
+
+**Defect 2 retest — mode latch, PASS**: fresh boot, `cycleCount` 0;
+`diffdrive.start()` before `begin()` → `'refused_not_begun'`;
+`configure()`; `begin()` → `'ok'`; `diffdrive.step()` → **succeeds**,
+`cycleCount` 1 (this exact call raised on the first run); then
+`start()` (step mode already latched) → `RuntimeError: start() refused:
+step() already latched step mode this boot`. A refusal no longer
+consumes the latch, and genuine mutual exclusion still holds — both
+halves of the fix confirmed in one sequence.
+
+**Defect 1 retest — stop()/with land neutral on break, PASS for the
+two documented-supported paths**:
+
+- A. `with motion.drive(...) as move: for state in move: ... break` →
+  iters 5, cycles 6 (5 driving + 1 landing), duty `(0.0, 0.0)`.
+- B. `mv = motion.drive(...); for ...: mv.stop(); break` → iters 5, 6
+  cycles consumed, duty `(0.0, 0.0)`.
+- C. bare `break`, no `stop()` → duty `(17.0, 17.0)` **still
+  commanded**. This is ticket 012's own documented, accepted gap, not
+  a residual bug: the ~250 ms starvation watchdog is the failsafe for
+  this case, not a promise that a bare `break` alone lands neutral.
+
+## 62. Regression pass on legs that already passed the first run
+
+Three of the first run's already-passing legs were re-run this session
+to confirm the 011/012 changes caused no regression, all PASS:
+
+- **R1** (one `next()` == one kernel cycle): iteration/cycle marks
+  `(1,1)` and `(8,8)`; 22 yields over 600 ms; ends at 23 cycles (22
+  driving + 1 landing); duty `(0.0, 0.0)` after natural completion.
+- **R2** (abandoned generator — dropped, not `break`ed): during
+  `(17.0, 17.0)` → after a 300 ms stall plus one more step,
+  `(0.0, 0.0)`, `leaseExpired` True, `watchdogFault` True,
+  `watchdogTripCount` 1.
+- **R3** (housekeeping): `cycleOverrunCount` 0; `lastError` `ok`; robot
+  left at duty `(0.0, 0.0)`.
+
+**Not re-run this session, flagged explicitly**: the first run's
+per-wheel duty-isolation / encoder-sign-check leg (Step 3 leg 1 of the
+ticket's own procedure — confirming encoder counts advance with the
+correct sign on both wheels under step-driven drive) was not repeated
+in this final pass, and no encoder position/sign values were captured
+in either session's own notes. The two defect retests and R1-R3 above
+are duty-, cycle-count-, and watchdog-flag-based evidence, not encoder-
+position evidence. This is a real gap against the ticket's own
+acceptance criteria, not resolved by this entry — see the ticket's
+Implementation Notes and its status (left `in-progress`, not `done`,
+pending a decision on whether to schedule the missing leg).
+
+## 63. Timing observation — `cycleBusy` under load vs. idle (single samples, not a characterization)
+
+`cycleBusy` measured **23501 us** against the 24 ms `cyclePeriod`, on
+this final run, taken **after driving under load** (duty was
+non-trivial in the moments preceding the read). A separate, earlier
+reading this same investigation measured `cycleBusy` **15987 us**, but
+that one was taken **after neutral steps with the motors idle**. The
+design's own budgeting assumed roughly 9-10 ms per cycle, from two
+~4 ms encoder settles.
+
+**Stated with the uncertainty intact, per instruction**: these are two
+single samples under two different, uncontrolled conditions (loaded
+vs. idle), not a proper characterization run — they are not averaged
+here and neither is presented as a settled figure. **If** the ~23.5 ms
+loaded figure turns out to be representative under load generally,
+the practical consequence is that a student's own loop-body budget
+between successive `next()` calls would be well under 1 ms of the
+24 ms cycle, not the ~14 ms headroom the design assumed. This bears
+directly on the "which mode is the *primary* teaching posture"
+question `docs/design/specification.md` §10 item 4 explicitly defers
+to this ticket's bench evidence — but a single loaded sample is not
+sufficient evidence to answer it; a dedicated characterization run
+(multiple samples, controlled load state, both modes) is needed before
+that question can be closed, and is not attempted here.
+
+## Summary for future readers / handoff
+
+1. **Both defects from the first run are fixed and bench-confirmed**:
+   the mode latch no longer consumes on a refusal (011); `stop()`/
+   `with` reliably land duty `(0.0, 0.0)` within one cycle on `break`
+   (012); the bare-`break`-leaves-duty-commanded gap is the documented,
+   accepted, watchdog-covered behavior, not a defect.
+2. **Procedural lesson for future bench sessions**: an image can carry
+   the native half of a feature without the Python half (§59) — assert
+   both halves present before trusting an image, not just one.
+3. **Not closed this session**: the encoder-sign-correct step-driven
+   drive leg (ticket 009's own acceptance criterion) and an explicit
+   `Δencoder ≈ 0` over-2-s stop-verify reading were not captured in
+   either session — the retests above are duty/cycle-count/watchdog-
+   flag evidence, which is real but is not the literal measurement the
+   ticket's acceptance criteria name. Ticket 009 is left `in-progress`
+   pending that decision, not marked `done` this session.
+4. **Timing is an open, uncertain observation, not a finding**: loaded
+   `cycleBusy` (~23.5 ms of a 24 ms cycle) vs. idle (~16 ms) are two
+   single samples under different conditions — flagged for a dedicated
+   characterization pass before the primary-teaching-posture question
+   (`docs/design/specification.md` §10 item 4) is decided on this
+   evidence.
+5. Offline gate unchanged this session (docs/ticket-notes-only change):
+   `uv run pytest tests/` — 244 passed, 518 subtests passed, same as
+   ticket 012's own baseline; `git diff --exit-code -- vendor/` clean.
