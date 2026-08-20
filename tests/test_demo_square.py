@@ -250,3 +250,44 @@ def test_module_level_wiring_falls_back_off_device():
     assert demo_square.WIRING_SOURCE == "hardcoded fallback"
     assert (demo_square.LEFT_PORT, demo_square.RIGHT_PORT) == (2, 1)
     assert (demo_square.FWD_SIGN_LEFT, demo_square.FWD_SIGN_RIGHT) == (1, 1)
+
+
+# --- OOP bench session 2026-08-19: encoder-balancing controller -----------
+
+def test_balanced_duties_no_error_no_trim():
+    assert demo_square.balanced_duties(15.0, 15.0, 100.0, 100.0) == (15.0, 15.0)
+
+
+def test_balanced_duties_left_ahead_slows_left_speeds_right():
+    dl, dr = demo_square.balanced_duties(15.0, 15.0, 300.0, 100.0)
+    assert dl < 15.0 and dr > 15.0
+
+
+def test_balanced_duties_right_ahead_slows_right_speeds_left():
+    dl, dr = demo_square.balanced_duties(15.0, 15.0, 100.0, 300.0)
+    assert dl > 15.0 and dr < 15.0
+
+
+def test_balanced_duties_trim_clamped():
+    dl, dr = demo_square.balanced_duties(15.0, 15.0, 100000.0, 0.0)
+    assert dl == 15.0 - demo_square.BALANCE_TRIM_MAX
+    assert dr == 15.0 + demo_square.BALANCE_TRIM_MAX
+
+
+def test_balanced_duties_preserves_pivot_signs():
+    # Left pivot: left duty negative, right positive; |left| leading.
+    dl, dr = demo_square.balanced_duties(-15.0, 15.0, -300.0, 100.0)
+    assert dl < 0.0 and dr > 0.0
+    assert abs(dl) < 15.0 and abs(dr) > 15.0
+
+
+def test_balanced_duties_zero_duty_stays_zero():
+    dl, dr = demo_square.balanced_duties(15.0, 0.0, 300.0, 0.0)
+    assert dr == 0.0
+
+
+def test_balanced_duties_magnitude_clamped_to_max_duty():
+    dl, dr = demo_square.balanced_duties(
+        demo_square.MAX_DUTY_PERCENT, demo_square.MAX_DUTY_PERCENT,
+        0.0, 100000.0)
+    assert dl == demo_square.MAX_DUTY_PERCENT

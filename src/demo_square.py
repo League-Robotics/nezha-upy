@@ -647,6 +647,54 @@ def _mean_abs_delta(out, start_left, start_right):
     return (abs(delta_left) + abs(delta_right)) / 2.0, delta_left, delta_right
 
 
+BALANCE_GAIN = 0.02      # [%/tick] P-gain: duty trim per tick of
+                          # left/right progress mismatch (OOP bench
+                          # session 2026-08-19 -- open-loop duty alone
+                          # veers: right out-ticked left ~30% on legs,
+                          # stakeholder-rejected; this controller locks
+                          # the two tick counts together)
+BALANCE_TRIM_MAX = 8.0   # [%] trim authority cap per wheel
+BALANCE_KI = 0.004       # [%/tick per poll] integral: kills the P-only
+                          # steady-state offset (bench: P-only left a
+                          # standing ~6% tick imbalance ≈ 14 deg/leg arc)
+BALANCE_BIAS_MAX = 8.0   # [%] integral wind-up clamp
+
+# Learned feedforward bias, carried ACROSS segments of the same kind
+# within a tour run (leg 2+ / pivot 2+ start pre-compensated instead of
+# re-learning the plant asymmetry from zero each time).
+_segment_bias = {}
+
+
+def balanced_duties(duty_left, duty_right, delta_left, delta_right,
+                    gain=BALANCE_GAIN, trim_max=BALANCE_TRIM_MAX,
+                    bias=0.0):
+    """Encoder-balancing P-controller: returns ``(duty_left, duty_right)``
+    trimmed so the wheel whose |tick progress| leads is slowed and the
+    laggard sped up, keeping legs straight and pivots symmetric. Signs
+    of the commanded duties are preserved (works for pivots' opposed
+    duties); a zero commanded duty stays zero; trimmed magnitudes are
+    clamped to [0, MAX_DUTY_PERCENT]. Pure function -- offline-testable."""
+    err = abs(delta_left) - abs(delta_right)   # [ticks] >0: left ahead
+    trim = gain * err + bias
+    if trim > trim_max:
+        trim = trim_max
+    elif trim < -trim_max:
+        trim = -trim_max
+
+    def _apply(duty, t):
+        if duty == 0.0:
+            return 0.0
+        sign = 1.0 if duty > 0.0 else -1.0
+        mag = abs(duty) + t
+        if mag < 0.0:
+            mag = 0.0
+        elif mag > MAX_DUTY_PERCENT:
+            mag = MAX_DUTY_PERCENT
+        return sign * mag
+
+    return _apply(duty_left, -trim), _apply(duty_right, trim)
+
+
 def _run_segment(index, segment):
     """Drives one segment to completion (target reached or timeout),
     then commands neutral and settles. Returns a small result dict for
@@ -663,8 +711,10 @@ def _run_segment(index, segment):
     start_left = out0["positionLeft"]
     start_right = out0["positionRight"]
 
-    status = diffdrive.driveDuty(segment["duty_left"], segment["duty_right"],
-                                  SEGMENT_LEASE_MS)
+    bias = _segment_bias.get(segment["kind"], 0.0)
+    duty_l0, duty_r0 = balanced_duties(
+        segment["duty_left"], segment["duty_right"], 0.0, 0.0, bias=bias)
+    status = diffdrive.driveDuty(duty_l0, duty_r0, SEGMENT_LEASE_MS)
 
     elapsed_ms = 0
     since_refresh_ms = 0
@@ -683,12 +733,26 @@ def _run_segment(index, segment):
         if mean_delta >= segment["target_ticks"]:
             reached = True
             break
-        if since_refresh_ms >= LEASE_REFRESH_MS:
-            refresh_status = diffdrive.driveDuty(
-                segment["duty_left"], segment["duty_right"], SEGMENT_LEASE_MS)
-            since_refresh_ms = 0
+        # Encoder-balancing PI trim, re-issued EVERY poll (50 ms) --
+        # keeps the segment straight/symmetric and renews the lease far
+        # inside SEGMENT_LEASE_MS, subsuming the old LEASE_REFRESH_MS
+        # timer. The integral bias is carried across segments of the
+        # same kind (see _segment_bias above).
+        err = abs(delta_left) - abs(delta_right)
+        bias += BALANCE_KI * err
+        if bias > BALANCE_BIAS_MAX:
+            bias = BALANCE_BIAS_MAX
+        elif bias < -BALANCE_BIAS_MAX:
+            bias = -BALANCE_BIAS_MAX
+        duty_l, duty_r = balanced_duties(
+            segment["duty_left"], segment["duty_right"],
+            delta_left, delta_right, bias=bias)
+        refresh_status = diffdrive.driveDuty(duty_l, duty_r,
+                                             SEGMENT_LEASE_MS)
+        since_refresh_ms = 0
 
     diffdrive.neutral()
+    _segment_bias[segment["kind"]] = bias
     time.sleep_ms(SETTLE_MS)
 
     return {

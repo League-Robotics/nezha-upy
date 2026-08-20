@@ -2272,3 +2272,33 @@ veers; open-loop duty, known behavior.
 **Device state**: reset, armed at idle prompt. A = square tour,
 B = 50 cm straight. Calibration loop: press B, measure travel X mm,
 next wheel_diameter_mm = 80.77 × (X / 500) for tovez.
+
+## 53. Straightness fix — encoder-balancing PI controller (stakeholder rejection of the veering tour)
+
+Stakeholder rejected the §52 tour: "isn't even remotely square... you
+can't give me a square turn unless you can drive straight." Correct —
+legs ran open-loop duty with ~30% right-lead; distance was
+encoder-true but heading drifted.
+
+Fix in `demo_square._run_segment()` (all offline-testable, 7 new unit
+tests):
+1. `balanced_duties()` — P-trim on |tick-progress| mismatch, re-issued
+   every 50 ms poll (also subsumes the lease refresh timer).
+2. P-only bench result: legs improved 30% → ~6% standing imbalance
+   (≈14°/leg arc) — classic P steady-state offset, not good enough.
+3. Added integral bias (BALANCE_KI=0.004, clamp ±8%) carried ACROSS
+   segments of the same kind (`_segment_bias`): leg 2+ / pivot 2+
+   start pre-compensated.
+
+Bench result (tovez, full tour): legs 1986/1978, 1967/1964, 1942/1952,
+1948/1942 — left/right within 0.15–0.5% (straight). Pivots converge as
+the bias learns: 28% → 10% → 0.3% → 6% asymmetry. All 8 segments
+reached; ~1.4 s/leg.
+
+Also this session: tovez robot power was OFF for a stretch (REPL dead,
+debug-probe reset + power-on recovered it); one mangled mid-power-off
+file copy (8555 vs 8334 bytes) was caught by size verification and
+recopied — verify-by-size is now the deploy discipline.
+
+Device re-armed: A = square tour (now straight-legged), B = 50 cm
+calibration drive (same balanced primitive).
