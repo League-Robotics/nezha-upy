@@ -1,7 +1,7 @@
 ---
 id: '006'
 title: Comment condensation, main.py rename, generator control loop
-status: planning-docs
+status: closed
 branch: sprint/006-comment-condensation-main-py-rename-generator-control-loop
 worktree: false
 use-cases:
