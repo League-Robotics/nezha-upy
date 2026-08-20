@@ -2634,3 +2634,73 @@ that question can be closed, and is not attempted here.
 5. Offline gate unchanged this session (docs/ticket-notes-only change):
    `uv run pytest tests/` — 244 passed, 518 subtests passed, same as
    ticket 012's own baseline; `git diff --exit-code -- vendor/` clean.
+
+---
+
+# Sprint 006 ticket 009 session, continued: leg 1 (encoder-sign) and
+# the explicit stop-verify closed — all three legs now covered
+
+Continues directly from the block above. The two gaps flagged in its
+own §62 and Summary item 3 — the encoder-sign-correct step-driven-drive
+leg, and an explicit `Δencoder ≈ 0` reading over the 2 s post-stop
+window — were run on tovez in a follow-up pass and are recorded here.
+Same target (tovez), same on-blocks setup; nothing above is edited or
+superseded, only completed.
+
+## 64. Leg 1 — encoder-sign correctness, step-driven via `with motion.drive(...)`, PASS
+
+700 ms per leg, wheels on blocks:
+
+- **FWD** `v=+1500 c/s`: `dLeft=+828.0`, `dRight=+1364.0` — both signs
+  **positive**.
+- **REV** `v=-1500 c/s`: `dLeft=-764.0`, `dRight=-970.0` — both signs
+  **negative**.
+
+Forward drives both encoders positive and reverse drives both
+negative — sign is correct on both wheels in both directions, no
+inversion on either channel. Closes the gap flagged in §62 above.
+
+**Response-asymmetry note, not a sign fault**: the same left/right
+response asymmetry already tracked in
+`clasi/issues/tovez-left-right-wheel-response-asymmetry.md` shows up
+again here — forward ratio (right/left) 1364/828 ≈ 1.65, reverse ratio
+970/764 ≈ 1.27. Recorded here as **corroborating** that separately-
+filed issue on the new generator-driven step interface, not as a newly
+discovered defect and explicitly **not** a sign fault — both signs are
+correct in both directions; only the magnitudes differ per wheel,
+consistent with every prior tovez session in this log (§7d, §13, §54).
+
+## 65. Explicit stop-verify — Δencoder ≈ 0 over 2 s after `stop()`, PASS
+
+Generator run via `motion.drive(...)`, `mv.stop()` called at iteration
+8, then broke out of the loop. Encoder positions sampled immediately
+after `stop()` returned, then sampled again after a 2000 ms wait:
+
+- `dLeft = +0.0`, `dRight = +0.0` over the full 2 s window — genuinely
+  static, not merely the commanded-duty register reading zero. This is
+  the real motion check the ticket's own criterion asks for, distinct
+  from (and now supplementing) the duty-based evidence in §61's defect-1
+  retest.
+- `duty (0.0, 0.0)`, `lastError` `ok` at the end. Robot left safe.
+
+Closes the second gap flagged in §61/§62/Summary above.
+
+## Summary — all three legs now covered
+
+1. **Ticket 009's three bench legs are now all covered with logged
+   evidence**: encoder-sign-correct step-driven drive (§64, this
+   block), break-mid-move stop with an explicit `Δencoder ≈ 0` over-2-s
+   reading (§65, this block, supplementing §61's duty-based evidence),
+   and abandoned-generator watchdog/lease zero (§62 of the block
+   above).
+2. The left/right response asymmetry reproduces on the new
+   generator-driven step interface exactly as it does on `driveDuty()`
+   elsewhere in this log — corroborates, does not newly discover,
+   `clasi/issues/tovez-left-right-wheel-response-asymmetry.md`; not a
+   sign defect, both directions/both wheels sign-correct.
+3. Both original defects (mode latch, break-mid-move stop) remain
+   fixed and bench-confirmed per the block above; nothing in this
+   follow-up pass changes that.
+4. Offline gate unchanged (docs-only change): `uv run pytest tests/` —
+   244 passed, 518 subtests passed; `git diff --exit-code -- vendor/`
+   clean.

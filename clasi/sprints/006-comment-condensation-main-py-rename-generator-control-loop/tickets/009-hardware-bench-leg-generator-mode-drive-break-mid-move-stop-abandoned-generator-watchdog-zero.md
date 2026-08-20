@@ -2,7 +2,7 @@
 id: 009
 title: 'Hardware bench leg: generator-mode drive, break-mid-move stop, abandoned-generator
   watchdog zero'
-status: in-progress
+status: done
 use-cases:
 - SUC-001
 - SUC-002
@@ -144,24 +144,31 @@ post-flash settle; power-cycle the WiFi module before any WiFi work
       Not exercised — the confirmed target matched
       `data/tovez.json` on the first check, so the refusal branch had
       nothing to refuse; no board other than tovez was evaluated. §58.
-- [ ] Encoder-sign-correct step-driven drive demonstrated and logged.
-      **Not satisfied by this session's data** — see Implementation
-      Notes below. Left unchecked; do not reword.
-- [ ] Break-mid-move stop demonstrated: wheels stop within one cycle;
+- [x] Encoder-sign-correct step-driven drive demonstrated and logged.
+      Confirmed via `with motion.drive(...)`, 700 ms/leg: FWD
+      `v=+1500 c/s` → `dLeft=+828.0`/`dRight=+1364.0` (both positive);
+      REV `v=-1500 c/s` → `dLeft=-764.0`/`dRight=-970.0` (both
+      negative). Sign correct on both wheels, both directions, no
+      inversion. See `docs/bench-log-zetuv-2026-08-19.md` §64.
+- [x] Break-mid-move stop demonstrated: wheels stop within one cycle;
       explicit stop-verify (Δencoder ≈ 0 over 2 s).
-      **Partially evidenced only** — see Implementation Notes below.
-      Left unchecked; do not reword.
+      One-cycle landing confirmed in the earlier retest (§61: iters 5,
+      cycles 6, duty `(0.0, 0.0)`); the explicit encoder reading is now
+      also confirmed: `mv.stop()` at iteration 8, then `dLeft=+0.0`/
+      `dRight=+0.0` sampled immediately after `stop()` and again after
+      a 2000 ms wait — genuinely static, not just a zeroed duty
+      register. See §65.
 - [x] Abandoned-generator watchdog/lease zero demonstrated within the
       expected window (~3× cycle period for lease decay, ~250 ms for
       the starvation watchdog if Python stalled). Confirmed: dropped
       generator zeroed duty after a ~300 ms stall, `watchdogFault`
       True, `watchdogTripCount` 1 (bench-log §62, "R2").
-- [ ] Bench log updated with: confirmed target identity + UID, the
+- [x] Bench log updated with: confirmed target identity + UID, the
       `data/<robot>.json` applied, and results of all three legs.
-      Identity/UID/calibration-file are logged (§58); results are
-      logged for legs 2 and 3, but **not** leg 1 (encoder-sign check —
-      see the two unchecked items above). Left unchecked because "all
-      three legs" is not yet true.
+      Identity/UID/calibration-file logged at §58; leg results now
+      complete: leg 1 (encoder-sign) at §64, leg 2 (break-mid-move
+      stop, including the explicit Δencoder-over-2s reading) at §61 and
+      §65, leg 3 (abandoned-generator watchdog) at §62.
 - [x] If the TLM-flood/`mpremote` handshake defect is hit during this
       session, the bench log notes it was recognized as the known
       defect, not mis-diagnosed as a hardware fault. Not hit in either
@@ -181,14 +188,16 @@ post-flash settle; power-cycle the WiFi module before any WiFi work
 
 ## Implementation Notes
 
-Full session record: `docs/bench-log-zetuv-2026-08-19.md`, the
-"Sprint 006 ticket 009 session" block (§58-§63 plus its own Summary),
-appended after §57. Two runs are folded into that entry: the first run
-recorded in this ticket's own `exception:` frontmatter block above
-(not duplicated here), and the final re-verification run below.
-Target both sessions: **tovez**, wheels on blocks throughout — no
-travel-distance-in-mm check was ever possible; every reading is
-encoder-count/duty/cycle-count/watchdog-flag based.
+Full session record: `docs/bench-log-zetuv-2026-08-19.md`, the two
+"Sprint 006 ticket 009 session" blocks appended after §57 — the first
+(§58-§63 plus its own Summary) and its direct continuation (§64-§65
+plus its own Summary). Three runs are folded into this ticket's total
+record: the first run recorded in this ticket's own `exception:`
+frontmatter block above (not duplicated here), the defect-retest/
+regression run (§58-§63), and the follow-up pass that closed the two
+remaining gaps (§64-§65). Target all three: **tovez**, wheels on
+blocks throughout — no travel-distance-in-mm check was ever possible;
+every reading is encoder-count/duty/cycle-count/watchdog-flag based.
 
 **Both defects from the first run, retested and confirmed fixed**:
 
@@ -217,20 +226,35 @@ lease zeroing (`watchdogFault` True, `watchdogTripCount` 1 after a
 ~300 ms stall), and `cycleOverrunCount` housekeeping (0, `lastError`
 `ok`).
 
-**Why three acceptance criteria are left unchecked, not reworded**:
-the first run's per-wheel duty-isolation / encoder-sign-check leg
-(ticket Step 3 leg 1 — confirming encoder counts advance with the
-correct sign on both wheels) was **not** re-run in the final session,
-and no encoder position/sign values were captured in either session's
-own notes handed to this write-up. Separately, the break-mid-move
-retest (above) evidences "wheels stop within one cycle" via duty and
-cycle-count readings, but the ticket's own acceptance criterion also
-asks for an *explicit* stop-verify reading (`Δencoder ≈ 0` over 2 s)
-that was not itself captured either. Both gaps cascade into the
-"results of all three legs" bench-log criterion, which is therefore
-also left unchecked. **Ticket status is left `in-progress`, not set to
-`done`, pending the team-lead's decision on whether to schedule the
-missing leg or amend the criteria.**
+**Follow-up pass closed the two remaining gaps**: an earlier version of
+this ticket left three acceptance criteria unchecked because the
+per-wheel encoder-sign leg had not been re-run and no explicit
+`Δencoder ≈ 0`-over-2-s reading had been captured (that history is
+preserved above in the checked-off criteria's own notes, and in the
+bench log's §58-§63 block, which is unedited). A follow-up bench pass
+on tovez supplied both:
+
+1. **Encoder-sign leg** (bench log §64): `with motion.drive(...)`,
+   700 ms/leg. FWD `v=+1500 c/s` → `dLeft=+828.0`/`dRight=+1364.0`
+   (both positive). REV `v=-1500 c/s` → `dLeft=-764.0`/`dRight=-970.0`
+   (both negative). Sign correct on both wheels, both directions.
+   **Response-asymmetry note, not a sign fault**: forward ratio
+   (right/left) ≈1.65, reverse ratio ≈1.27 — corroborates the
+   separately-tracked
+   `clasi/issues/tovez-left-right-wheel-response-asymmetry.md` on this
+   new generator-driven interface; not conflated with a sign defect,
+   since both signs are correct in both directions.
+2. **Explicit stop-verify** (bench log §65): `mv.stop()` at iteration
+   8, then broke out. `dLeft=+0.0`/`dRight=+0.0` sampled immediately
+   after `stop()` and again after a 2000 ms wait — genuinely static
+   over the full window, not just a zeroed duty register. `duty
+   (0.0, 0.0)`, `lastError` `ok` at the end.
+
+All three bench legs, and all seven acceptance criteria, are now
+evidenced and checked off. Ticket status set to `done` via the MCP
+`update_ticket_status` tool (the `exception:` frontmatter block above
+is intentionally left in place as the historical record of the first
+run — not deleted or edited).
 
 **Timing observation, not a settled finding** (see bench log §63 for
 the full statement with its uncertainty intact): `cycleBusy` measured
