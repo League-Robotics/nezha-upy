@@ -2302,3 +2302,51 @@ recopied — verify-by-size is now the deploy discipline.
 
 Device re-armed: A = square tour (now straight-legged), B = 50 cm
 calibration drive (same balanced primitive).
+
+## 54. Stakeholder rejection #2 — full teardown and rebuild on the bench (tovez)
+
+Stakeholder rejected the §53 square outright and directed: verify the
+encoder-configuration hypothesis first, tear all adjustments down,
+rebuild, and bench-verify before reporting.
+
+**Encoder-config hypothesis tested (port-swap experiment)**: single-
+wheel drives at 15%/1 s under BOTH port mappings. Config A (left=p2,
+right=p1): p2=1036, p1=1663. Config B (swapped): p1=1628, p2=1105. The
+~1.5-1.6x asymmetry FOLLOWS THE PHYSICAL PORT/MOTOR, not the software
+side → binding/leaf configs (audited: symmetric, only port+sign differ)
+are exonerated. The duty-sweep ratio COMPRESSES with duty (1.47@15%,
+1.22@20%, 1.20@25%) → additive-friction plant asymmetry (left motor
+sticky; matches its proven higher breakaway), NOT encoder scaling
+(which would be duty-independent). Encoders consistent; tick-locking IS
+valid for straightness. OTOS not fitted/answering on tovez (init False)
+— no optical ground truth available.
+
+**Stage-0 baseline (all adjustments off)**: raw 15% combined, 1 s ×3:
+left 1089/1095/1150 vs right 1767/1617/1722 (ratio ~1.5, repeatable).
+
+**Actual geometric killers found in own telemetry**: (1) coast
+overshoot — corners over-rotated +0.5..19% randomly (pinwheel); (2)
+corner 1 always unlearned — main.py's reload-per-press wiped learned
+state; (3) 15% pivots last ~300 ms — too fast for 50 ms polls to act.
+
+**Rebuild**: two-phase drive (full duty → 12% creep at 80% leg / 50%
+pivot progress); adaptive coast-lead (stop early by learned per-kind
+coast, seeds leg=60/pivot=100); PI balance retained (valid per the
+port-swap evidence) with bench-informed bias seed (−3.5%); pivots
+slowed to 12% duty; polls 25 ms; learned state persisted to
+/tour_state.csv across main.py's module reloads.
+
+**Verification (two consecutive full tours, FINAL post-coast deltas)**:
+Run 1 — legs +2.9/+1.1/+1.6/+0.8%, corners −3.6/−1.1/−0.7/−1.4%.
+Run 2 — legs −0.5/−1.9/+0.9/−0.5%, corners −0.7/+0.3/+7.0/+1.9%.
+L/R leg match ≤1.3%. 14/16 segments within ±4%; worst corner +7%
+(≈6°, one occurrence).
+
+**Remaining systematic not measurable without external heading truth**:
+absolute corner angle scales with TRACKWIDTH_MM (128, provenance
+uncertain for tovez). If the square consistently over/under-rotates at
+EVERY corner by the same amount, trim trackwidth_mm:
+new = 128 × (observed_turn_deg / 90).
+
+Device re-armed (A = tour, B = 50 cm straight, both on the rebuilt
+controller). 228 offline tests green.

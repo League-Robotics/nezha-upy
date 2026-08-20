@@ -88,8 +88,8 @@ def test_pivot_segments_are_left_ccw_matching_kernel_twist_sign():
     for s in segments:
         if s["kind"] != "pivot":
             continue
-        assert s["duty_left"] == -demo_square.SEGMENT_DUTY_PERCENT
-        assert s["duty_right"] == demo_square.SEGMENT_DUTY_PERCENT
+        assert s["duty_left"] == -demo_square.PIVOT_DUTY_PERCENT
+        assert s["duty_right"] == demo_square.PIVOT_DUTY_PERCENT
         implied_twist = 0.5 * (s["duty_right"] - s["duty_left"])
         assert implied_twist > 0  # CCW == LEFT
         assert s["target_ticks"] == pytest.approx(

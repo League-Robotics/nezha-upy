@@ -561,7 +561,8 @@ SEGMENT_TIMEOUT_MS = 6000     # CORRECTED sprint 004 ticket 001: overall
                                # was ~1921) is smaller still (~0.90x) --
                                # margin only grows again, no adjustment
                                # needed.
-POLL_INTERVAL_MS = 50
+POLL_INTERVAL_MS = 25   # finer cut resolution: a 12%-duty pivot
+                         # covers ~20-30 ticks per 25 ms poll
 SETTLE_MS = 1200              # TOUR_SQUARE's own rest-to-rest settle
 
 # Wiring -- config-driven from /robot.json's motors group (same
@@ -635,8 +636,8 @@ def build_square_tour(ticks_per_mm=TICKS_PER_MM, trackwidth_mm=TRACKWIDTH_MM,
         segments.append({
             "kind": "pivot",
             "target_ticks": pivot_ticks,
-            "duty_left": -SEGMENT_DUTY_PERCENT,
-            "duty_right": SEGMENT_DUTY_PERCENT,
+            "duty_left": -PIVOT_DUTY_PERCENT,
+            "duty_right": PIVOT_DUTY_PERCENT,
         })
     return segments
 
@@ -660,9 +661,65 @@ BALANCE_KI = 0.004       # [%/tick per poll] integral: kills the P-only
 BALANCE_BIAS_MAX = 8.0   # [%] integral wind-up clamp
 
 # Learned feedforward bias, carried ACROSS segments of the same kind
-# within a tour run (leg 2+ / pivot 2+ start pre-compensated instead of
-# re-learning the plant asymmetry from zero each time).
-_segment_bias = {}
+# and across runs within a boot. Seeded from the bench-measured plant
+# asymmetry (stage-0 baseline 2026-08-19: right/port-1 out-runs
+# left/port-2 ~1.5x at 15% duty -- friction, port-swap-proven a
+# physical-motor property; negative bias pre-speeds the left).
+BALANCE_BIAS_SEED = -3.5   # [%]
+_segment_bias = {"leg": BALANCE_BIAS_SEED, "pivot": BALANCE_BIAS_SEED}
+
+# Two-phase segment drive: full duty to CREEP_START_FRACTION of target,
+# then creep -- kills the coast overshoot that turned every corner into
+# +0.5..19% over-rotation (pinwheel squares). Creep must stay above the
+# left motor's combined-load breakaway (>=~10-12%).
+CREEP_DUTY_PERCENT = 12.0
+CREEP_START_FRACTION = {"leg": 0.80, "pivot": 0.50}
+
+# Pivots are SHORT (~386 ticks): at 15% they last ~300 ms -- too fast
+# for the creep/lead machinery to act (bench run 1: corner misses
+# oscillated +28%..-17%). Slower pivots give the controller room.
+PIVOT_DUTY_PERCENT = 12.0
+
+# Adaptive coast compensation: stop driving this many ticks BEFORE the
+# target and let momentum land the rest; updated per segment kind from
+# each segment's measured final-vs-target miss.
+_coast_lead = {"leg": 60.0, "pivot": 100.0}   # bench-informed seeds
+COAST_LEAD_LEARN = 0.5   # [1] fraction of the miss folded into the lead
+COAST_LEAD_MAX = 200.0   # [ticks]
+
+# Learned-state persistence: main.py's repeatability mechanism RELOADS
+# this module on every button press (sys.modules.pop + import), which
+# would wipe the learned bias/lead each run -- corner 1 would restart
+# from seeds forever. A tiny CSV state file carries them across reloads
+# (fail-soft both ways; delete /tour_state.csv to reset learning).
+STATE_PATH = "tour_state.csv"
+
+
+def _load_state():
+    try:
+        with open(STATE_PATH, "r") as f:
+            parts = f.read().split(",")
+        if len(parts) == 4:
+            _segment_bias["leg"] = float(parts[0])
+            _segment_bias["pivot"] = float(parts[1])
+            _coast_lead["leg"] = float(parts[2])
+            _coast_lead["pivot"] = float(parts[3])
+    except (OSError, ValueError):
+        pass
+
+
+def _save_state():
+    try:
+        with open(STATE_PATH, "w") as f:
+            f.write("%f,%f,%f,%f" % (
+                _segment_bias["leg"], _segment_bias["pivot"],
+                _coast_lead["leg"], _coast_lead["pivot"]))
+    except OSError:
+        pass
+
+
+if _ON_DEVICE:
+    _load_state()
 
 
 def balanced_duties(duty_left, duty_right, delta_left, delta_right,
@@ -711,7 +768,8 @@ def _run_segment(index, segment):
     start_left = out0["positionLeft"]
     start_right = out0["positionRight"]
 
-    bias = _segment_bias.get(segment["kind"], 0.0)
+    bias = _segment_bias.get(segment["kind"], BALANCE_BIAS_SEED)
+    lead = _coast_lead.get(segment["kind"], 40.0)
     duty_l0, duty_r0 = balanced_duties(
         segment["duty_left"], segment["duty_right"], 0.0, 0.0, bias=bias)
     status = diffdrive.driveDuty(duty_l0, duty_r0, SEGMENT_LEASE_MS)
@@ -730,23 +788,35 @@ def _run_segment(index, segment):
         out = diffdrive.output()
         mean_delta, delta_left, delta_right = _mean_abs_delta(
             out, start_left, start_right)
-        if mean_delta >= segment["target_ticks"]:
+        # Adaptive early stop: cut drive a learned coast-lead BEFORE the
+        # target; momentum lands the remainder (measured after settle).
+        if mean_delta >= segment["target_ticks"] - lead:
             reached = True
             break
+        # Two-phase duty: full to this kind's creep fraction, then creep.
+        if mean_delta >= (segment["target_ticks"]
+                          * CREEP_START_FRACTION[segment["kind"]]):
+            base = CREEP_DUTY_PERCENT
+        else:
+            base = None
         # Encoder-balancing PI trim, re-issued EVERY poll (50 ms) --
         # keeps the segment straight/symmetric and renews the lease far
-        # inside SEGMENT_LEASE_MS, subsuming the old LEASE_REFRESH_MS
-        # timer. The integral bias is carried across segments of the
-        # same kind (see _segment_bias above).
+        # inside SEGMENT_LEASE_MS. The integral bias is carried across
+        # segments of the same kind (see _segment_bias above).
         err = abs(delta_left) - abs(delta_right)
         bias += BALANCE_KI * err
         if bias > BALANCE_BIAS_MAX:
             bias = BALANCE_BIAS_MAX
         elif bias < -BALANCE_BIAS_MAX:
             bias = -BALANCE_BIAS_MAX
+        if base is None:
+            duty_base_l = segment["duty_left"]
+            duty_base_r = segment["duty_right"]
+        else:
+            duty_base_l = base if segment["duty_left"] > 0 else -base
+            duty_base_r = base if segment["duty_right"] > 0 else -base
         duty_l, duty_r = balanced_duties(
-            segment["duty_left"], segment["duty_right"],
-            delta_left, delta_right, bias=bias)
+            duty_base_l, duty_base_r, delta_left, delta_right, bias=bias)
         refresh_status = diffdrive.driveDuty(duty_l, duty_r,
                                              SEGMENT_LEASE_MS)
         since_refresh_ms = 0
@@ -754,6 +824,20 @@ def _run_segment(index, segment):
     diffdrive.neutral()
     _segment_bias[segment["kind"]] = bias
     time.sleep_ms(SETTLE_MS)
+
+    # Post-settle FINAL measurement (includes coast) -- this is the
+    # geometric truth the tour actually traces; the coast lead learns
+    # from the miss so the NEXT segment of this kind lands closer.
+    out_final = diffdrive.output()
+    mean_delta, delta_left, delta_right = _mean_abs_delta(
+        out_final, start_left, start_right)
+    miss = mean_delta - segment["target_ticks"]
+    lead += COAST_LEAD_LEARN * miss
+    if lead < 0.0:
+        lead = 0.0
+    elif lead > COAST_LEAD_MAX:
+        lead = COAST_LEAD_MAX
+    _coast_lead[segment["kind"]] = lead
 
     return {
         "index": index,
@@ -815,6 +899,7 @@ def run():
               "elapsed_ms", result["elapsed_ms"])
 
     diffdrive.neutral()
+    _save_state()
     print("demo_square: tour complete")
 
 
@@ -849,6 +934,7 @@ def run_single_leg(distance_mm=LEG_DISTANCE_MM, ticks_per_mm=TICKS_PER_MM):
           "elapsed_ms", result["elapsed_ms"])
 
     diffdrive.neutral()
+    _save_state()
     print("demo_square: run_single_leg complete")
     return result
 
