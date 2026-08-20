@@ -328,8 +328,8 @@ ticket instead makes the two production entry points EXPLICIT:
 ``main.py``'s ``run_tour()``/``run_straight_drive()`` both call
 ``demo_square.run()``/``demo_square.run_single_leg(...)`` directly
 after their own ``sys.modules.pop(...) + import demo_square`` (see
-``src/main_zetuv_demo.py``) -- production behaviour therefore no longer
-depends AT ALL on what a bare ``import demo_square`` does by itself.
+``src/main.py``) -- production behaviour therefore no longer depends
+AT ALL on what a bare ``import demo_square`` does by itself.
 The bottom of this file keeps a convenience auto-run for the
 STANDALONE bench-debug entry point this project has used throughout
 (``mpremote connect PORT run src/demo_square.py``, documented at the
@@ -962,9 +962,9 @@ def run_single_leg(distance_mm=LEG_DISTANCE_MM, ticks_per_mm=TICKS_PER_MM):
 # "Auto-run trigger changed from _ON_DEVICE to a __name__ guard" section
 # for why this changed this ticket, and for the one new, disclosed,
 # not-yet-bench-verified assumption it carries (mpremote's own `run`
-# execution context). Production button A/B behaviour (src/
-# main_zetuv_demo.py) calls run()/run_single_leg() explicitly and does
-# NOT depend on this guard at all.
+# execution context). Production button A/B behaviour (src/main.py)
+# calls run()/run_single_leg() explicitly and does NOT depend on this
+# guard at all.
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
     run()

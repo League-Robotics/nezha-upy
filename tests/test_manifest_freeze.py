@@ -8,23 +8,24 @@ m5.md`'s acceptance criterion this file encodes.
 named exception for demo/bench SCRIPTS that are deliberately never
 frozen -- `src/demo_square.py` is the first: it is a bench demo
 script, not a framework module, run via `mpremote run` (source upload
-+ execute) or, on-device, imported explicitly by `src/
-main_zetuv_demo.py`'s own `run_tour()`/`run_straight_drive()` (sprint
-006 ticket 001: a bare `import demo_square` no longer auto-runs
-anything by itself -- see that module's own docstring's "Auto-run
-trigger" section). It stays off the freeze list regardless: freezing
-would need a full rebuild+reflash unrelated to any single ticket's own
-scope. This does not weaken the invariant for FRAMEWORK modules
-(config.py, motion.py, comms.py, ...), which must still be frozen and
-still fail this test if they drift out of manifest.py.
++ execute) or, on-device, imported explicitly by `src/main.py`'s own
+`run_tour()`/`run_straight_drive()` (sprint 006 ticket 001: a bare
+`import demo_square` no longer auto-runs anything by itself -- see
+that module's own docstring's "Auto-run trigger" section). It stays
+off the freeze list regardless: freezing would need a full
+rebuild+reflash unrelated to any single ticket's own scope. This does
+not weaken the invariant for FRAMEWORK modules (config.py, motion.py,
+comms.py, ...), which must still be frozen and still fail this test if
+they drift out of manifest.py.
 
-`src/main_zetuv_demo.py` (sprint 003 ticket 001) is the second entry:
-it is the version-controlled copy of zetuv's on-device `main.py` (the
+`src/main.py` (sprint 003 ticket 001, renamed to its current filename
+in sprint 006 ticket 001) is the second entry: it is the
+version-controlled copy of zetuv's on-device `main.py` (the
 filesystem student-code slot -- `src/boot.py`'s own module docstring
 confirms, directly against `codal_port/main.c`, that a FROZEN module
-literally named `main` would never be found by `mp_main()`'s
-filesystem-only `main.py` probe, so this file must stay off the
-freeze list by construction, not merely by convention)."""
+literally named `main` would never be found by
+`mp_main()`'s filesystem-only `main.py` probe, so this file must stay
+off the freeze list by construction, not merely by convention)."""
 
 import re
 from pathlib import Path
@@ -35,7 +36,7 @@ SRC_DIR = REPO_ROOT / "src"
 
 # Bench/demo scripts and on-device-main.py copies, never frozen -- see
 # this module's own docstring.
-_BENCH_ONLY_MODULES = {"main_zetuv_demo.py"}
+_BENCH_ONLY_MODULES = {"main.py"}
 
 
 def _actual_src_modules():

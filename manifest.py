@@ -54,11 +54,11 @@
 # from the list below -- it is a bench demo SCRIPT, not a framework
 # module. As of sprint 006 ticket 001, a bare `import demo_square` no
 # longer auto-runs anything by itself (its own module docstring's
-# "Auto-run trigger" section) -- production callers (src/
-# main_zetuv_demo.py) call `demo_square.run()`/`run_single_leg()`
-# explicitly. It remains off this freeze list regardless: freezing
-# would need a full `--clean` rebuild+reflash unrelated to this
-# ticket's own scope, and its standalone bench-debug entry point
+# "Auto-run trigger" section) -- production callers (src/main.py) call
+# `demo_square.run()`/`run_single_leg()` explicitly. It remains off
+# this freeze list regardless: freezing would need a full `--clean`
+# rebuild+reflash unrelated to this ticket's own scope, and its
+# standalone bench-debug entry point
 # (`mpremote run src/demo_square.py`, source upload + execute) still
 # needs no freezing at all. See that module's own docstring and
 # `tests/test_manifest_freeze.py`'s `_BENCH_ONLY_MODULES` for the same

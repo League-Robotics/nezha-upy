@@ -14,10 +14,10 @@ it is the student-code slot, not a frozen module (freezing a module
 named ``main`` would never be found by ``mp_main()``'s filesystem-only
 probe -- see ``src/boot.py``'s docstring for the same reasoning applied
 to why ``boot.py`` itself is named ``boot``, not ``main``). This copy
-under ``src/main_zetuv_demo.py`` exists purely for version control --
-it is never imported from here, never frozen, and has no effect except
-when copied onto a device's filesystem as ``main.py``
-(``mpremote ... fs cp src/main_zetuv_demo.py :main.py``).
+under ``src/main.py`` exists purely for version control -- it is never
+imported from here, never frozen, and has no effect except when copied
+onto a device's filesystem as ``main.py``
+(``mpremote ... fs cp src/main.py :main.py``).
 
 **Why ``demo_square`` is deployed as a precompiled ``demo_square.mpy``
 and invoked via ``sys.modules.pop`` + ``import``, not raw-source

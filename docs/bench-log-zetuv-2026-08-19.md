@@ -2437,3 +2437,18 @@ Process note: the earlier boot scroll-brick is fixed at three layers
 boot no longer begins/starts the kernel fiber (staged-config contract)
 so consumer reconfigure is safe — power-on path verified up to the
 dark motor board.
+
+## 57. Repo-side rename — src/main_zetuv_demo.py -> src/main.py (sprint 006 ticket 001)
+
+Repo-side only, no bench/hardware action. `src/main_zetuv_demo.py`
+(the version-controlled copy of the on-device student-code entry
+point, deployed to the device filesystem as `main.py`) renamed to
+`src/main.py` via `git mv`, preserving history. All references updated:
+`manifest.py`'s freeze-list comment, `tests/test_manifest_freeze.py`'s
+`_BENCH_ONLY_MODULES` guard and docstring prose, `src/demo_square.py`'s
+two comment references, and the renamed file's own module docstring
+(the name-identifying sentences only — full docstring condensation is
+ticket 002's scope, next). `src/main.py` stays OUT of `manifest.py`'s
+freeze list, unchanged: a frozen module literally named `main` would
+never be found by `mp_main()`'s filesystem-only probe. Offline gate
+only this session — `uv run pytest` green, unchanged pass count.
