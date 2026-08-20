@@ -65,6 +65,15 @@ Mode g_mode = Mode::kUnlatched;
 // reference/modrobot/modrobot.cpp:1478-1487.
 bool g_stepInFlight = false;
 
+// True once begin_fn has actually called g_kernel->begin() -- mirrors the
+// vendored kernel's own private begun_ flag, the same one
+// checkCommandable() gates on (vendor/differential_drive.cpp:387-389).
+// NOT Output.ready: ready is begun_ && fullDutyVelocity > 0
+// (vendor/differential_drive.cpp:961), so it would also refuse a
+// raw-duty-only step() configuration that never calibrates for velocity.
+// This flag tracks begin()-was-called alone, same as the kernel does.
+bool g_begun = false;
+
 // The kernel's two Motor leaves and the DifferentialDrive object cannot
 // be default-constructed (real references/config only exist at
 // configure() time). Placement-new into static storage defers
@@ -222,6 +231,10 @@ extern "C" mp_obj_t diffdrive_configure_fn(size_t n_args, const mp_obj_t* pos_ar
   g_rightLeaf = new (g_rightLeafStorage) Native::NezhaLeaf(broker, rightConfig);
   g_kernel = new (g_kernelStorage) DiffDrive::DifferentialDrive(
       *g_leftLeaf, *g_rightLeaf, g_clock, g_sleeper, g_launcher);
+  // Fresh kernel instance -> fresh (unbegun) begun_ -- reconfigure resets
+  // everything (see this function's own header comment); g_begun shadows
+  // that per-instance state, so it resets with it.
+  g_begun = false;
 
   DiffDrive::DifferentialDrive::Config cfg = g_kernel->config();
   cfg.maxDuty = mp_obj_get_float(args[kArgMaxDuty].u_obj);
@@ -266,7 +279,11 @@ extern "C" mp_obj_t diffdrive_begin_fn(void) {
   if (g_kernel == nullptr) {
     return statusObj(DiffDrive::DifferentialDrive::Status::kRefusedUnconfigured);
   }
-  return statusObj(g_kernel->begin());
+  const DiffDrive::DifferentialDrive::Status status = g_kernel->begin();
+  // begin() ran, regardless of status -- vendor sets its own begun_ the
+  // same way, unconditionally (vendor/differential_drive.cpp:330).
+  g_begun = true;
+  return statusObj(status);
 }
 
 extern "C" mp_obj_t diffdrive_start_fn(void) {
@@ -277,11 +294,16 @@ extern "C" mp_obj_t diffdrive_start_fn(void) {
     mp_raise_msg(&mp_type_RuntimeError,
                  MP_ERROR_TEXT("start() refused: step() already latched step mode this boot"));
   }
-  if (g_mode == Mode::kUnlatched) {
+  // Latch rule: a refusal leaves g_mode exactly as it found it -- only a
+  // call that actually does the thing claims the mode. So call start()
+  // first and let ITS status decide; kRefusedNotBegun (or any future
+  // refusal) must not touch g_mode.
+  const DiffDrive::DifferentialDrive::Status status = g_kernel->start();
+  if (g_mode == Mode::kUnlatched && status == DiffDrive::DifferentialDrive::Status::kOk) {
     g_mode = Mode::kFiber;
     g_sleeper.setStepMode(false);
   }
-  return statusObj(g_kernel->start());
+  return statusObj(status);
 }
 
 // diffdrive.step() -- one full kernel cycle inline in the caller's
@@ -301,6 +323,14 @@ extern "C" mp_obj_t diffdrive_step_fn(void) {
   if (g_stepInFlight) {
     mp_raise_msg(&mp_type_RuntimeError,
                  MP_ERROR_TEXT("step() re-entered while a step is already in flight"));
+  }
+  // Latch rule (mirrors diffdrive_start_fn's own fix above): a refusal
+  // leaves g_mode exactly as it found it -- only a step() that actually
+  // runs a kernel cycle claims kStep. step() itself returns void and has
+  // no begun-state check of its own (unlike start()'s kRefusedNotBegun),
+  // so that check has to happen here, before either the latch or the call.
+  if (!g_begun) {
+    return statusObj(DiffDrive::DifferentialDrive::Status::kRefusedNotBegun);
   }
   if (g_mode == Mode::kUnlatched) {
     g_mode = Mode::kStep;
