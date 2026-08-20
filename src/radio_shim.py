@@ -230,14 +230,14 @@ class RadioLink:
             else:
                 flags |= FLAG_END
 
-            frame = bytearray(FRAME_HEADER + chunk)
-            frame[0] = self._tx_seq & 0xFF
+            # Built by concatenation, never mutation: this port compiles
+            # out MICROPY_PY_ARRAY_SLICE_ASSIGN, so bytearray slice-store
+            # raises TypeError ON DEVICE only (bench 2026-08-19: crashed
+            # boot's banner send and scroll-bricked the display).
+            seq = self._tx_seq & 0xFF
             self._tx_seq = (self._tx_seq + 1) & 0xFF
-            frame[1] = flags
-            frame[2] = chunk
-            if chunk > 0:
-                frame[FRAME_HEADER:FRAME_HEADER + chunk] = payload[off:off + chunk]
-            frames.append(bytes(frame))
+            frame = bytes((seq, flags, chunk)) + bytes(payload[off:off + chunk])
+            frames.append(frame)
 
             off += chunk
             first = False

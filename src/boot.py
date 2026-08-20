@@ -91,7 +91,8 @@ frozen modules hold the code"). A frozen, robot-agnostic module
 therefore needs ONE fixed, generic on-device path, not a robot-specific
 filename ``config.py``'s own docstring example (``"/tovez.json"``) would
 only work for one specific robot. This module fixes that path as
-``CONFIG_PATH = "/robot.json"`` -- whichever robot's JSON content is
+``CONFIG_PATH = "robot.json"   # BARE name: this port ENOENTs the
+                              # leading-slash form (bench-confirmed)`` -- whichever robot's JSON content is
 copied onto a given unit's filesystem at bench time, it goes under this
 one name. ``docs/bench-acceptance-procedures.md``'s ticket-010 revision
 records this convention for the bench operator.
@@ -151,7 +152,8 @@ __all__ = [
 ]
 
 # See module docstring "On-device config path convention".
-CONFIG_PATH = "/robot.json"
+CONFIG_PATH = "robot.json"   # BARE name: this port ENOENTs the
+                              # leading-slash form (bench-confirmed)
 
 # Matches wifi_at.load_secrets()'s own default -- gitignored, provided
 # locally at bench time (CLAUDE.md: "No secrets in the repo").
@@ -285,8 +287,15 @@ def run(config_path=CONFIG_PATH, secrets_path=SECRETS_PATH,
     if result.robot_config is not None and diffdrive_module is not None:
         kwargs = config.diffdrive_configure_kwargs(result.robot_config)
         diffdrive_module.configure(**kwargs)
-        diffdrive_module.begin()
-        diffdrive_module.start()
+        # DELIBERATELY no begin()/start() here (bench 2026-08-19): the
+        # binding's configure() is placement-new -- a later consumer
+        # (e.g. the button demo, which supplies PID/Stage-A gains boot's
+        # kwargs don't carry) re-configures, and doing that UNDER a live
+        # kernel fiber orphans the fiber and kills all motion (observed:
+        # drive 'ok' with zero encoder movement). Boot stages a valid
+        # config; the FIRST motion consumer begins/starts the fiber.
+        # Wire-driven motion at boot (no consumer) will need a guarded
+        # reconfigure in the binding first -- flagged in the bench log.
         result.diffdrive_ready = True
 
         move_queue = motion.MoveQueue(diffdrive_module)
@@ -332,9 +341,16 @@ def run(config_path=CONFIG_PATH, secrets_path=SECRETS_PATH,
     if run_every is not None:
         run_every(callback=result.pump_timer.tick, ms=pump_period_ms)
 
-    # --- Step 5: banner/boot/READY -- always, regardless of steps 1/2. -
-    result.comms.send_banner()
-    result.comms.send_ready()
+    # --- Step 5: banner/boot/READY -- always, regardless of steps 1/2.
+    # FAIL-SOFT (bench 2026-08-19): a transport fault here used to
+    # propagate out of run(), and the port scrolls uncaught boot
+    # exceptions on the LED display forever -- the robot LOOKS bricked.
+    # Boot must never die for a diagnostics banner.
+    try:
+        result.comms.send_banner()
+        result.comms.send_ready()
+    except Exception as exc:
+        print("BOOT: banner/ready send failed (continuing):", exc)
 
     # --- Step 6: boot must not block. -----------------------------------
     # Nothing above performs a blocking wait -- every call is either

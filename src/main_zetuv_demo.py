@@ -239,6 +239,11 @@ def run_tour():
     own "Config-driven geometry" docstring section). Raises whatever
     ``demo_square.run()`` raises; the caller (``on_button_a``) handles
     that."""
+    import gc
+    gc.collect()   # defragment: boot's resident firmware layer
+                   # (comms/radio/wifi, live since the ujson fix)
+                   # leaves the heap tight; collect before the
+                   # module reload's contiguous allocations
     sys.modules.pop(TOUR_MODULE_NAME, None)
     import demo_square
     demo_square.run()
@@ -254,6 +259,11 @@ def run_straight_drive():
     reimplemented (see module docstring's "Button B / 50 cm straight
     drive" section). Raises whatever ``demo_square.run_single_leg()``
     raises; the caller (``on_button_b``) handles that."""
+    import gc
+    gc.collect()   # defragment: boot's resident firmware layer
+                   # (comms/radio/wifi, live since the ujson fix)
+                   # leaves the heap tight; collect before the
+                   # module reload's contiguous allocations
     sys.modules.pop(TOUR_MODULE_NAME, None)
     import demo_square
     demo_square.run_single_leg(STRAIGHT_DRIVE_DISTANCE_MM)

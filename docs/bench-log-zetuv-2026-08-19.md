@@ -2394,3 +2394,46 @@ direction-agnostic) — next lever if corner placement matters.
 
 Device re-armed: A = tour (kernel PID), B = 50 cm straight (same).
 228 offline tests green.
+
+## 56. Encoder conversion root-cause — the scale was wrong 3.3x (stakeholder-directed encoder audit)
+
+Stakeholder: distances "not even close... look at your encoders and
+figure out what your conversion is. These wheels are about 90 mm" —
+pointing at the radio-robot-elite source config as authority.
+
+**The coherent picture (all sources finally agree):**
+- Source tovez.json's MEASURED motors.travel_calib = 0.7837 mm/deg
+  => circumference 282.13 mm => wheel diameter 89.81 mm — the
+  stakeholder's "about 90 mm", exactly.
+- vendor/nezha_motor.cpp: encoder register = tenths of a WHEEL degree
+  => 3600 ticks/rev => ticks_per_mm = 12.7602 (= 1/(travel_calib/10)).
+- The 975-ticks/rev "empirical anchor" (sprints 004-005) was built on
+  the sprint-002 EYEBALLED "270 deg" (the wheel had actually turned
+  ~73 deg). It was wrongly preferred over the instrument-measured
+  travel_calib — despite the conflict being flagged in writing twice.
+  Net effect: every commanded 500 mm drove ~150 mm (3.32x short).
+- The source wheels group (80.77/360/1.4187) remains a stale template;
+  travel_calib is the measurement.
+
+**Fix (config-only — geometry/gains are config-driven, no reflash):**
+data/tovez.json wheels => 89.81 mm / 3600 ticks/rev / 12.7602
+ticks/mm; demo_velocity overrides rescaled to true counts (i_max 766,
+pid_max 1276, pos_err_max 128, v_min 255, bias 304, stall 191/510,
+a_steady 383; cruise 2000 c/s = 157 mm/s so a 6380-tick leg fits the
+6 s timeout; pivot 1300 c/s = 1283-tick corners). fullDutyVelocity
+8500 c/s unchanged (directly measured in counts). Deployed; on-device
+verification: TICKS_PER_MM 12.759, leg target 6379.7.
+
+**Bench verification BLOCKED — motor board dark**: kernel healthy but
+connectedLeft/Right now BOTH False (no I2C ACK; earlier today True
+with duty applied and encoders frozen — the wedge from repeated pyocd
+debug resets, and now full silence = battery off/dead). Software-side
+work is complete; awaiting robot power to run the B-drive
+(expect ~6380 ticks/wheel = 500 mm) and the tour (legs 6380,
+pivots 1283).
+
+Process note: the earlier boot scroll-brick is fixed at three layers
+(radio_shim slice-store, boot config path, boot fail-soft banner) and
+boot no longer begins/starts the kernel fiber (staged-config contract)
+so consumer reconfigure is safe — power-on path verified up to the
+dark motor board.

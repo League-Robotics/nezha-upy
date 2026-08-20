@@ -160,8 +160,8 @@ def test_happy_path_configures_diffdrive_and_boots_comms(tmp_path):
     assert result.config_ok() is True
 
     # diffdrive configured/begun/started, in order, exactly once.
-    assert stub.begin_calls == 1
-    assert stub.start_calls == 1
+    assert stub.begin_calls == 0   # boot stages config only; first motion consumer begins (bench 2026-08-19)
+    assert stub.start_calls == 0   # see begin_calls note
     assert len(stub.configure_calls) == 1
     kwargs = stub.configure_calls[0]
     assert kwargs["left_port"] == 2
@@ -254,8 +254,8 @@ def test_no_secrets_path_skips_wifi_but_boots_everything_else(tmp_path):
 
     # everything else proceeds normally -- same happy-path assertions.
     assert result.diffdrive_ready is True
-    assert stub.begin_calls == 1
-    assert stub.start_calls == 1
+    assert stub.begin_calls == 0   # boot stages config only; first motion consumer begins (bench 2026-08-19)
+    assert stub.start_calls == 0   # see begin_calls note
     assert isinstance(result.dispatch, motion.RobotDispatch)
     assert _tick_and_count_emissions(result) == 1
 

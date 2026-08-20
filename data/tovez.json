@@ -158,10 +158,10 @@
     "_estimator_note": "117 (predict-to-now estimator v1): weight_heading_otos/weight_omega_otos committed 0.0 -- stakeholder's encoder-only-v1 decision, OTOS fusion is wired but not yet trusted with any nonzero weight. staleness_ms=60.0 is 3x Devices::Otos::kReadPeriod (20ms): generous headroom over the OTOS chip's own read cadence, small enough to exclude a genuinely stale reading before the next cycle's fresh one arrives. (118 ticket 004, land-at-zero-completion-delete-stop-lead.md: this section's own former fourth key -- a boot-time anticipation-lead constant with a four-retune history and no stable value -- is DELETED; the mechanism it fed no longer exists, see App::MoveQueue::tick()'s own doc comment for the land-at-zero completion predicate that replaces it.)"
   },
   "wheels": {
-    "wheel_diameter_mm": 80.77,
-    "ticks_per_rev": 975.0,
-    "ticks_per_mm": 3.8424,
-    "_wheels_note": "CORRECTED 2026-08-19 (OOP bench session, docs/bench-log-zetuv-2026-08-19.md): ticks_per_rev 360 -> 975.0, ticks_per_mm 1.4187 -> 3.8424. The 360/1.4187 pair was the unverified template default disproven on the same Nezha kit hardware by the zetuv bench measurements (975 ticks per wheel revolution, empirical, from the stakeholder's 270-degree observation). wheel_diameter_mm=80.77 UNCHANGED -- stakeholder-confirmed correct 2026-08-19 ('Tovez does in fact have the correct wheel diameter'). ticks_per_mm = 975.0/(pi*80.77) = 3.8424."
+    "wheel_diameter_mm": 89.81,
+    "ticks_per_rev": 3600.0,
+    "ticks_per_mm": 12.7602,
+    "_wheels_note": "CORRECTED AGAIN 2026-08-19 (final, coherent): derived from the MEASURED motors.travel_calib=0.7837 mm/deg in the radio-robot-elite source config -- circumference 282.13 mm => diameter 89.81 mm (stakeholder: 'these wheels are about 90 mm' -- matches), encoder register is tenths of a wheel-degree (vendor/nezha_motor.cpp) => 3600 ticks/rev => 12.7602 ticks/mm = 1/(travel_calib/10). The prior 975 ticks/rev 'empirical anchor' was built on an EYEBALLED 270-degree estimate (actual ~73 deg) and wrongly preferred over the instrument-measured travel_calib; with it, commanded 500 mm drove ~150 mm. The 80.77/360 trio remains the disproven template."
   },
   "encoders": {
     "has_encoders": true,
@@ -205,8 +205,17 @@
   },
   "demo_velocity": {
     "pivot_twist": 1300.0,
-    "pid_i_max": 600.0,
+    "pid_i_max": 766.0,
     "wheel_gain_right": 1.21,
-    "_note": "demo_square velocity-mode overrides (OOP bench 2026-08-19): pivot_twist raised 800->1300 c/s + pid_i_max 230->600 so the left wheel's stickier REVERSE breakaway is exceeded during pivots; wheel_gain_right trimmed 1.154->1.21 from PID run-1 leg residuals (right still ~5% ahead). Tunable by config re-copy, no reflash (demo modules are frozen)."
+    "_note": "Rescaled 2026-08-19 to true counts (12.76 counts/mm from travel_calib): the earlier values used the broken 3.8424 scale. cruise 2000 c/s = 157 mm/s (a 500 mm leg = 6380 ticks ~= 4 s, inside the 6 s segment timeout); pivot_twist 1300 c/s (90-deg pivot = 1283 ticks at trackwidth 128). fullDutyVelocity 8500 c/s stays: directly bench-measured in counts. Tunable by robot.json re-copy, no reflash.",
+    "cruise_velocity": 2000.0,
+    "pid_max": 1276.0,
+    "pos_err_max": 128.0,
+    "v_min": 255.0,
+    "bias_max": 304.0,
+    "a_steady": 383.0,
+    "stall_speed": 191.0,
+    "stall_demand": 510.0,
+    "wheel_gain_left": 0.908
   }
 }

@@ -104,7 +104,8 @@ def test_tovez_wheel_control_mapping_known_pairs():
     assert mapped["stallWindow"] == 500.0
 
     # travel_calib x10: tovez's travel_calib_left/right are both 0.7837.
-    assert mapped["fullDutyVelocity"] == pytest.approx(0.7837 * 10.0)
+    assert mapped["fullDutyVelocity"] == pytest.approx(
+        0.7837 * config._TRAVEL_CALIB_TO_FULL_DUTY_VELOCITY)
 
     assert mapped["maxDuty"] == config.DEFAULT_MAX_DUTY
     assert mapped["cyclePeriod"] == config.DEFAULT_CYCLE_PERIOD_MS
@@ -119,7 +120,8 @@ def test_gopiv_wheel_control_mapping_known_pairs():
     assert mapped["stallSpeed"] == 0.0
 
     # gopiv's travel_calib_left/right are both 0.70486.
-    assert mapped["fullDutyVelocity"] == pytest.approx(0.70486 * 10.0)
+    assert mapped["fullDutyVelocity"] == pytest.approx(
+        0.70486 * config._TRAVEL_CALIB_TO_FULL_DUTY_VELOCITY)
 
 
 def test_full_duty_velocity_averages_asymmetric_travel_calib():
@@ -134,7 +136,8 @@ def test_full_duty_velocity_averages_asymmetric_travel_calib():
     )
     robot_config = config.parse_robot_config(text)
     mapped = config.wheel_control_to_diffdrive_config(robot_config)
-    assert mapped["fullDutyVelocity"] == pytest.approx(((0.6 + 0.8) / 2.0) * 10.0)
+    assert mapped["fullDutyVelocity"] == pytest.approx(
+        ((0.6 + 0.8) / 2.0) * config._TRAVEL_CALIB_TO_FULL_DUTY_VELOCITY)
 
 
 def test_diffdrive_configure_kwargs_matches_native_signature():
@@ -145,7 +148,8 @@ def test_diffdrive_configure_kwargs_matches_native_signature():
     assert kwargs["fwd_sign_left"] == -1
     assert kwargs["fwd_sign_right"] == 1
     assert kwargs["max_duty"] == config.DEFAULT_MAX_DUTY
-    assert kwargs["full_duty_velocity"] == pytest.approx(0.7837 * 10.0)
+    assert kwargs["full_duty_velocity"] == pytest.approx(
+        0.7837 * config._TRAVEL_CALIB_TO_FULL_DUTY_VELOCITY)
     assert kwargs["cycle_period_ms"] == config.DEFAULT_CYCLE_PERIOD_MS
 
 

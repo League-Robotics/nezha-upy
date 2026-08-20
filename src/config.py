@@ -178,7 +178,9 @@ WHEEL_CONTROL_FIELDS = (
 
 # Authority-rail policy default -- see this module's own docstring
 # ("maxDuty ... NOT a calibration fact").
-DEFAULT_MAX_DUTY = 1.0
+DEFAULT_MAX_DUTY = 25.0   # [%] kernel units are PERCENT (bench-established
+                          # sprint 002; the old 1.0 was a fraction-era value
+                          # that collapsed the rail below the 3% deadband floor)
 
 # Matches DiffDrive::Config::cyclePeriod's own default (vendor/
 # differential_drive.h) and moddiffdrive.cpp's configure() default
@@ -187,7 +189,12 @@ DEFAULT_CYCLE_PERIOD_MS = 24
 
 # The "x10" travel_calib -> fullDutyVelocity multiplier -- see this
 # module's docstring; no source in this repo elaborates it further.
-_TRAVEL_CALIB_TO_FULL_DUTY_VELOCITY = 10.0
+_TRAVEL_CALIB_TO_FULL_DUTY_VELOCITY = 10845.0   # [counts/s per mm/deg]
+# Derived from ONE bench anchor (tovez, 2026-08-19): travel_calib 0.7837
+# -> measured ~8500 counts/s at 100% duty (duty->speed extrapolation,
+# docs/bench-log-zetuv-2026-08-19.md Sec 55). Single data point -- needs a
+# proper multi-robot derivation ticket; the old 10.0 produced a
+# fullDutyVelocity so small every velocity command railed at max_duty.
 
 # ConfigGroupTarget group id this module wires (see docstring) --
 # borrowed from radio-robot-elite's current robot_config.proto enum
