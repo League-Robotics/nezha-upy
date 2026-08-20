@@ -89,7 +89,7 @@ manager work (independent, lands separately).
       call that *would* succeed is unchanged — this ticket fixes when
       the latch fires, not whether the two modes still exclude each
       other once one is legitimately claimed.
-- [ ] **Bench repro** (targeted hardware check, on the current
+- [x] **Bench repro** (targeted hardware check, on the current
       confirmed bench robot — identify it the same way ticket 009
       does, from the device's own `robot.json`/`ID` response, not
       `config/devices.json`): on a fresh boot, `start()` called before
@@ -101,6 +101,14 @@ manager work (independent, lands separately).
       NOT run by the programmer per task instructions ("Do NOT run the
       hardware repro yourself") — pending team-lead's bench pass
       against this ticket's built image.
+      Confirmed by team-lead on tovez (UID `9906360200052820a8fdb5e4
+      13abb276...`, wheels on blocks, HEAD `85d2ed4`): fresh-boot
+      `diffdrive.start()` before `begin()` returned
+      `refused_not_begun`; the following `configure()` + `begin()` +
+      `step()` then succeeded (`cycleCount` 1, no `RuntimeError`); a
+      subsequent `start()` correctly refused with "start() refused:
+      step() already latched step mode this boot" — refusal no longer
+      consumes the latch, mutual exclusion still intact.
 - [x] `./build.sh --clean --with-diffdrive` links clean.
 - [x] `git diff --exit-code -- vendor/` is clean — no vendored file
       touched.
@@ -125,3 +133,10 @@ manager work (independent, lands separately).
 - **Verification command**: `./build.sh --clean --with-diffdrive`
   (build gate); `uv run pytest tests/` (regression gate); the bench
   repro above (hardware gate).
+
+
+## Implementation Notes
+
+Bench repro (final acceptance criterion, above) closed out by the
+team-lead's bench pass on tovez, HEAD `85d2ed4` — see the evidence
+citation under the Bench repro criterion for the measured sequence.
