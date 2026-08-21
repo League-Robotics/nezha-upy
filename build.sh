@@ -1509,6 +1509,149 @@ else:
     print("  main.c already patched for the boot module")
 PYEOF
 
+echo "=== Step 13e: Enable .mpy loading from the filesystem (user-program deploy) ==="
+# WHY: without this every Python module must be frozen into ROM, so
+# changing a demo costs a full --clean rebuild + reflash. With it the
+# filesystem can carry compiled user programs (tools/deploy.py), and
+# sys.path's ["", ".frozen"] order makes a filesystem module shadow its
+# frozen twin automatically.
+#
+# THREE changes are required; the second is the one that bites:
+#   1. MICROPY_PERSISTENT_CODE_LOAD -- makes stat_file_py_or_mpy try the
+#      .mpy extension at all.
+#   2. MICROPY_HAS_FILE_READER -- without it do_load() falls through to
+#      mp_lexer_new_from_file() and feeds the BINARY .mpy to the Python
+#      parser. It surfaces as a syntax error, i.e. it looks like a
+#      corrupt file rather than a missing feature.
+#   3. mp_reader_new_file() -- upstream defines it only under
+#      MICROPY_READER_POSIX (lib/micropython/py/reader.c). This port has
+#      the flat micro:bit flash FS instead, so it needs its own.
+#
+# NOT MICROPY_READER_VFS: that pulls in the whole VFS subsystem this port
+# does not have.
+python3 - <<'PYEOF'
+path = "micropython-microbit-v2/src/codal_port/mpconfigport.h"
+with open(path) as f:
+    src = f.read()
+
+if "MICROPY_PERSISTENT_CODE_LOAD" in src:
+    print("  mpconfigport.h already patched for .mpy loading")
+else:
+    # Anchor by NAME, not by exact text: this header is column-aligned,
+    # so "#define MICROPY_MODULE_FROZEN_MPY (1)" does not match the real
+    # "#define MICROPY_MODULE_FROZEN_MPY               (1)". A literal
+    # anchor here silently warned and left .mpy loading off.
+    import re
+    m = re.search(r"^#define\s+MICROPY_MODULE_FROZEN_MPY\s+.*$", src, re.M)
+    if m is None:
+        print("  WARNING: MICROPY_MODULE_FROZEN_MPY anchor missing -- .mpy loading NOT enabled")
+    else:
+        anchor = m.group(0)
+        add = (
+            "\n// Filesystem .mpy loading (user-program deploy). HAS_FILE_READER is\n"
+            "// NOT optional: without it do_load() hands the binary .mpy to the\n"
+            "// Python lexer, which fails as a syntax error.\n"
+            "#define MICROPY_PERSISTENT_CODE_LOAD (1)\n"
+            "#define MICROPY_HAS_FILE_READER (1)"
+        )
+        src = src.replace(anchor, anchor + add, 1)
+        with open(path, "w") as f:
+            f.write(src)
+        print("  mpconfigport.h: PERSISTENT_CODE_LOAD + HAS_FILE_READER enabled")
+PYEOF
+
+python3 - <<'PYEOF'
+path = "micropython-microbit-v2/src/codal_port/microbitfs.c"
+with open(path) as f:
+    src = f.read()
+
+if "mp_reader_new_file" in src:
+    print("  microbitfs.c already provides mp_reader_new_file()")
+else:
+    lines = [
+        "",
+        "#if MICROPY_PERSISTENT_CODE_LOAD && MICROPY_HAS_FILE_READER",
+        "// Filesystem reader for .mpy loading. Upstream py/reader.c defines",
+        "// mp_reader_new_file() only under MICROPY_READER_POSIX; this port has",
+        "// the flat micro:bit flash FS instead. Same shape as",
+        "// uos_mbfs_new_reader() above, but fills an mp_reader_t for",
+        "// mp_raw_code_load_file() rather than handing it to the lexer.",
+        "// file_read_byte() already returns (mp_uint_t)-1 == MP_READER_EOF.",
+        "void mp_reader_new_file(mp_reader_t *reader, const char *filename) {",
+        "    file_descriptor_obj *fd = microbit_file_open(filename, strlen(filename), false, false);",
+        "    if (fd == NULL) {",
+        "        mp_raise_OSError(MP_ENOENT);",
+        "    }",
+        "    reader->data = fd;",
+        "    // Casts match uos_mbfs_new_reader() above: mp_reader_t takes",
+        "    // void* callbacks, these take file_descriptor_obj*.",
+        "    reader->readbyte = (mp_uint_t(*)(void*))file_read_byte;",
+        "    reader->close = (void(*)(void*))microbit_file_close;",
+        "}",
+        "#endif",
+        "",
+    ]
+    with open(path, "w") as f:
+        f.write(src + "\n".join(lines))
+    print("  microbitfs.c: mp_reader_new_file() added")
+PYEOF
+
+python3 - <<'PYEOF'
+# persistentcode.c's arch_link_qstr() sets `val` and, with no native arch
+# enabled (MICROPY_EMIT_THUMB=0), never reads it. MICROPY_EMIT_INLINE_THUMB
+# still forces MICROPY_EMIT_MACHINE_CODE=1, so the function compiles, and
+# -Werror turns upstream's harmless warning into a build failure. Scope the
+# suppression to that one object, following the Makefile's own precedent
+# for sam.o (-Wno-array-bounds). Disabling INLINE_THUMB would also work but
+# removes a language feature to silence a warning.
+path = "micropython-microbit-v2/src/codal_port/Makefile"
+with open(path) as f:
+    src = f.read()
+marker = "$(BUILD)/py/persistentcode.o: CWARN"
+if marker in src:
+    print("  Makefile already scopes the persistentcode.c warning")
+else:
+    anchor = "CFLAGS = $(INC) $(CWARN)"
+    if anchor not in src:
+        print("  WARNING: CFLAGS anchor missing -- persistentcode.c may fail -Werror")
+    else:
+        add = (
+            "\n# Upstream persistentcode.c sets `val` unused when no native arch is\n"
+            "# enabled; -Werror would fail the build. Same per-file pattern as\n"
+            "# sam.o's -Wno-array-bounds below.\n"
+            "$(BUILD)/py/persistentcode.o: CWARN += -Wno-error=unused-but-set-variable\n"
+        )
+        i = src.index(anchor)
+        eol = src.index("\n", i) + 1
+        src = src[:eol] + add + src[eol:]
+        with open(path, "w") as f:
+            f.write(src)
+        print("  Makefile: persistentcode.o warning scoped")
+PYEOF
+
+python3 - <<'PYEOF'
+# MICROPY_EMIT_INLINE_THUMB forces MICROPY_EMIT_MACHINE_CODE, which makes
+# persistentcode.c compile its native-code loading paths. Those reference
+# mp_fun_table, which only exists when the native emitter is enabled -- so
+# with .mpy loading on, the link fails: "undefined reference to
+# mp_fun_table". Disabling the inline assembler removes those paths and
+# their ROM. Nothing in this project uses @micropython.asm_thumb / native
+# / viper (grepped, zero hits). To re-enable it, also provide mp_fun_table
+# via nativeglue.c.
+import re
+path = "micropython-microbit-v2/src/codal_port/mpconfigport.h"
+with open(path) as f:
+    src = f.read()
+m = re.search(r"^#define\s+MICROPY_EMIT_INLINE_THUMB\s+\(1\)\s*$", src, re.M)
+if m is None:
+    print("  mpconfigport.h: inline Thumb already disabled (or absent)")
+else:
+    src = src[:m.start()] + "#define MICROPY_EMIT_INLINE_THUMB          (0)  // build.sh step 13e" + src[m.end():]
+    with open(path, "w") as f:
+        f.write(src)
+    print("  mpconfigport.h: inline Thumb disabled (unblocks the .mpy loader link)")
+PYEOF
+
 echo "=== Step 14: Build ==="
 # codal_cmake downloads CODAL libraries and configures cmake (first run only).
 # codal_build compiles everything and links with libmicropython.a -> MICROBIT.hex
@@ -1519,5 +1662,6 @@ echo ""
 echo "=== Done ==="
 ls -lh "$MP_DIR/src/MICROBIT.hex" 2>/dev/null && echo "Hex ready." || echo "Hex not found -- check errors above."
 echo ""
-echo "Flash: cp $MP_DIR/src/MICROBIT.hex /Volumes/MICROBIT"
+echo "Flash: mbdeploy deploy --hex $MP_DIR/src/MICROBIT.hex <UID>   # by UID, never a drive letter"
+echo "Deploy user programs: python3 tools/deploy.py <robot>"
 echo "REPL:  mpremote connect /dev/cu.usbmodemXXX"

@@ -300,7 +300,10 @@ class ConfigDispatch:
     """
 
     def __init__(self, robot_config, transports=None):
-        self._config = robot_config
+        # Deliberately does NOT retain robot_config. Only wheel_control is
+        # ever read (see current_wheel_control/_handle_*), and the parsed
+        # document costs ~6.9 KB of a ~16.7 KB heap -- measured on tovez.
+        # Holding it here kept it alive for the whole session.
         self._wheel_control = dict(robot_config.get("wheel_control") or {})
         self._transports = list(transports) if transports else []
 

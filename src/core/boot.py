@@ -52,6 +52,8 @@ import-guarded so this module imports under CPython (the offline test
 gate).
 """
 
+import gc
+
 try:
     import diffdrive
 except ImportError:  # CPython, or a build without --with-diffdrive
@@ -153,7 +155,8 @@ class BootResult:
     module-level state; nothing survives boot outside this object."""
 
     def __init__(self):
-        self.robot_config = None
+        self.robot_config = None   # released after Step 3; see run()
+        self.config_loaded = False  # survives the release -- readiness flag
         self.config_error = None
         self.diffdrive_ready = False
         self.dispatch = None
@@ -163,7 +166,10 @@ class BootResult:
         self.pump_timer = None
 
     def config_ok(self):
-        return self.robot_config is not None
+        # NOT `robot_config is not None`: run() releases the parsed
+        # document once the scalars are extracted, so the flag has to
+        # outlive it.
+        return self.config_loaded
 
 
 def run(config_path=CONFIG_PATH, secrets_path=SECRETS_PATH,
@@ -191,6 +197,7 @@ def run(config_path=CONFIG_PATH, secrets_path=SECRETS_PATH,
     # --- Step 1: load the robot's JSON config, fail-closed. -------------
     try:
         result.robot_config = config.load_robot_config(config_path)
+        result.config_loaded = True
     except config.ConfigError as exc:
         result.config_error = exc
         print("BOOT: robot config load failed -- motion refused:", exc)
@@ -215,6 +222,17 @@ def run(config_path=CONFIG_PATH, secrets_path=SECRETS_PATH,
 
     # --- Step 3: comms.Comms + transports. ------------------------------
     banner, id_line = _identity_lines(result.robot_config, version)
+
+    # Release the parsed config: everything downstream needs only the
+    # scalars already extracted above (diffdrive kwargs, the
+    # wheel_control copy inside ConfigDispatch, and these identity
+    # strings). Measured on tovez: the document is ~6.9 KB of a ~16.7 KB
+    # heap -- 41% of it -- and holding it was the single largest resident
+    # allocation on the device. Callers use config_ok(), not
+    # `robot_config is not None`.
+    result.robot_config = None
+    gc.collect()
+
     result.comms = comms.Comms(banner, id_line, dispatch=dispatch, version=version)
 
     if result.robot_config is not None:

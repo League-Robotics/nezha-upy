@@ -19,7 +19,12 @@ MANIFEST_PATH = REPO_ROOT / "manifest.py"
 SRC_DIR = REPO_ROOT / "src"
 
 # Never frozen -- see module docstring.
-_BENCH_ONLY_MODULES = {"main.py"}
+_USER_PROGRAMS = {"main.py", "demo_square.py", "demo_util.py"}
+# Never frozen -- see module docstring. `main.py` is structural
+# (mp_main() probes the FILESYSTEM for it, so a frozen `main` is
+# unreachable); the demos are user programs deployed as .mpy by
+# tools/deploy.py.
+_BENCH_ONLY_MODULES = _USER_PROGRAMS
 
 
 def _actual_src_modules():

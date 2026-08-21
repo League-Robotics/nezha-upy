@@ -143,8 +143,14 @@ def test_happy_path_configures_diffdrive_and_boots_comms(tmp_path):
     )
 
     assert result.config_error is None
-    assert result.robot_config is not None
     assert result.config_ok() is True
+    # run() RELEASES the parsed document once the scalars are extracted --
+    # it is ~6.9 KB of a ~16.7 KB device heap (measured on tovez), the
+    # largest resident allocation there was. config_ok() is the readiness
+    # flag precisely because `robot_config is not None` no longer answers
+    # that question.
+    assert result.robot_config is None
+    assert result.config_loaded is True
 
     # diffdrive configured, not begun/started -- first motion consumer does.
     assert stub.begin_calls == 0

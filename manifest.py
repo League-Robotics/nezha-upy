@@ -50,28 +50,17 @@
 # patches `main.c` to `mp_import_name()` this module and call its
 # `run()` explicitly.
 #
-# `src/demo_square.py` (sprint 002 ticket 002) IS frozen below.
-# It was deliberately absent for several sprints -- it is a bench demo
-# SCRIPT, not a framework module -- and was added later. As of sprint 006 ticket 001, a bare `import demo_square` no
-# longer auto-runs anything by itself (its own module docstring's
-# "Auto-run trigger" section) -- production callers (src/main.py) call
-# `demo_square.run()`/`run_single_leg()` explicitly. It remains off
-# this freeze list regardless: freezing would need a full `--clean`
-# rebuild+reflash unrelated to this ticket's own scope, and its
-# standalone bench-debug entry point
-# (`mpremote run src/demo_square.py`, source upload + execute) still
-# needs no freezing at all. See that module's own docstring and
-# `tests/test_manifest_freeze.py`'s `_BENCH_ONLY_MODULES` for the same
-# reasoning encoded as a test.
-
-# PACKAGE LAYOUT (out-of-process reorganisation, 2026-08-20): src/ is
-# split into `core` (boot/protocol/transports/telemetry/config),
-# `hardware` (drivetrain control) and `devices` (I2C sensors). The demo
-# scripts stay at root: bench-measured, importing demo_square through a
-# package costs enough heap at press time to fault the drive with
-# MemoryError (3072 bytes) where a flat import drives cleanly.
-# Each package's `__init__.py` MUST be frozen alongside its modules or
-# the package is not importable at all on device.
+# `src/demo_square.py` and `src/demo_util.py` are NOT frozen: they are
+# USER PROGRAMS, deployed to the device filesystem as compiled `.mpy`
+# by `tools/deploy.py`, the same way a production user would. That is
+# what filesystem `.mpy` loading (build.sh step 13e) buys -- iterating
+# on a demo no longer costs a `--clean` rebuild and a reflash.
+# `sys.path` is ["", ".frozen"], so a deployed module shadows any
+# same-named frozen one automatically.
+#
+# Packages CANNOT go this route: `uos_mbfs_import_stat` never returns
+# MP_IMPORT_STAT_DIR on this flat filesystem, so `core/`, `hardware/`
+# and `devices/` are frozen by construction, not by preference.
 #
 # `src/boot.py` stays a root-level module and is frozen under the bare
 # name `boot`: build.sh patches main.c to `mp_import_name(MP_QSTR_boot,
@@ -83,8 +72,6 @@ freeze(
     "../../../src",
     (
         "boot.py",
-        "demo_square.py",
-        "demo_util.py",
         "core/__init__.py",
         "core/boot.py",
         "core/comms.py",
