@@ -319,10 +319,17 @@ def _run_segment(index, segment):
     delta_left = 0.0
     delta_right = 0.0
     refresh_status = status
+    # Real elapsed time, not a counter: a cycle that overruns still only
+    # credited POLL_INTERVAL_MS, so the "6 s" bound was ~9 s of wall clock
+    # whenever the kernel ran long. ticks_diff is the only honest clock.
+    _seg_start = time.ticks_ms()
+    _last_ms = _seg_start
     while elapsed_ms < SEGMENT_TIMEOUT_MS and refresh_status == "ok":
         time.sleep_ms(POLL_INTERVAL_MS)
-        elapsed_ms += POLL_INTERVAL_MS
-        since_refresh_ms += POLL_INTERVAL_MS
+        _now_ms = time.ticks_ms()
+        elapsed_ms = time.ticks_diff(_now_ms, _seg_start)
+        since_refresh_ms += time.ticks_diff(_now_ms, _last_ms)
+        _last_ms = _now_ms
         out = diffdrive.output()
         mean_delta, delta_left, delta_right = _mean_abs_delta(
             out, start_left, start_right)

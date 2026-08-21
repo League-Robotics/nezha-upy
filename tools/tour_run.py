@@ -44,8 +44,14 @@ diffdrive.configure(left_port=2, right_port=1, fwd_sign_left=-1,
     wheel_gain_left=%(wgl)f, wheel_gain_right=%(wgr)f,
     wheel_intercept_left=0.0, wheel_intercept_right=0.0)
 diffdrive.begin()
-diffdrive.start()
-time.sleep_ms(120)
+# NO start(): step-driven mode. Python owns the cadence, so there is
+# no kernel fiber to starve and the period is what we asked for.
+# Warm-up matters here: output()['ready'] (and drive()'s commandable
+# check) only becomes true once a cycle has actually run, and in step
+# mode nothing runs until we call step() ourselves.
+for _ in range(6):
+    diffdrive.step()
+    time.sleep_ms(32)
 o = diffdrive.output()
 print('READY', o['ready'])
 CPM = %(cpm)f
@@ -74,6 +80,8 @@ def move(dmm, ydeg, spd, yr):
     start = time.ticks_ms()
     deadline = int(dur * 1800) + 4000
     print('PH,loop,%%d' %% time.ticks_ms())
+    P = diffdrive.cyclePeriod()
+    cycle = time.ticks_ms()
     diffdrive.drive(vel * floor, tw * floor, 500)
     while True:
         o = tlm()
@@ -99,15 +107,22 @@ def move(dmm, ydeg, spd, yr):
         if time.ticks_diff(time.ticks_ms(), start) > deadline:
             print('TIMEOUT'); break
         diffdrive.drive(vel * scale, tw * scale, 500)
-        time.sleep_ms(32)
+        w = time.ticks_diff(cycle, time.ticks_ms())
+        if w > 0:
+            time.sleep_ms(w)
+        cycle = time.ticks_add(cycle, P)
+        diffdrive.step()
     print('PH,brake,%%d' %% time.ticks_ms())
-    diffdrive.drive(0.0, 0.0, 300)
+    # neutral(), NOT drive(0,0): with a 100%% rail and kp>0 a commanded
+    # zero is an ACTIVE hold that reverses past the target -- measured a
+    # consistent -4.2 deg pull-back on turns. neutral() stages a true stop.
+    diffdrive.neutral()
     for _ in range(6):
-        tlm(); time.sleep_ms(25)
+        diffdrive.step(); tlm(); time.sleep_ms(25)
     print('PH,settle,%%d' %% time.ticks_ms())
     diffdrive.neutral()
     for _ in range(14):
-        tlm(); time.sleep_ms(25)
+        diffdrive.step(); tlm(); time.sleep_ms(25)
     o = diffdrive.output()
     dl = o['positionLeft'] - p0l; dr = o['positionRight'] - p0r
     print('MV,%%.1f,%%.1f,%%.1f,%%.1f' %% (dt, yt, (dl+dr)*0.5, (dr-dl)*0.5))
