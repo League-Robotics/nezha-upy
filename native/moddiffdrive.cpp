@@ -163,6 +163,7 @@ extern "C" mp_obj_t diffdrive_configure_fn(size_t n_args, const mp_obj_t* pos_ar
     kArgVMin,
     kArgBiasMax,
     kArgTauAdapt,
+    kArgTwistHoldGain,
     kArgASteady,
     kArgDeficitThreshold,
     kArgDeficitWindow,
@@ -193,6 +194,7 @@ extern "C" mp_obj_t diffdrive_configure_fn(size_t n_args, const mp_obj_t* pos_ar
       {MP_QSTR_v_min, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
       {MP_QSTR_bias_max, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
       {MP_QSTR_tau_adapt, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
+      {MP_QSTR_twist_hold_gain, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
       {MP_QSTR_a_steady, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
       {MP_QSTR_deficit_threshold, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
       {MP_QSTR_deficit_window, MP_ARG_OBJ, {.u_obj = MP_OBJ_NEW_SMALL_INT(0)}},
@@ -243,6 +245,7 @@ extern "C" mp_obj_t diffdrive_configure_fn(size_t n_args, const mp_obj_t* pos_ar
   cfg.vMin = mp_obj_get_float(args[kArgVMin].u_obj);
   cfg.biasMax = mp_obj_get_float(args[kArgBiasMax].u_obj);
   cfg.tauAdapt = mp_obj_get_float(args[kArgTauAdapt].u_obj);
+  cfg.twistHoldGain = mp_obj_get_float(args[kArgTwistHoldGain].u_obj);  // [1/s]
   cfg.aSteady = mp_obj_get_float(args[kArgASteady].u_obj);
   cfg.deficitThreshold = mp_obj_get_float(args[kArgDeficitThreshold].u_obj);
   cfg.deficitWindow = mp_obj_get_float(args[kArgDeficitWindow].u_obj);
