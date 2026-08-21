@@ -18,6 +18,7 @@ with that, all fixed here:
 
 Usage:
   python3 tools/deploy.py tovez [--port /dev/cu.usbmodemXXX] [--dry-run]
+                               [--force-identity]
 """
 import argparse
 import json
@@ -111,6 +112,24 @@ def resolve_port(robot, explicit):
     sys.exit("robot %r (uid %s...) is not on the USB bus" % (robot, want[:20]))
 
 
+IDENT_MATCH = "match"
+IDENT_MISMATCH = "mismatch"
+IDENT_FRESH = "fresh"        # device has no robot.json yet
+IDENT_UNREADABLE = "unreadable"  # the probe itself failed
+
+
+def identity_verdict(ident, robot):
+    """Classify the device's self-reported name against the requested
+    robot. Split out from main() so the mismatch rule is testable
+    without a board on the bench -- it is the one guard that would have
+    caught the wrong-config-on-the-wrong-chassis error."""
+    if not ident:
+        return IDENT_UNREADABLE
+    if ident == "<none>":
+        return IDENT_FRESH
+    return IDENT_MATCH if ident == robot else IDENT_MISMATCH
+
+
 def _mpremote(port, *args, retries=4):
     """mpremote, retried: a running main.py holds the REPL, and the
     known TLM-flood defect can block the raw-REPL handshake outright."""
@@ -129,6 +148,8 @@ def main():
     ap.add_argument("robot")
     ap.add_argument("--port", default=None)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--force-identity", action="store_true",
+                    help="deploy even if the device names a different robot")
     a = ap.parse_args()
 
     outdir = os.path.join(REPO, ".tmp", "deploy")
@@ -165,10 +186,25 @@ def main():
         for line in r.stdout.splitlines():
             if line.startswith("IDENT"):
                 ident = line.split(None, 1)[1].strip()
-    if ident and ident != "<none>" and ident != a.robot:
+    verdict = identity_verdict(ident, a.robot)
+    if verdict == IDENT_MISMATCH and not a.force_identity:
         sys.exit("device identifies as %r, not %r -- refusing to deploy.\n"
-                 "Pass --port explicitly if this is deliberate." % (ident, a.robot))
-    print("  device identity: %s" % (ident or "<unreadable>"))
+                 "Two boards have carried the same name on this bench, and\n"
+                 "wheel calibration is selected by identity: deploying the\n"
+                 "wrong robot.json is the 3.3x ticks/mm error in 6c5f57c.\n"
+                 "Re-run with --force-identity if you mean to overwrite it."
+                 % (ident, a.robot))
+    if verdict == IDENT_MISMATCH:
+        print("  device identity: %s -- OVERRIDDEN (--force-identity)" % ident)
+    elif verdict == IDENT_FRESH:
+        # No readable robot.json: a freshly-flashed board, or one whose
+        # config never landed. Fine to write, but say so -- a silent
+        # pass here is indistinguishable from a confirmed match.
+        print("  device identity: none on device (fresh board) -- proceeding")
+    elif verdict == IDENT_UNREADABLE:
+        print("  device identity: UNREADABLE -- proceeding, cannot confirm")
+    else:
+        print("  device identity: %s (confirmed)" % ident)
 
     for name, _src, dst, _ss, out_size in artifacts:
         r = _mpremote(port, "fs", "cp", dst, ":" + name)

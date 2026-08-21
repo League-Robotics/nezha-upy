@@ -89,19 +89,34 @@ Per stakeholder decision 2026-08-19 (`docs/design/specification.md`
 - **WiFi module**: **power-cycle it** before any step that touches the
   WiFi transport (step A.7 below) — its AT state persists across nRF
   reflashes, so a fresh flash of the micro:bit does **not** reset it.
-- **Known defect — TLM flood blocks the `mpremote` REPL handshake**: a
-  booted robot streams `TLM:0:0:0` over USB serial at ~19 Hz and does
-  **not** stop on `TLM:OFF` (measured on the bench 2026-08-20). This is
-  not a cable or hardware fault — the board is demonstrably listening
-  the whole time (`PING`/`ID`/`VER` all answer normally) — some emitter
-  is running without consulting `Comms.telemetry.mode`. The flood is
-  enough to make `mpremote` report the misleading "port in use by
-  another program" error instead of connecting, because it never gets
-  a quiet moment to complete its handshake. Tracked separately, not
-  fixed by this sprint: `clasi/issues/tlm-stream-ignores-tlm-off.md`.
-  If a REPL connection (USB, either mode — see Part B §B.1) refuses to
-  come up and the port otherwise looks fine, suspect this before
-  suspecting the cable or the board.
+- **TLM flood blocks the `mpremote` REPL handshake — check WHICH BOARD
+  first**: a board streaming `TLM:0:0:0` over USB serial at ~19 Hz,
+  which `TLM:OFF` does not stop, makes `mpremote` report the misleading
+  "port in use by another program" error — it never gets a quiet moment
+  to complete its handshake. This is not a cable or hardware fault; the
+  board answers `PING`/`ID`/`VER` normally throughout.
+
+  **It is also not this firmware.** Nothing in this repo emits a
+  3-field `TLM:` line or an `ID:diffdrive:...` reply (grep-verified).
+  Both are the **vevov MicroPython spike**'s v5 line protocol —
+  `reference/vevov-micropython-spike-handoff.md` §"Wi-Fi REPL + v5
+  mode" documents exactly that surface, on DAPLink UID
+  `...b8e12372c44f4f67`, which is the board that produced the flood.
+  So: **identify the board by UID (`mbdeploy list`) before debugging
+  the flood.** If it is the spike board, the flood is expected — that
+  board is a reference artifact, not a fleet robot.
+
+  If a *fleet* robot floods, the mechanism to suspect is a stale
+  filesystem `main.py` left by another project: `mp_main()` probes the
+  micro:bit filesystem for `main.py` and runs it before anything
+  frozen, the FS region (`0x6d000..0x73000`) is **outside** the hex, so
+  an ordinary `mbdeploy deploy --hex` does not clear it, and a
+  probe-level reset does not either. Only a mass erase does — which is
+  precisely why the 2026-08-19 recovery worked
+  (`docs/bench-log-zetuv-2026-08-19.md` §12: reflashing the *unchanged*
+  hex fixed it, via `mbdeploy`'s automatic CTRL-AP mass-erase
+  recovery). Check it directly and cheaply first:
+  `uv run mpremote connect <port> fs ls`.
 
 ### A.3 Boot wiring assembles the engine automatically at power-on
 

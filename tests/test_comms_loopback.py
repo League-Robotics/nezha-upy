@@ -434,6 +434,105 @@ def test_force_true_bypasses_mode_and_activity_but_not_the_period_floor():
     assert emitted == [0]
 
 
+# --- TLM:OFF actually silences the emitter (not just the mode flag) ----
+#
+# The tests above split cleanly in two: the verb tests assert that
+# `TLM:OFF` sets `telemetry.mode`, and the policy tests drive
+# `TelemetryPolicy` directly. Nothing joined the two halves -- so an
+# emitter that set the flag correctly and then ignored it would pass
+# every one of them. That is exactly the bench symptom recorded in
+# `clasi/issues/done/tlm-stream-ignores-tlm-off.md`: a board that
+# answered `PING`/`ID`/`VER` (so it was parsing verbs) while streaming
+# telemetry that `TLM:OFF` did not stop.
+#
+# That particular board turned out to be running other firmware
+# entirely, so these tests do not reproduce it. They close the coverage
+# hole it exposed, which is real either way.
+
+def _emit_over(comms_obj, times):
+    """Drive `telemetry.emit()` across `times`, as the real control loop
+    does once per cycle."""
+    for now in times:
+        comms_obj.telemetry.emit(now)
+
+
+def test_tlm_off_over_the_wire_silences_a_moving_robot():
+    emitted = []
+    c, host = make_comms(emit_callback=lambda now, acks: emitted.append(now))
+    c.telemetry.set_active(True, now=0)
+
+    # Default AUTO + moving: the stream is running.
+    _emit_over(c, range(0, 200, 25))
+    assert len(emitted) == 8
+
+    host.send(b"TLM:OFF")
+    c.pump(200)
+    assert c.telemetry.mode == comms.TLM_MODE_OFF
+
+    # Still moving, still being pumped, well past the 25 ms floor and
+    # past COAST_HOLDOFF_MS -- and now completely silent.
+    before = len(emitted)
+    c.telemetry.set_active(True, now=200)
+    _emit_over(c, range(200, 3000, 25))
+    assert len(emitted) == before
+
+
+def test_tlm_on_over_the_wire_restores_the_stream_while_parked():
+    emitted = []
+    c, host = make_comms(emit_callback=lambda now, acks: emitted.append(now))
+    # Never moved, so AUTO alone would stay silent -- ON must override.
+    _emit_over(c, range(0, 100, 25))
+    assert emitted == []
+
+    host.send(b"TLM:ON")
+    c.pump(100)
+    _emit_over(c, range(100, 200, 25))
+    assert len(emitted) == 4
+
+
+def test_tlm_off_then_auto_resumes_only_when_moving():
+    emitted = []
+    c, host = make_comms(emit_callback=lambda now, acks: emitted.append(now))
+    host.send(b"TLM:OFF")
+    c.pump(0)
+
+    host.send(b"TLM:AUTO")
+    c.pump(25)
+    assert c.telemetry.mode == comms.TLM_MODE_AUTO
+
+    # AUTO restored, but parked -- still silent.
+    _emit_over(c, range(50, 150, 25))
+    assert emitted == []
+
+    c.telemetry.set_active(True, now=150)
+    _emit_over(c, range(150, 250, 25))
+    assert len(emitted) == 4
+
+
+def test_tlm_off_still_delivers_pending_acks():
+    """Deliberate, not an oversight: OFF suppresses UNSOLICITED frames,
+    and an ack is a reply. Pinned here so it cannot be "fixed" into
+    silently dropping command acknowledgements -- a host waiting on an
+    ack would hang, and `TLM:OFF` is exactly what a host sends before
+    talking to the board."""
+    emitted = []
+    c, host = make_comms(emit_callback=lambda now, acks: emitted.append(acks))
+    host.send(b"TLM:OFF")
+    c.pump(0)
+
+    c.telemetry.ack(corr_id=7, err_code=0)
+    _emit_over(c, range(0, 200, 25))
+
+    assert len(emitted) == comms.ACK_REPEATS
+    expected = (7 << comms.ACK_ERR_BITS) | 0
+    assert all(acks == [expected] for acks in emitted)
+
+    # ...and once the repeats are spent, OFF means OFF again.
+    before = len(emitted)
+    _emit_over(c, range(200, 1000, 25))
+    assert len(emitted) == before
+
+
 # --- pump() bounded work / dispatch-interface stub, end to end ---------
 
 def test_pump_processes_multiple_queued_lines_in_one_call():
