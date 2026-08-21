@@ -275,3 +275,77 @@ def test_balanced_duties_magnitude_clamped_to_max_duty():
         demo_square.MAX_DUTY_PERCENT, demo_square.MAX_DUTY_PERCENT,
         0.0, 100000.0)
     assert dl == demo_square.MAX_DUTY_PERCENT
+
+
+# --- encoder-glitch rejection in the move loop's termination decision --
+#
+# `_move()` exits when the remaining distance falls inside the margin.
+# A single glitched encoder read inflates the midpoint, drives `rem`
+# negative, satisfies that condition, and exits reporting the target was
+# reached -- while short. `tools/tour_run.py` rejects the same 40mm/
+# sample glitches HOST-side, which cleans the plot but sits downstream
+# of the decision, so it cannot prevent this.
+#
+# See clasi/issues/intermittent-short-leg-in-square-tour.md.
+
+def test_glitch_ceiling_is_far_above_real_motion():
+    """At the tour's 100 mm/s and a 32 ms cycle, a real sample moves
+    ~3.2 mm (~41 counts). The ceiling must clear that by a wide margin
+    or normal motion gets rejected as a glitch."""
+    nominal = 100.0 * 0.032 * demo_square.TICKS_PER_MM  # [counts/sample]
+    assert demo_square.MOVE_GLITCH_TICKS > 10 * nominal
+
+
+def test_normal_motion_is_plausible():
+    step = 100.0 * 0.032 * demo_square.TICKS_PER_MM
+    assert demo_square._plausible(step, 0.0, 0.0, 0.0) is True
+
+
+def test_a_large_forward_jump_is_rejected():
+    jump = demo_square.MOVE_GLITCH_TICKS + 1.0
+    assert demo_square._plausible(jump, 0.0, 0.0, 0.0) is False
+
+
+def test_a_large_backward_jump_is_rejected():
+    """Direction-blind: the -41255-count encoder discontinuity seen when
+    a second fiber ran on the same storage was negative."""
+    jump = -(demo_square.MOVE_GLITCH_TICKS + 1.0)
+    assert demo_square._plausible(jump, 0.0, 0.0, 0.0) is False
+
+
+def test_a_yaw_only_glitch_is_rejected():
+    """A glitch on one wheel moves the differential even when the
+    midpoint barely shifts -- checking only the midpoint would miss it."""
+    jump = demo_square.MOVE_GLITCH_TICKS + 1.0
+    assert demo_square._plausible(0.0, jump, 0.0, 0.0) is False
+
+
+def test_plausibility_is_relative_to_the_previous_sample():
+    """Absolute position grows without bound across a move; only the
+    step between consecutive samples is bounded."""
+    assert demo_square._plausible(50000.0, 0.0, 49990.0, 0.0) is True
+    assert demo_square._plausible(50000.0, 0.0, 0.0, 0.0) is False
+
+
+def test_exactly_at_the_ceiling_is_accepted():
+    """Boundary pinned: `<=`, so the ceiling itself is real motion."""
+    assert demo_square._plausible(
+        demo_square.MOVE_GLITCH_TICKS, 0.0, 0.0, 0.0) is True
+
+
+def test_move_reports_a_termination_reason():
+    """A short leg and a clean leg used to print identically -- which is
+    why the ~408mm short leg in c0d9ad4 produced no diagnostic at all.
+    All three loop exits must be named."""
+    src = (REPO_ROOT / "src" / "demo_square.py").read_text()
+    body = src[src.index("def _move("):]
+    for reason in ('"target"', '"stall"', '"deadline"'):
+        assert reason in body, "move loop does not name the %s exit" % reason
+
+
+def test_stall_and_deadline_are_separate_exits():
+    """They used to share one `or`-ed break, so a stall and a timeout
+    were indistinguishable even to a reader of the source."""
+    src = (REPO_ROOT / "src" / "demo_square.py").read_text()
+    body = src[src.index("def _move("):]
+    assert 'o["stallHalted"] or' not in body

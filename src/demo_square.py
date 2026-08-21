@@ -548,6 +548,18 @@ MOVE_YAW_TAPER = 360.0      # [counts] ~30 deg decel window
 MOVE_DIST_MARGIN = 35.0     # [counts] ~3mm: the measured brake+coast at floor 0.18
 MOVE_YAW_MARGIN = 12.0      # [counts] ~0.9deg: centered on measured turn coast
 MOVE_YAW_RATE_DEG_S = 60.0  # [deg/s] pivot rate
+MOVE_GLITCH_TICKS = 510.0   # [counts] per-sample jump ceiling: ~40mm at
+                            # 32ms, ~12x the 100mm/s nominal. tour_run.py
+                            # rejects the same 40mm/sample HOST-side, which
+                            # cleans the plot but not the decision below.
+
+
+def _plausible(m, d, prev_m, prev_d):
+    """True if this encoder sample could be real motion since the last
+    one. Split out from `_move()` so the rule is testable without a
+    robot -- the failure it guards is silent by construction."""
+    return (abs(m - prev_m) <= MOVE_GLITCH_TICKS
+            and abs(d - prev_d) <= MOVE_GLITCH_TICKS)
 
 
 def _move(dist_mm, yaw_deg, speed_mm_s):
@@ -578,10 +590,23 @@ def _move(dist_mm, yaw_deg, speed_mm_s):
     start = time.ticks_ms()
     deadline = int(dur * 1800) + 4000
     diffdrive.drive(vel * floor, tw * floor, 500)
+    # Why: a single glitched encoder read inflates mp, drives rem
+    # negative, satisfies `dd`, and exits the loop reporting "target
+    # reached" while metres short. That is indistinguishable from a
+    # clean move in the output -- see the ~408mm short leg in c0d9ad4.
+    # So carry the last plausible sample forward, count the rejects,
+    # and name the exit.
+    mp = 0.0; dp = 0.0
+    glitches = 0
+    reason = "target"
     while True:
         o = diffdrive.output()
         dl = o["positionLeft"] - p0l; dr = o["positionRight"] - p0r
-        mp = (dl + dr) * 0.5; dp = (dr - dl) * 0.5
+        m = (dl + dr) * 0.5; d = (dr - dl) * 0.5
+        if _plausible(m, d, mp, dp):
+            mp = m; dp = d
+        else:
+            glitches += 1   # implausible jump: keep the previous sample
         scale = 1.0; dd = True; yd_ = True
         if dt:
             rem = abs(dt) - abs(mp); dd = rem <= MOVE_DIST_MARGIN
@@ -604,8 +629,11 @@ def _move(dist_mm, yaw_deg, speed_mm_s):
             scale = 1.0
         if dd and yd_:
             break
-        if o["stallHalted"] or \
-                time.ticks_diff(time.ticks_ms(), start) > deadline:
+        if o["stallHalted"]:
+            reason = "stall"
+            break
+        if time.ticks_diff(time.ticks_ms(), start) > deadline:
+            reason = "deadline"
             break
         diffdrive.drive(vel * scale, tw * scale, 500)
         time.sleep_ms(32)
@@ -614,8 +642,9 @@ def _move(dist_mm, yaw_deg, speed_mm_s):
     diffdrive.neutral()
     time.sleep_ms(350)
     o = diffdrive.output()
-    print("demo_square: move d=%.0fmm y=%.0fdeg dL=%.0f dR=%.0f" % (
-        dist_mm, yaw_deg, o["positionLeft"] - p0l, o["positionRight"] - p0r))
+    print("demo_square: move d=%.0fmm y=%.0fdeg dL=%.0f dR=%.0f %s g=%d" % (
+        dist_mm, yaw_deg, o["positionLeft"] - p0l, o["positionRight"] - p0r,
+        reason, glitches))
 
 
 def run():
