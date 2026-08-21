@@ -1,5 +1,5 @@
 ---
-status: pending
+status: done
 ---
 
 # Deploy user programs to the filesystem; freeze only firmware
@@ -179,3 +179,94 @@ Deferred, and worth separate issues rather than folding in here:
   REPL/file-transfer channel contend for the same USB CDC link.
 - An intermittent leg that terminated ~408 mm short in one of three
   tours, unexplained; recorded in commit `c0d9ad4`.
+
+## Resolution
+
+Done in `e05c606` (OOP, master). Parts A, C and D as written. **Part B
+was deliberately NOT done** — see below.
+
+### Measured outcomes
+
+| | Before | After |
+| --- | --- | --- |
+| Free heap after boot | 16,704 B | **23,408 B** |
+| Deploy payload | n/a | **13,270 B** of 20,160 B |
+| Tour legs / turns / closure | +/-1.9 mm, +/-1.4 deg, 14-24 mm | +/-1.7 mm, +/-1.1 deg, 24 mm |
+| Tests | 248 | **257** (518 subtests) |
+
+Deployed sizes: `robot.json` 61044 -> 2866, `main.mpy` 9826 -> 1601,
+`demo_util.mpy` 4417 -> 1114, `demo_square.mpy` 30935 -> 7689.
+
+### The mechanism was proven, not assumed
+
+Verification step 4 was the point of the whole exercise. Injected an
+`FS-DEPLOY-MARKER` string into `demo_square.py`, ran only
+`tools/deploy.py`, and the robot printed
+`demo_square: FS-DEPLOY-MARKER d=500mm y=0deg dL=6406 dR=6403` — **no
+rebuild, no reflash**. Marker reverted and redeployed afterwards.
+
+Part A's config edits were likewise confirmed by linker-map ADDRESS
+(`mp_reader_new_file` @ `0x0000c19c`, `mp_raw_code_load_file` @
+`0x000266fc`), not by the build log — because the first attempt
+"succeeded" with the feature silently off.
+
+### Part B skipped — and why that is the right call
+
+Part B (move the `_move()` engine into frozen `hardware/motion.py`)
+existed for exactly one reason, stated in Risks: get `demo_square.mpy`
+small enough that a filesystem copy fits the heap. It would also have
+touched the code path that currently produces good tours.
+
+**Change E instead**: `boot.run()` now extracts the scalars it needs
+from the parsed `robot.json` and releases the document. Measured on
+tovez, that document is 6,912 B resident of a 16,704 B heap — 41% of it,
+the single largest allocation on the device — and `ConfigDispatch` was
+pinning it alive through a `self._config` reference it never read.
+
+Releasing it freed **6,704 B**, more than Part B's ~6 KB of bytecode
+relocation would have, without moving a line of tuned motion code. The
+7,689 B `demo_square.mpy` then fits with room to spare (7,920 B free
+mid-drive, no leak across runs).
+
+`config_ok()` became the readiness flag as a consequence:
+`robot_config is not None` no longer answers "did config load", since
+the document is now released on the success path.
+
+### Four build failures worth keeping
+
+All are now encoded in `build.sh` step 13e so a fresh checkout
+reproduces them:
+
+1. **The config anchor must be a REGEX.** `mpconfigport.h` is
+   column-aligned, so the literal `#define MICROPY_MODULE_FROZEN_MPY (1)`
+   never matched the real `...MPY               (1)`. The patch warned
+   and silently left the feature off — and the build still succeeded.
+2. `persistentcode.c` trips `-Werror=unused-but-set-variable`. Scoped a
+   per-file `-Wno-error=` in `codal_port/Makefile`, following the
+   existing `sam.o` precedent rather than weakening the global flags.
+3. `mp_reader_new_file` needs casts on its callbacks —
+   `mp_reader_t` holds `void*`-typed function pointers, matching
+   `uos_mbfs_new_reader`.
+4. **`MICROPY_EMIT_INLINE_THUMB` had to be turned OFF.** It forces
+   `MICROPY_EMIT_MACHINE_CODE`, which makes `persistentcode.c` compile
+   native-loading paths referencing `mp_fun_table` — undefined without
+   the native emitter, so the link failed. *This reverses my earlier
+   stated position that the inline-Thumb emitter should stay on.*
+   Nothing in the tree uses `@micropython.asm_thumb` (grepped); if
+   something ever needs it, the native emitter has to come on with it.
+
+### Structural limit, now documented
+
+`uos_mbfs_import_stat` cannot return `MP_IMPORT_STAT_DIR` on this flat
+filesystem, so `core/`, `hardware/` and `devices/` can **never** be
+filesystem-deployed. Frozen-only for packages is a property of the port,
+not a policy choice. Noted in `manifest.py`;
+`tests/test_deploy_budget.py` enforces that the deploy set and the
+freeze list can never overlap.
+
+### Deferred items split out
+
+The three "Related" items became their own pool issues rather than
+riding along here: `crawlpulse-sub-breakaway-dithering.md`,
+`host-triggered-program-dispatch-over-serial.md`,
+`intermittent-short-leg-in-square-tour.md`.
