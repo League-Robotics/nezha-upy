@@ -2,9 +2,11 @@
 id: '004'
 title: Embedded-NUL divergence test, full golden-vector green, mpy-cross gate for
   protocol.py
-status: open
-use-cases: [SUC-005]
-depends-on: ['003']
+status: done
+use-cases:
+- SUC-005
+depends-on:
+- '003'
 github-issue: ''
 issue: port-v6-line-protocol-hard-cutover-from-v5.md
 completes_issue: true
@@ -53,16 +55,16 @@ already runs (see `tests/test_build_gate.py` / existing `py_compile`+
 
 ## Acceptance Criteria
 
-- [ ] Full `protocol_golden_vectors.txt` fixture green through the
+- [x] Full `protocol_golden_vectors.txt` fixture green through the
       harness (every applicable vector; C++-only vectors identified
       and excluded with a comment explaining why, not silently
       skipped).
-- [ ] Embedded-NUL divergence test written and passing, with a
+- [x] Embedded-NUL divergence test written and passing, with a
       docstring/comment explicitly contrasting it with the C++
       characterization bug it deliberately does NOT reproduce.
-- [ ] `mpy-cross` compiles `src/core/protocol.py` cleanly as part of
+- [x] `mpy-cross` compiles `src/core/protocol.py` cleanly as part of
       the offline gate.
-- [ ] `python3 -m pytest tests/` fully green.
+- [x] `python3 -m pytest tests/` fully green.
 
 ## Testing
 

@@ -1205,3 +1205,278 @@ def test_emit_telemetry_hex_column_formats_lowercase_no_prefix():
     handler, adapter, sink = _new_handler()
     handler.emit_telemetry([("flags", 4096, True)])
     assert sink.lines() == ["thdr flags", "t 1000"]
+
+
+# ---------------------------------------------------------------------------
+# Embedded-NUL divergence (protocol.md Sec 9.4's characterization finding,
+# ticket 004's own named acceptance criterion): the C++ archetype's
+# strcmp()-based -- and, post grammar-migration, its NUL-terminated-
+# C-string tokenizer scan -- both stop at the first embedded NUL byte, so
+# `PING\x00extra\n` is indistinguishable from a bare `PING\n` to that
+# implementation: it dispatches as PING (reply `pong 0`), silently
+# discarding "extra". Spec Sec 2's verb grammar (`verb ::= [A-Za-z]
+# [A-Za-z0-9_]*`) admits no NUL at all, so the GRAMMAR-CORRECT behavior
+# is to reject this line as unparseable -- the C++ implementation's
+# C-string-comparison behavior is a characterization artifact of its own
+# storage representation, not something this port re-derives or
+# reproduces.
+#
+# Python `bytes` equality is length- and content-aware (embedded NUL
+# bytes included) -- `b"PING\x00extra" == b"PING"` is `False` -- so this
+# port naturally takes the grammar-correct path with NO special-case
+# code: the whole line tokenizes to the single token
+# b"PING\x00extra" (no space anywhere in it), which fails every
+# VERB_TABLE comparison in `_dispatch()`, falls through to the
+# unknown-verb path, and is counted malformed. There being only one
+# token on the line (no space), there is no separate trailing field for
+# the malformed-line `#id`-recovery rule to find, so this specific input
+# also gets no reply -- opposite of the C++ archetype's `pong 0`, and
+# THIS divergence is deliberate, not a gap: it is this test's whole
+# point, not an accident of the reply-shape rule.
+# ---------------------------------------------------------------------------
+
+def test_embedded_nul_immediately_after_verb_is_rejected_not_truncated():
+    """Pins the deliberate divergence from
+    test_embedded_nul_immediately_after_verb_matches_bare_verb in
+    radio-robot-lib's tests/protocol/test_protocol_adversarial.py (read
+    there for the C++ characterization this test's docstring
+    contrasts with). That test asserts the C++ archetype's `feed()`
+    equivalent treats `PING\x00extra\n` exactly like `PING\n` and
+    replies `pong 0\n` -- a C-string-comparison artifact, NOT
+    grammar-correct behavior (spec Sec 2's verb grammar admits no NUL
+    byte at all). THIS test asserts the opposite outcome for the
+    IDENTICAL input bytes: this Python port's `bytes`-based, length-
+    and content-aware comparison can never match `PING\x00extra`
+    against the table entry `b"PING"`, so the line is rejected as an
+    unknown verb -- counted malformed, and (since there is no separate
+    `#id` token on this particular line to recover) no reply at all,
+    rather than the C++ archetype's silent `pong 0` truncation.
+
+    This is a divergence test PINNING correct Python behavior, not a
+    port of the C++ characterization test -- it does not reproduce the
+    C++ bug, and it must never be "fixed" to match the C++ output."""
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"PING\x00extra\n")
+    assert sink.lines() == [], (
+        "must NOT have dispatched as a bare PING (the C++ archetype's "
+        "own truncation bug) -- Python bytes comparison is length-aware, "
+        "so b'PING\\x00extra' can never match the VERB_TABLE's b'PING' "
+        "entry")
+    assert adapter.now_calls == 0, (
+        "on_ping()'s only observable adapter call (now()) must never "
+        "have fired -- confirms this took the unknown-verb path, not "
+        "the PING handler, not merely that the reply text happened to "
+        "come out empty")
+    assert handler.malformed_count() == 1
+
+    # The recovery invariant (matches every other malformed-line case in
+    # this suite): a clean PING right after must still dispatch normally
+    # -- this one deliberately-malformed line must not have wedged the
+    # handler's parse state.
+    adapter.now_value = 999
+    handler.feed(b"PING\n")
+    assert sink.lines() == ["pong 999"]
+
+
+# ---------------------------------------------------------------------------
+# Adversarial-input hardening, ported from radio-robot-lib's
+# tests/protocol/test_protocol_adversarial.py (ticket 004's own
+# instruction to port adversarial cases applicable to a Python handler
+# that tickets 001-003's tests don't already cover). That file's own
+# job is proving the C++ archetype's feed() never crashes, overflows, or
+# traps under ASan/UBSan on hostile bytes, AND that a well-formed line
+# right after any garbage still dispatches correctly (the "recovery
+# invariant" -- a handler that wedges after one bad frame is useless on
+# a lossy radio link).
+#
+# The memory-safety half of that file's own three-part job (point 1 in
+# its module docstring: "never crashes... demonstrated here [under
+# ASan/UBSan], not asserted") does NOT port here at all -- there is no
+# sanitizer-instrumented executable to link against, and Python has no
+# buffer-overflow/use-after-free/UB hazard class for a
+# bytearray-and-list-based parser to fall into in the first place (this
+# module's own docstring: no fixed-size field-token array, no
+# kMaxHeaderColumns cap). What DOES port, unchanged, is the RECOVERY
+# INVARIANT itself: however hostile the input, `feed()` must never raise
+# an uncaught exception, and a subsequent well-formed `PING` must still
+# dispatch correctly. Every RUN_* case from that file is dropped
+# entirely -- RUN is not ported in this sprint at all (this port's own
+# module docstring), so there is no handler behavior for those cases to
+# characterize.
+# ---------------------------------------------------------------------------
+
+_ADVERSARIAL_RECOVERY_CASES = [
+    # ---- embedded NUL bytes mid-line, beyond the dedicated divergence
+    # test above -- these exercise NUL surviving through FIELD content
+    # (name/value decoding), not just verb lookup.
+    ("embedded_nul_mid_verb", [b"PI\x00NG\n"]),
+    ("embedded_nul_in_set_name", [b"SET foo\x00bar 1.0\n"]),
+    ("embedded_nul_in_set_value", [b"SET group.alpha 1\x002 #9\n"]),
+    ("embedded_nul_in_wheels_field", [b"WHEELS 1\x0000 100 1000\n"]),
+    ("embedded_nul_in_get_name", [b"GET foo\x00bar\n"]),
+    ("embedded_nul_in_id", [b"STOP #1\x002\n"]),
+
+    # ---- 8-bit / high-ASCII and UTF-8 sequences ----
+    ("high_ascii_full_line", [bytes(range(0x80, 0x100)) + b"\n"]),
+    ("high_ascii_verb", [bytes([0xC0, 0xC1, 0xFE, 0xFF]) + b"\n"]),
+    ("utf8_verb", ["日本語".encode("utf-8") + b"\n"]),
+    ("utf8_in_set_value",
+     [b"SET " + "日本語".encode("utf-8") + b" 1.0\n"]),
+    ("utf8_in_get_name",
+     [b"GET " + "éèê\U0001F600".encode("utf-8") + b"\n"]),
+
+    # ---- other control characters ----
+    ("c0_control_chars_full_line",
+     [bytes(b for b in range(1, 32) if b not in (0x0A,)) + b"\n"]),
+    ("del_byte_full_line", [b"\x7f\n"]),
+    ("del_byte_in_set_value", [b"SET group.alpha 1\x7f0\n"]),
+    ("bell_and_escape_in_verb", [b"P\x07I\x1bNG\n"]),
+
+    # ---- very long runs of '#' / hash-only lines / trailing hashes --
+    # the space grammar's own special byte (the id marker) ----
+    ("very_long_hash_run", [b"#" * 300 + b"\n"]),
+    ("line_only_hashes_short", [b"###\n"]),
+    ("line_only_hashes_long", [b"#" * 238 + b"\n"]),
+    ("verb_directly_followed_by_hashes_no_space",
+     [b"PING" + b"#" * 50 + b"\n"]),
+    ("known_verb_directly_followed_by_hashes_no_space",
+     [b"STOP" + b"#" * 100 + b"\n"]),
+    ("known_verb_space_then_long_non_digit_hash_field",
+     [b"STOP " + b"#" * 100 + b"\n"]),
+    ("bare_hash_as_id_no_digits", [b"STOP #\n"]),
+    ("hash_then_non_digit", [b"STOP #x\n"]),
+    ("hash_with_leading_plus", [b"STOP #+5\n"]),
+    ("hash_with_leading_minus", [b"STOP #-5\n"]),
+    ("multiple_hash_tokens_last_one_wins", [b"STOP #5 #7\n"]),
+    ("huge_digit_run_after_hash_overflows_uint32",
+     # Python ints have no width to overflow -- unlike the C++
+     # archetype, this parses to one (very large) legitimate nonzero
+     # id rather than characterizing a wraparound. Ported anyway for
+     # the same reason every other case here is: it must not crash and
+     # must not wedge the parser, whatever it decides the id means.
+     [b"STOP #" + b"9" * 300 + b"\n"]),
+
+    # ---- space-run stress: the grammar's own separator, hammered ----
+    ("huge_space_run_between_fields",
+     [b"WHEELS 100" + b" " * 200 + b"100 1000\n"]),
+    ("many_spaces_then_nothing_is_blank", [b" " * 239 + b"\n"]),
+    ("verb_alone_no_trailing_content", [b"WHEELS\n"]),
+    ("verb_then_trailing_spaces_only", [b"WHEELS" + b" " * 50 + b"\n"]),
+    ("stop_alone_no_id", [b"STOP\n"]),
+    ("stop_then_trailing_spaces_only", [b"STOP" + b" " * 50 + b"\n"]),
+
+    # ---- empty lines / blank-line runs ----
+    ("empty_line", [b"\n"]),
+    ("three_empty_lines", [b"\n\n\n"]),
+    ("many_empty_lines", [b"\n" * 20]),
+    ("mixed_blank_and_whitespace_lines", [b"\n   \n\t\n \n"]),
+
+    # ---- \r handling: lone \r, \r\n, \n\r ----
+    ("crlf", [b"\r\n"]),
+    ("lfcr", [b"\n\r"]),
+    ("cr_mid_field_not_at_terminator", [b"WHEELS \r100 100 1000\n"]),
+    ("multiple_lone_cr_mid_line", [b"PING\r\r\r\n"]),
+
+    # ---- lines at/around the 240-byte cap, beyond the two dedicated
+    # boundary tests above (this sweep's own point: recovery, not just
+    # the exact malformed_count()/reply-shape those tests already
+    # pin) ----
+    ("line_content_238_total_239_under_cap", [b"Z" * 238 + b"\n"]),
+    ("line_content_239_total_240_exact_cap", [b"Z" * 239 + b"\n"]),
+    ("line_content_240_total_241_over_cap", [b"Z" * 240 + b"\n"]),
+    ("line_content_1000_way_over_cap", [b"Z" * 1000 + b"\n"]),
+
+    # ---- unterminated: partial lines, huge no-terminator blobs, spread
+    # across multiple feed() calls ----
+    ("unterminated_short_fragment", [b"WHEELS 100 100"]),
+    ("unterminated_lone_cr", [b"\r"]),
+    ("unterminated_4kb_single_call", [b"A" * 4096]),
+    ("unterminated_plausible_prefix_then_huge_continuation",
+     [b"WHEELS 100 100 1000", b"B" * 5000]),
+    ("unterminated_split_across_many_small_calls",
+     [b"W", b"H", b"E", b"E", b"L", b"S", b" ", b"1" * 300]),
+
+    # ---- mixed-case / case-as-direction edge cases ----
+    ("all_lowercase_verb_dropped", [b"ping\n"]),
+    ("mixed_case_verb_unknown", [b"Wheels 100 100 1000\n"]),
+    ("lowercase_verb_with_spaces_and_high_bytes",
+     [b"dbg " + bytes(range(0x80, 0x90)) + b"\n"]),
+
+    # ---- numeric-field adversarial spellings ----
+    ("wheels_field_all_pluses", [b"WHEELS +100 +100 +1000\n"]),
+    ("wheels_field_leading_zeros", [b"WHEELS 000100 00100 0001000\n"]),
+    ("set_value_only_a_sign", [b"SET group.alpha -\n"]),
+    ("set_value_only_a_dot", [b"SET group.alpha .\n"]),
+    ("set_value_many_dots", [b"SET group.alpha 1.2.3.4\n"]),
+    ("wheels_duration_huge_digit_run",
+     [b"WHEELS 100 100 " + b"9" * 40 + b"\n"]),
+
+    # ---- non-space whitespace bytes as a field's LEADING byte -- the
+    # hazard that survives the space-grammar migration (a literal
+    # leading ' ' is structurally impossible; '\t'/'\v'/'\f'/'\r' remain
+    # legal, ordinary field bytes per the field grammar) ----
+    ("tab_leading_wheels_field", [b"WHEELS \t100 100 1000\n"]),
+    ("vtab_leading_set_value", [b"SET group.alpha \v1.0\n"]),
+    ("formfeed_leading_wheels_duration", [b"WHEELS 100 100 \f1000\n"]),
+    ("cr_leading_set_value_not_at_terminator",
+     [b"SET group.alpha \r1.0\n"]),
+]
+
+
+def _adversarial_recovery_ids():
+    return [name for name, _chunks in _ADVERSARIAL_RECOVERY_CASES]
+
+
+@pytest.mark.parametrize(
+    "name,chunks", _ADVERSARIAL_RECOVERY_CASES, ids=_adversarial_recovery_ids())
+def test_recovers_after_adversarial_input(name, chunks):
+    """The recovery invariant (protocol.md Sec 2/2.1), ported from
+    radio-robot-lib's own test_recovers_after_adversarial_input: however
+    hostile `chunks` is, `feed()` must (a) never raise an uncaught
+    exception and (b) still dispatch a clean PING correctly once the
+    garbage line is closed out with a plain '\\n' -- a handler that
+    wedges after one bad frame is useless on a lossy radio link. If
+    `feed()` itself raises, this test fails with that exception's own
+    traceback rather than a clean assertion message -- that failure
+    mode IS the point of this test, not a bug in it."""
+    handler, adapter, sink = _new_handler()
+    adapter.now_value = 0
+    for chunk in chunks:
+        handler.feed(chunk)
+    # A bare '\n' first closes out whatever partial/overflowing line the
+    # adversarial chunks left pending, so PING below arrives as its own
+    # clean line -- matches radio-robot-lib's own module docstring
+    # rationale for why the recovery command is not concatenated
+    # directly onto an unterminated garbage prefix.
+    handler.feed(b"\n")
+    handler.feed(b"PING\n")
+    assert sink.lines()[-1:] == ["pong 0"], (
+        "case %r: PING after the garbage did not produce the expected "
+        "reply -- handler did not recover; sink had %r"
+        % (name, sink.lines()))
+
+
+def test_recovers_after_every_adversarial_input_in_one_session():
+    """Companion to the per-case sweep above, ported from
+    radio-robot-lib's own test_recovers_after_every_adversarial_input_
+    in_one_session: ALL adversarial cases, back-to-back, on ONE handler
+    instance (rather than a fresh handler per case) -- the failure mode
+    a per-case sweep cannot see is state leaking or accumulating badly
+    enough across many bad lines that some LATER, unrelated line
+    misdispatches. A PING is interleaved after every case; every one
+    must come back clean, and the total count must match exactly (a
+    deficit means some PING got lost; a surplus means a "malformed"
+    case actually dispatched as PING when it should not have)."""
+    handler, adapter, sink = _new_handler()
+    adapter.now_value = 0
+    for _name, case_chunks in _ADVERSARIAL_RECOVERY_CASES:
+        for chunk in case_chunks:
+            handler.feed(chunk)
+        handler.feed(b"\n")
+        handler.feed(b"PING\n")
+    pong_count = sink.lines().count("pong 0")
+    assert pong_count == len(_ADVERSARIAL_RECOVERY_CASES), (
+        "expected %d pong replies (one recovery PING per case), got %d "
+        "-- a PING somewhere in the session did not come back, so state "
+        "from an earlier case corrupted a later one"
+        % (len(_ADVERSARIAL_RECOVERY_CASES), pong_count))
