@@ -87,45 +87,47 @@ def test_fixture_block_count_is_stable():
 # GET/SET/TLM/WHEELS/STOP deferred to tickets 002/003).
 # ---------------------------------------------------------------------------
 
-_DEFERRED_VERBS = (b"WHEELS", b"STOP")
 _OUT_OF_SPRINT_SCOPE_VERBS = (b"RUN",)
 
 
 def _classify(block):
     """Returns ``(action, reason)`` -- ``action`` is ``"run"`` or
     ``"skip"``; ``reason`` is ``None`` for ``"run"``, else a str
-    explaining why."""
+    explaining why.
+
+    Ticket 003 un-skips WHEELS/STOP (real bodies land in this ticket)
+    and every EMIT-driven telemetry block (``emit_telemetry()`` is
+    this ticket's scope too) -- only RUN, the RUN-listing HELP vector,
+    and DEBUG (robot-to-host-only, never ported at all, per this
+    sprint's own scope) stay skipped, permanently."""
     kinds = set(kind for kind, _payload in block.actions)
-    if "EMIT" in kinds:
-        return "skip", "telemetry emission (thdr/t) is ticket 003's scope"
     if "DEBUG" in kinds:
         return "skip", (
             "sendDebug()/the robot-to-host `debug` emission is outside "
             "this sprint's verb scope -- never ported (see "
             "src/core/protocol.py's own docstring)")
 
-    first_in = next(payload for kind, payload in block.actions if kind == "IN")
-    stripped = first_in.strip(" ")
-    verb_text = stripped.split(" ", 1)[0] if stripped else ""
-    verb_bytes = verb_text.encode("ascii")
+    in_actions = [payload for kind, payload in block.actions if kind == "IN"]
+    if in_actions:
+        stripped = in_actions[0].strip(" ")
+        verb_text = stripped.split(" ", 1)[0] if stripped else ""
+        verb_bytes = verb_text.encode("ascii")
 
-    if verb_bytes in _DEFERRED_VERBS:
-        return "skip", (
-            "%s's real body lands in ticket 003 -- ticket 002 still "
-            "dispatches it as a recognized-but-stub verb name" % verb_text)
-    if verb_bytes in _OUT_OF_SPRINT_SCOPE_VERBS:
-        return "skip", (
-            "RUN is outside this sprint's verb scope entirely "
-            "(sprint.md's 'In Scope' verb list omits it) -- never ported")
-    if verb_text == "HELP" and "RUN" in block.expected_out[0].split(" "):
-        return "skip", (
-            "this fixture's HELP vector lists RUN because "
-            "radio-robot-lib's own archetype implements 13 verbs; this "
-            "sprint implements only the 12 verbs sprint.md scopes in, "
-            "so HELP's correct text here has no RUN -- pinned directly "
-            "by test_help_lists_every_verb_this_sprint_scopes_including_stubs "
-            "below instead of via this fixture block")
+        if verb_bytes in _OUT_OF_SPRINT_SCOPE_VERBS:
+            return "skip", (
+                "RUN is outside this sprint's verb scope entirely "
+                "(sprint.md's 'In Scope' verb list omits it) -- never ported")
+        if verb_text == "HELP" and "RUN" in block.expected_out[0].split(" "):
+            return "skip", (
+                "this fixture's HELP vector lists RUN because "
+                "radio-robot-lib's own archetype implements 13 verbs; this "
+                "sprint implements only the 12 verbs sprint.md scopes in, "
+                "so HELP's correct text here has no RUN -- pinned directly "
+                "by test_help_lists_every_verb_this_sprint_scopes_including_stubs "
+                "below instead of via this fixture block")
 
+    # EMIT-only blocks (no "IN" action at all) fall through to here and
+    # run for real -- emit_telemetry() is ticket 003's scope.
     return "run", None
 
 
@@ -133,15 +135,16 @@ def test_golden_vector_classification_counts():
     """Pinned split so a change to _classify() (or a fixture re-sync)
     is visible as a deliberate count change, not a silent drift in how
     much of the fixture this ticket actually exercises. Ticket 002
-    moves the fixture's 12 SET blocks (its only GET/SET/TLM coverage --
-    the fixture has zero GET or TLM blocks at all, see this ticket's
-    own new test_get_*/test_tlm_* functions below for that coverage
-    instead) from skip to run: 12 (ticket 001) + 12 (SET, ticket 002)
-    = 24 run, 31 - 12 = 19 skip."""
+    moved the fixture's 12 SET blocks from skip to run: 12 (ticket 001)
+    + 12 (SET, ticket 002) = 24 run, 31 - 12 = 19 skip. Ticket 003 moves
+    4 WHEELS blocks + 3 STOP blocks + 1 multi-frame EMIT block from skip
+    to run: 24 + 8 = 32 run, 19 - 8 = 11 skip (2 DEBUG + 8 RUN + 1
+    RUN-listing HELP block, all permanently skipped -- RUN/debug are
+    never ported at all, per this sprint's own verb scope)."""
     run_count = sum(1 for b in _BLOCKS if _classify(b)[0] == "run")
     skip_count = sum(1 for b in _BLOCKS if _classify(b)[0] == "skip")
-    assert run_count == 24
-    assert skip_count == 19
+    assert run_count == 32
+    assert skip_count == 11
     assert run_count + skip_count == len(_BLOCKS)
 
 
@@ -192,11 +195,31 @@ def _apply_setup(adapter, key, tokens):
         adapter.status_tlm = tlm
     elif key == "setresult":
         adapter.set_result = _SETRESULT_ORDINAL_TO_RESULT[int(tokens[0])]
+    elif key == "wheelsresult":
+        adapter.wheels_result = _SETRESULT_ORDINAL_TO_RESULT[int(tokens[0])]
+    elif key == "stopresult":
+        adapter.stop_result = _SETRESULT_ORDINAL_TO_RESULT[int(tokens[0])]
     else:
         raise ValueError(
             "SETUP key %r not recognized by this ticket's mock adapter -- "
             "if this fired for a block _classify() marked \"run\", either "
             "the classifier or the mock adapter needs to grow to match" % (key,))
+
+
+def _apply_emit_action(handler, payload):
+    """``payload`` is the fixture's own EMIT sub-syntax: a list of
+    ``"<name>:<hex0or1>:<value>"`` tokens (see
+    protocol_golden_vectors.txt's own header comment) -- unpacked here
+    into the ``(name, value, hex)`` tuples ``ProtocolHandler.
+    emit_telemetry()`` takes, then fed straight to it. Never touches
+    ``feed()`` -- EMIT drives ``emit_telemetry()`` directly, the same
+    way the C++ harness's own ``phEmitTelemetry()`` call does, since
+    there is no wire form a host ever sends this on."""
+    columns = []
+    for token in payload:
+        name, hexflag, value = token.split(":")
+        columns.append((name, int(value), bool(int(hexflag))))
+    handler.emit_telemetry(columns)
 
 
 def _run_block(block):
@@ -206,10 +229,12 @@ def _run_block(block):
     for kind, payload in block.actions:
         if kind == "IN":
             handler.feed((payload + "\n").encode("ascii"))
+        elif kind == "EMIT":
+            _apply_emit_action(handler, payload)
         else:
             raise ValueError(
                 "action kind %r not supported by this ticket's runner -- "
-                "EMIT/DEBUG blocks are always classified \"skip\"" % (kind,))
+                "DEBUG blocks are always classified \"skip\"" % (kind,))
     return sink.lines()
 
 
@@ -897,3 +922,286 @@ def test_tlm_bare_no_field_at_all_has_no_recoverable_id():
     assert sink.lines() == []
     assert handler.malformed_count() == 1
     assert adapter.tlm_calls == []
+
+
+# ---------------------------------------------------------------------------
+# WHEELS (protocol.md Sec 5/9.1), ticket 003. Golden-vector blocks
+# (now unskipped, test_golden_vector_block above) already cover the
+# id-outcome/Result-code matrix; these tests cover the numeric-field
+# reuse, wrong arity, and the #0-legality flip against STOP below.
+# ---------------------------------------------------------------------------
+
+def test_wheels_call_receives_parsed_numeric_fields_untouched():
+    """protocol.md Sec 9.1: the handler holds no bounds table -- the
+    Adapter receives left/right/duration exactly as
+    parse_wire_float() decoded them, with no scaling, clamping, or
+    int-casting performed here (that is ticket 005's job)."""
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"WHEELS 100 -50 1000 #5\n")
+    assert sink.lines() == ["ok #5"]
+    assert adapter.wheels_calls == [(100.0, -50.0, 1000.0, 5)]
+
+
+def test_wheels_wrong_arity_two_fields_no_recoverable_id():
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"WHEELS 100 100\n")
+    assert sink.lines() == []
+    assert handler.malformed_count() == 1
+    assert adapter.wheels_calls == []
+
+
+def test_wheels_wrong_arity_five_fields_recovers_id():
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"WHEELS 1 2 3 4 #9\n")
+    assert sink.lines() == ["err #9 2"]  # BADARG -- WHEELS is a known verb
+    assert handler.malformed_count() == 1
+    assert adapter.wheels_calls == []
+
+
+def test_wheels_fourth_field_not_a_well_formed_id_is_malformed():
+    """WHEELS has no other use for a 4th positional field -- a token
+    that is present but not '#'-shaped makes the WHOLE line
+    malformed, not "WHEELS with an id-less extra field" (same call
+    SET's own resolve_trailing_optional_id() use makes for its own
+    3rd field)."""
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"WHEELS 100 100 1000 notanid\n")
+    assert sink.lines() == []
+    assert handler.malformed_count() == 1
+    assert adapter.wheels_calls == []
+
+
+def test_wheels_rejects_underscore_digit_separator():
+    """protocol.md Sec 9.4, reused from SET's own guarded parser
+    (ticket 002) rather than a second, divergent one."""
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"WHEELS 1_00 100 1000 #9\n")
+    assert sink.lines() == ["err #9 2"]
+    assert handler.malformed_count() == 1
+    assert adapter.wheels_calls == []
+
+
+def test_wheels_rejects_hex_float_literal():
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"WHEELS 0x1.8p3 100 1000 #9\n")
+    assert sink.lines() == ["err #9 2"]
+    assert handler.malformed_count() == 1
+    assert adapter.wheels_calls == []
+
+
+def test_wheels_rejects_inf_and_nan_literal_text():
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"WHEELS inf 100 1000 #9\n")
+    assert sink.lines() == ["err #9 2"]
+    handler.feed(b"WHEELS 100 nan 1000 #8\n")
+    assert sink.lines() == ["err #9 2", "err #8 2"]
+    assert handler.malformed_count() == 2
+    assert adapter.wheels_calls == []
+
+
+def test_wheels_bad_value_with_id_omitted_acks_bare_err():
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"WHEELS notanumber 100 1000\n")
+    assert sink.lines() == ["err 2"]
+    assert handler.malformed_count() == 1
+    assert adapter.wheels_calls == []
+
+
+def test_wheels_bad_value_with_id_zero_suppresses_reply():
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"WHEELS notanumber 100 1000 #0\n")
+    assert sink.lines() == []
+    assert handler.malformed_count() == 1
+    assert adapter.wheels_calls == []
+
+
+# ---------------------------------------------------------------------------
+# STOP (protocol.md Sec 5.1/9.1), ticket 003.
+# ---------------------------------------------------------------------------
+
+def test_stop_bare_no_field_has_no_recoverable_id():
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"STOP\n")
+    assert sink.lines() == []
+    assert handler.malformed_count() == 1
+    assert adapter.stop_calls == []
+
+
+def test_stop_wrong_arity_two_fields_recovers_id():
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"STOP #5 #7\n")
+    assert sink.lines() == ["err #7 2"]
+    assert handler.malformed_count() == 1
+    assert adapter.stop_calls == []
+
+
+def test_stop_field_not_hash_shaped_is_malformed():
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"STOP notanid\n")
+    assert sink.lines() == []
+    assert handler.malformed_count() == 1
+    assert adapter.stop_calls == []
+
+
+def test_stop_rejected_by_adapter_still_acks_with_id():
+    """STOP's id is REQUIRED, so unlike SET/WHEELS there is no
+    id-0-suppresses-ack carve-out on the rejection path either -- it
+    is always acked, even on rejection (protocol.md Sec 5.1)."""
+    handler, adapter, sink = _new_handler()
+    adapter.stop_result = protocol.Result.BUSY
+    handler.feed(b"STOP #11\n")
+    assert sink.lines() == ["err #11 10"]
+    assert adapter.stop_calls == [11]
+
+
+# ---------------------------------------------------------------------------
+# The #0-legality flip (protocol.md Sec 2.2/8.2, this ticket's own
+# explicit acceptance criterion): the SAME trailing token, "#0", is
+# legal (silent execute) on WHEELS -- an optional-id verb -- and
+# malformed on STOP -- a required-id verb. Tested side by side so the
+# asymmetry is pinned as one deliberate fact, not two coincidentally
+# similar tests.
+# ---------------------------------------------------------------------------
+
+def test_wheels_hash_zero_executes_silently_optional_id_verb():
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"WHEELS 100 100 1000 #0\n")
+    assert sink.lines() == [], "WHEELS #0 must execute silently, no reply"
+    assert handler.malformed_count() == 0, "WHEELS #0 is well-formed, not malformed"
+    assert adapter.wheels_calls == [(100.0, 100.0, 1000.0, 0)], (
+        "the command must still have executed, reply_id 0")
+
+
+def test_stop_hash_zero_is_malformed_required_id_verb():
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"STOP #0\n")
+    assert sink.lines() == [], "STOP #0 must never reply"
+    assert handler.malformed_count() == 1, "STOP #0 is malformed, unlike WHEELS #0"
+    assert adapter.stop_calls == [], "the malformed line must never reach on_stop()"
+
+
+# ---------------------------------------------------------------------------
+# ESTOP (protocol.md Sec 2.3/5.1/SUC-002), ticket 003's own addition:
+# confirming the well-formed and malformed paths both land on "no
+# reply" for the SAME underlying reason (ESTOP's own rule winning over
+# the general recovery rule), not by coincidence of two different code
+# paths that both happen to stay silent. The individual well-formed and
+# malformed cases are each already covered above
+# (test_estop_produces_no_ack_at_all / test_estop_wrong_arity_still_
+# produces_no_reply / test_estop_with_trailing_id_still_never_acks,
+# ticket 001) -- this test is the side-by-side confirmation ticket 003
+# itself calls for.
+# ---------------------------------------------------------------------------
+
+def test_estop_wellformed_and_malformed_both_silent_for_the_same_reason():
+    handler, adapter, sink = _new_handler()
+
+    handler.feed(b"ESTOP\n")  # well-formed
+    assert sink.lines() == []
+    assert adapter.estop_calls == 1
+    assert handler.malformed_count() == 0
+
+    handler.feed(b"ESTOP #5\n")  # malformed: wrong arity, id-shaped extra field
+    assert sink.lines() == [], (
+        "ESTOP must never ack even though '#5' is a well-formed nonzero "
+        "id the general recovery rule would otherwise honor")
+    assert adapter.estop_calls == 1, "the malformed call must never reach the adapter"
+    assert handler.malformed_count() == 1
+
+
+# ---------------------------------------------------------------------------
+# emit_telemetry() (protocol.md Sec 5.2/6.2), ticket 003: thdr once /
+# thdr again on column-set change / t every call, and per-handler-
+# instance isolation. The fixture's own multi-frame EMIT block (now
+# unskipped, test_golden_vector_block above) covers the literal spec
+# S6.2 worked example; these tests cover header-change detection in
+# more depth than that one fixture block does.
+# ---------------------------------------------------------------------------
+
+_COLUMNS_A = [("seq", 1, False), ("flags", 216, True)]
+_COLUMNS_A_AGAIN = [("seq", 2, False), ("flags", 8, True)]  # same names/hex, new values
+
+
+def test_emit_telemetry_sends_thdr_once_then_t_every_call():
+    handler, adapter, sink = _new_handler()
+    handler.emit_telemetry(_COLUMNS_A)
+    handler.emit_telemetry(_COLUMNS_A_AGAIN)
+    handler.emit_telemetry(_COLUMNS_A_AGAIN)
+    assert sink.lines() == [
+        "thdr seq flags",
+        "t 1 d8",
+        "t 2 8",
+        "t 2 8",
+    ]
+
+
+def test_emit_telemetry_resends_thdr_when_column_count_changes():
+    handler, adapter, sink = _new_handler()
+    handler.emit_telemetry(_COLUMNS_A)
+    handler.emit_telemetry([("seq", 3, False)])  # one column dropped
+    assert sink.lines() == [
+        "thdr seq flags",
+        "t 1 d8",
+        "thdr seq",
+        "t 3",
+    ]
+
+
+def test_emit_telemetry_resends_thdr_when_column_name_changes():
+    handler, adapter, sink = _new_handler()
+    handler.emit_telemetry(_COLUMNS_A)
+    handler.emit_telemetry([("seq", 3, False), ("otherflags", 1, True)])
+    assert sink.lines() == [
+        "thdr seq flags",
+        "t 1 d8",
+        "thdr seq otherflags",
+        "t 3 1",
+    ]
+
+
+def test_emit_telemetry_resends_thdr_when_hex_flag_changes():
+    """Same names, same count, only a column's hex-ness flips -- the
+    C++ archetype's own headerChanged() compares hex per-column
+    explicitly, independent of the name compare, so this must trigger
+    a fresh thdr on its own, not just when a name differs."""
+    handler, adapter, sink = _new_handler()
+    handler.emit_telemetry(_COLUMNS_A)
+    handler.emit_telemetry([("seq", 5, True), ("flags", 216, True)])
+    assert sink.lines() == [
+        "thdr seq flags",
+        "t 1 d8",
+        "thdr seq flags",
+        "t 5 d8",
+    ]
+
+
+def test_emit_telemetry_header_state_is_per_handler_instance_not_shared():
+    """sprint.md's Design Rationale: one ProtocolHandler per transport,
+    each with its own independent thdr-once-per-subscriber tracking --
+    two freshly constructed instances receiving the identical column
+    set must EACH emit their own thdr once; neither's remembered header
+    state may leak into the other."""
+    handler_a, _adapter_a, sink_a = _new_handler()
+    handler_b, _adapter_b, sink_b = _new_handler()
+
+    handler_a.emit_telemetry(_COLUMNS_A)
+    handler_a.emit_telemetry(_COLUMNS_A_AGAIN)
+    assert sink_a.lines() == ["thdr seq flags", "t 1 d8", "t 2 8"]
+
+    # handler_b has never emitted before -- even though handler_a has
+    # already "seen" this exact column set, handler_b's own thdr is
+    # still due, proving the state is not shared module-level state.
+    handler_b.emit_telemetry(_COLUMNS_A)
+    assert sink_b.lines() == ["thdr seq flags", "t 1 d8"]
+
+
+def test_emit_telemetry_decimal_column_formats_signed_no_hex():
+    handler, adapter, sink = _new_handler()
+    handler.emit_telemetry([("x", -1234, False), ("y", 892, False)])
+    assert sink.lines() == ["thdr x y", "t -1234 892"]
+
+
+def test_emit_telemetry_hex_column_formats_lowercase_no_prefix():
+    handler, adapter, sink = _new_handler()
+    handler.emit_telemetry([("flags", 4096, True)])
+    assert sink.lines() == ["thdr flags", "t 1000"]

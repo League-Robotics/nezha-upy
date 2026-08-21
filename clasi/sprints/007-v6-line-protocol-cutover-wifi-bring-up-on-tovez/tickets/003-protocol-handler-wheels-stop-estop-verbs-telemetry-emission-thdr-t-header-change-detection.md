@@ -2,9 +2,13 @@
 id: '003'
 title: 'Protocol handler: WHEELS/STOP/ESTOP verbs + telemetry emission (thdr/t, header-change
   detection)'
-status: open
-use-cases: [SUC-001, SUC-002, SUC-004]
-depends-on: ['002']
+status: done
+use-cases:
+- SUC-001
+- SUC-002
+- SUC-004
+depends-on:
+- '002'
 github-issue: ''
 issue: port-v6-line-protocol-hard-cutover-from-v5.md
 completes_issue: true
@@ -45,20 +49,20 @@ the golden-vector harness's mock adapter stands in.
 
 ## Acceptance Criteria
 
-- [ ] `WHEELS`/`STOP`/`ESTOP` implemented, dispatched through the
+- [x] `WHEELS`/`STOP`/`ESTOP` implemented, dispatched through the
       shared tokenizer/dispatch core.
-- [ ] `emitTelemetry()` implemented with `thdr`-once / `thdr`-again-
+- [x] `emitTelemetry()` implemented with `thdr`-once / `thdr`-again-
       on-column-change / `t`-every-call semantics.
-- [ ] Golden-vector harness green for every `WHEELS`/`STOP`/`ESTOP`/
+- [x] Golden-vector harness green for every `WHEELS`/`STOP`/`ESTOP`/
       telemetry vector, including the multi-frame TLM vector (`thdr`
       once, `t` repeating across several `EMIT` actions in one
       block).
-- [ ] Explicit tests: `STOP #0` is malformed (required-id verb);
+- [x] Explicit tests: `STOP #0` is malformed (required-id verb);
       `WHEELS ... #0` executes silently (optional-id verb) — same
       token, opposite legality, both tested; well-formed `ESTOP`
       produces no reply (sink empty); two independent handler
       instances' telemetry-header state don't cross-contaminate.
-- [ ] `py_compile` clean; no MicroPython-incompatible syntax.
+- [x] `py_compile` clean; no MicroPython-incompatible syntax.
 
 ## Testing
 

@@ -68,6 +68,36 @@ own ``float()`` needs that C++'s ``strtof()`` did not; and
 ``_format_config_value()``. ``WHEELS``/``STOP`` remain registered-
 name-only stubs -- ticket 003's job.
 
+Ticket 003 scope (this file, as it lands here): ``WHEELS``/``STOP`` get
+real bodies. ``WHEELS left right duration [#id]`` shares the exact
+id-outcome-driven reply shape ``SET`` already uses (id omitted -> bare
+ack; ``#0`` -> silent; nonzero -> ``ok #id``/``err #id <code>``) via
+this same file's ``resolve_trailing_optional_id()``, and reuses
+``parse_wire_float()`` for its three numeric fields rather than a
+second, int-shaped parser -- ``left``/``right``/``duration`` reach the
+Adapter as plain floats; scaling by ``countsPerLength`` and enforcing
+the 5000 ms ceiling are the Adapter's job (protocol.md Sec 5/9.1: "the
+handler holds no bounds table"), never this handler's. ``STOP #id``'s
+id is REQUIRED, not optional -- this port does not duplicate a second
+id-parsing helper for that: it reuses ticket 002's own
+``_recover_trailing_id()`` (already "well-formed AND nonzero", exactly
+``STOP``'s own rule, and already exported for the generic malformed-
+line recovery path), which is also why a literal ``STOP #0`` maps onto
+the SAME "no reply, malformed" path as ``STOP notanid`` -- the id slot
+that would have been recovered is the very token that fails the
+nonzero check. Also added: ``emit_telemetry()`` (protocol.md Sec 5.2/
+6.2) -- ``thdr <col1> ...`` once (on this handler instance's first
+call, or whenever the column set's count/names/hex-ness changes from
+what THIS instance last remembered), ``t <v1> <v2> ...`` every call.
+Header-change state (``_header_names``/``_header_hex``/
+``_ever_emitted_header``) is per-``ProtocolHandler``-instance, matching
+the C++ archetype's ``headerNames_``/``headerHex_``/
+``everEmittedHeader_`` fields and sprint.md's Design Rationale
+("one handler per transport... correctly gives each transport its own
+independent thdr-once-per-subscriber telemetry tracking") -- no shared
+module-level state, no size cap (Python lists, not a fixed
+``kMaxHeaderColumns`` array).
+
 Adapter seam (protocol.md Sec 4), as far as this ticket calls it --
 duck-typed, no ABC (MicroPython has no ``abc`` module):
 
@@ -81,10 +111,18 @@ duck-typed, no ABC (MicroPython has no ``abc`` module):
     on_tlm(mode) -> Result                 -- Result never reaches the wire
     field_count() -> int                   -- for bare GET
     field_name(index) -> str
+    on_wheels(left, right, duration, reply_id) -> Result
+                                            -- [mm/s] [mm/s] [ms]; no
+                                               bounds enforcement here
+    on_stop(reply_id) -> Result
 
-Ticket 003 grows this contract further (``on_wheels``/``on_stop``,
-protocol.md Sec 4) as WHEELS/STOP get real bodies; the real adapter
-(``src/hardware/protocol_adapter.py``) is ticket 005.
+``emit_telemetry()`` never calls back into the Adapter at all -- unlike
+every verb handler above, it is not reached through ``dispatch()``; the
+caller (``comms.py``'s scheduled pump, ticket 006) hands it an
+already-projected column list directly, mirroring the archetype's own
+``Snapshot``-by-value contract (protocol.md Sec 5.2: "the adapter's
+telemetry job is a projection... hand the handler an array"). The real
+adapter (``src/hardware/protocol_adapter.py``) is ticket 005.
 
 Design decisions this port makes, beyond a line-for-line translation:
 
@@ -456,6 +494,16 @@ class ProtocolHandler(object):
         self._line_buf = bytearray()
         self._overflowing = False
         self._malformed_count = 0
+        # ---- telemetry header-change state (ticket 003, protocol.md
+        # Sec 5.2/6.2) -- per-INSTANCE, never shared across handlers
+        # (sprint.md's Design Rationale: one ProtocolHandler per
+        # transport, each with its own thdr-once-per-subscriber
+        # tracking). Mirrors the C++ archetype's headerNames_/
+        # headerHex_/everEmittedHeader_ fields, minus the fixed-size
+        # array cap (protocol.py's own module docstring).
+        self._header_names = []
+        self._header_hex = []
+        self._ever_emitted_header = False
 
     def malformed_count(self):
         """Lines dropped as unknown verb, wrong arity, or an
@@ -602,6 +650,66 @@ class ProtocolHandler(object):
         method rather than duplicating the format string."""
         name, serial, _drivetrain, _profile, _version = self._adapter.identity()
         self._write_line("device NEZHA2 robot %s %s\n" % (name, serial))
+
+    def emit_telemetry(self, columns):
+        """protocol.md Sec 5.2/6.2: ``thdr <col1> <col2> ...`` once --
+        the first time this INSTANCE ever emits, or again whenever the
+        column set (count, names, or hex-ness, in that order) changes
+        from what this instance last remembered -- then
+        ``t <v1> <v2> ...`` on every call, header emission included.
+
+        ``columns`` is a sequence of ``(name, value, hex)`` tuples,
+        already fully projected by the caller (this handler holds no
+        notion of what a column MEANS -- Sec 5.2: "the adapter's
+        telemetry job is a projection, not a computation... hand the
+        handler an array"). ``name`` is a ``str``; ``value`` is an
+        ``int``; ``hex`` is truthy for a flags-style column formatted
+        as lowercase hex with no ``0x`` prefix (Sec 6.5), falsy for an
+        ordinary signed decimal column."""
+        if self._header_changed(columns):
+            self._emit_header(columns)
+            self._remember_header(columns)
+        self._emit_frame(columns)
+
+    def _header_changed(self, columns):
+        if not self._ever_emitted_header:
+            return True
+        if len(columns) != len(self._header_names):
+            return True
+        for index in range(len(columns)):
+            name, _value, hex_flag = columns[index]
+            if self._header_hex[index] != bool(hex_flag):
+                return True
+            if self._header_names[index] != name:
+                return True
+        return False
+
+    def _remember_header(self, columns):
+        self._header_names = [name for name, _value, _hex in columns]
+        self._header_hex = [bool(hex_flag) for _name, _value, hex_flag in columns]
+        self._ever_emitted_header = True
+
+    def _emit_header(self, columns):
+        parts = ["thdr"]
+        for name, _value, _hex in columns:
+            parts.append(name)
+        self._write_line(" ".join(parts) + "\n")
+
+    def _emit_frame(self, columns):
+        parts = ["t"]
+        for _name, value, hex_flag in columns:
+            if hex_flag:
+                # Lowercase hex, no "0x" prefix (Sec 6.5). Masked to 32
+                # bits the same way the C++ archetype's own
+                # `static_cast<uint32_t>(value)` reinterprets a
+                # negative int32 as its unsigned bit pattern before
+                # formatting -- flags are never negative in practice,
+                # but the mask keeps this port byte-identical to the
+                # archetype's own arithmetic rather than assuming so.
+                parts.append("%x" % (int(value) & 0xFFFFFFFF))
+            else:
+                parts.append("%d" % int(value))
+        self._write_line(" ".join(parts) + "\n")
 
     # ---- session verbs ----------------------------------------------------
     # HELLO/PING/ID/VER/STATUS/HELP all take zero fields -- any
@@ -779,14 +887,85 @@ class ProtocolHandler(object):
         # `(void)adapter_.onTlm(mode);`).
         self._adapter.on_tlm(mode_bytes.decode("ascii"))
 
-    def _handle_wheels_stop_stub(self, fields, last_field_token):
-        """WHEELS/STOP: registered dispatch NAMES only, still. An
-        inbound line for one of them is recognized (so it never falls
-        into the generic "unknown verb" malformed path) but is
-        otherwise a deliberate no-op -- no arity check, no adapter
-        call, no reply, no malformed-count change -- until ticket 003
-        gives it a real body. See this module's own docstring."""
-        pass
+    # ---- motion: WHEELS/STOP (protocol.md Sec 5/5.1/9.1) -------------------
+    # No queue, no planner -- WHEELS reaches the Adapter directly. The
+    # handler holds no bounds table (Sec 9.1: "the adapter enforces
+    # [the 5000 ms ceiling]"), so left/right/duration cross this seam
+    # as plain parsed floats, untouched.
+
+    def _handle_wheels(self, fields, last_field_token):
+        if len(fields) != 3 and len(fields) != 4:
+            self._reject_malformed(last_field_token, Result.BADARG)
+            return
+
+        id_provided = len(fields) == 4
+        if id_provided:
+            id_outcome, reply_id = resolve_trailing_optional_id(fields[3])
+            if id_outcome == ID_MALFORMED:
+                # The 4th token is present but not a well-formed
+                # "#id" -- WHEELS has no other use for a 4th
+                # positional field, so this is a malformed line, not
+                # "a WHEELS with an id-less extra field" (same call
+                # SET's own 3rd-field handling makes).
+                self._reject_malformed(last_field_token, Result.BADARG)
+                return
+        else:
+            id_outcome, reply_id = ID_OMITTED, 0
+
+        left = parse_wire_float(fields[0])
+        right = parse_wire_float(fields[1])
+        duration = parse_wire_float(fields[2])
+        if left is None or right is None or duration is None:
+            # A handler-level decode failure on any of the three
+            # numeric fields -- never reaches on_wheels(). Same
+            # id-outcome-driven reply shape the success path below
+            # uses (mirrors _handle_set()'s own bad-value path).
+            self._malformed_count += 1
+            if id_outcome == ID_NONZERO:
+                self._reply_err(reply_id, Result.BADARG)
+            elif id_outcome == ID_OMITTED:
+                self._reply_err_bare(Result.BADARG)
+            # ID_ZERO: "#0" -- no ack wanted, stays silent.
+            return
+
+        result = self._adapter.on_wheels(left, right, duration, reply_id)
+
+        if id_outcome == ID_ZERO:
+            return  # executes silently, no ack at all (Sec 8.2)
+        if id_outcome == ID_OMITTED:
+            if result == Result.OK:
+                self._reply_ok_bare()
+            else:
+                self._reply_err_bare(result_code(result))
+            return
+        # ID_NONZERO
+        if result == Result.OK:
+            self._reply_ok(reply_id)
+        else:
+            self._reply_err(reply_id, result_code(result))
+
+    def _handle_stop(self, fields, last_field_token):
+        # STOP's id is REQUIRED (`STOP #<id>`, Sec 3.1 -- no
+        # brackets), and it is the verb's ONLY field, so fieldCount
+        # must be exactly 1.
+        if len(fields) != 1:
+            self._reject_malformed(last_field_token, Result.BADARG)
+            return
+        # _recover_trailing_id() requires a well-formed AND NONZERO
+        # id -- exactly STOP's own rule (Sec 2.2/8.2: "#0 is legal
+        # only where the id is optional... on STOP it is malformed").
+        # A literal "STOP #0" is therefore rejected here the same way
+        # "STOP notanid" is, and (since the id is what would have been
+        # recovered) correctly produces no reply either way.
+        reply_id = _recover_trailing_id(fields[0])
+        if reply_id is None:
+            self._reject_malformed(last_field_token, Result.BADARG)
+            return
+        result = self._adapter.on_stop(reply_id)
+        if result == Result.OK:
+            self._reply_ok(reply_id)
+        else:
+            self._reply_err(reply_id, result_code(result))
 
     VERB_TABLE = (
         (b"HELLO", _handle_hello),
@@ -798,7 +977,7 @@ class ProtocolHandler(object):
         (b"GET", _handle_get),
         (b"SET", _handle_set),
         (b"TLM", _handle_tlm),
-        (b"WHEELS", _handle_wheels_stop_stub),
-        (b"STOP", _handle_wheels_stop_stub),
+        (b"WHEELS", _handle_wheels),
+        (b"STOP", _handle_stop),
         (b"ESTOP", _handle_estop),
     )

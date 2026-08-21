@@ -14,10 +14,11 @@ Ticket 001 scope: only the methods session verbs + ESTOP call --
 the GET/SET/TLM canned answers (``get_overrides``/``field_names`` for
 ``on_get()``/``field_count()``/``field_name()``, ``set_result`` for
 ``on_set()``, ``tlm_calls`` for ``on_tlm()``). Ticket 003 (WHEELS/STOP)
-extends this SAME class further -- this file is purely additive across
-the sprint, same as ``protocol.py`` itself. This file is CPython-only
-test scaffolding; nothing under ``src/`` imports it.
-"""
+adds ``wheels_result``/``wheels_calls`` for ``on_wheels()`` and
+``stop_result``/``stop_calls`` for ``on_stop()`` -- same canned-Result
+convention as ``set_result``. This file is purely additive across the
+sprint, same as ``protocol.py`` itself. This file is CPython-only test
+scaffolding; nothing under ``src/`` imports it."""
 
 from core import protocol
 
@@ -71,6 +72,16 @@ class MockAdapter(object):
         # there is nothing to arm here beyond recording the calls.
         self.tlm_calls = []
 
+        # ---- WHEELS/STOP canned answers (ticket 003 scope) ----
+        # Same "one canned Result for every call in a test" convention
+        # as ``set_result`` above -- the golden-vector fixture's own
+        # "SETUP wheelsresult <ordinal>"/"SETUP stopresult <ordinal>"
+        # arm these per block. Both default to OK.
+        self.wheels_result = protocol.Result.OK
+        self.wheels_calls = []
+        self.stop_result = protocol.Result.OK
+        self.stop_calls = []
+
     def identity(self):
         self.identity_calls += 1
         return (self.name, self.serial, self.drivetrain, self.profile,
@@ -107,6 +118,14 @@ class MockAdapter(object):
     def on_tlm(self, mode):
         self.tlm_calls.append(mode)
         return protocol.Result.OK
+
+    def on_wheels(self, left, right, duration, reply_id):
+        self.wheels_calls.append((left, right, duration, reply_id))
+        return self.wheels_result
+
+    def on_stop(self, reply_id):
+        self.stop_calls.append(reply_id)
+        return self.stop_result
 
 
 class RecordingSink(protocol.Sink):
