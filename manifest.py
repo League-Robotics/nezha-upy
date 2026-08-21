@@ -77,6 +77,7 @@ freeze(
         "core/comms.py",
         "core/config.py",
         "core/msgs.py",
+        "core/protocol.py",
         "core/radio_shim.py",
         "core/telemetry.py",
         "core/wifi_at.py",

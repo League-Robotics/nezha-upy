@@ -2,8 +2,11 @@
 id: '001'
 title: Golden-vector harness + protocol handler core (feed/tokenizer/dispatch, malformed-line
   + ESTOP-exception recovery, session verbs)
-status: open
-use-cases: [SUC-001, SUC-002, SUC-005]
+status: done
+use-cases:
+- SUC-001
+- SUC-002
+- SUC-005
 depends-on: []
 github-issue: ''
 issue: port-v6-line-protocol-hard-cutover-from-v5.md
@@ -67,28 +70,28 @@ the real `ProtocolAdapter` is ticket 005.
 
 ## Acceptance Criteria
 
-- [ ] `tests/fixtures/protocol_golden_vectors.txt` exists, copied
+- [x] `tests/fixtures/protocol_golden_vectors.txt` exists, copied
       verbatim from `radio-robot-lib/tests/protocol/golden_vectors.txt`.
-- [ ] A CPython harness (e.g. `tests/unit/test_protocol_golden_vectors.py`
+- [x] A CPython harness (e.g. `tests/unit/test_protocol_golden_vectors.py`
       + a small `_protocol_fixture.py` block parser) parses every
       SETUP/IN/OUT block in the fixture into a runnable list with zero
       parse errors — asserted independently of whether the handler
       exists yet, i.e. block-count and structural parsing are tested
       first against the raw fixture text.
-- [ ] `src/core/protocol.py` exists with `ProtocolHandler.feed()`,
+- [x] `src/core/protocol.py` exists with `ProtocolHandler.feed()`,
       the tokenizer, dispatch skeleton, and `HELLO`/`PING`/`ID`/`VER`/
       `STATUS`/`HELP` fully implemented.
-- [ ] Every golden vector for session verbs and for malformed-line /
+- [x] Every golden vector for session verbs and for malformed-line /
       `ESTOP`-exception recovery passes through the harness with a
       mock adapter.
-- [ ] `feed()`'s robustness list (multi-line block, mid-line split
+- [x] `feed()`'s robustness list (multi-line block, mid-line split
       across two `feed()` calls, overlong-line discard, blank-line
       silence, lowercase-verb silent drop) each has an explicit test,
       not just fixture coverage.
-- [ ] `HELP`'s reply text is generated from the same verb table
+- [x] `HELP`'s reply text is generated from the same verb table
       `dispatch()` uses (a test asserting they can't drift is
       sufficient — no need to hand-duplicate the string).
-- [ ] No MicroPython-incompatible syntax (no f-strings, no PEP 604/
+- [x] No MicroPython-incompatible syntax (no f-strings, no PEP 604/
       generic-subscript hints, no host-only stdlib) — `py_compile`
       clean.
 
