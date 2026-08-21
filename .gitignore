@@ -12,3 +12,6 @@ __pycache__/
 
 # vendored upstream MicroPython checkout (fetched by build.sh)
 micropython-microbit-v2/
+
+# deploy staging (tools/deploy.py)
+.tmp/
