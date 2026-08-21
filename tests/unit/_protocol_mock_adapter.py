@@ -10,13 +10,13 @@ C++ specifics (no out-params, no ``const``-correctness, no fixed-size
 recording arrays: Python attributes and lists do that job for free).
 
 Ticket 001 scope: only the methods session verbs + ESTOP call --
-``identity()``/``now()``/``status()``/``on_estop()``. Later tickets
-(002: GET/SET/TLM: 003: WHEELS/STOP) extend this SAME class with the
-remaining canned answers (a wheel-control field table, wheels/stop/set/
-tlm results) as those verb bodies land in ``src/core/protocol.py`` --
-this file is purely additive across the sprint, same as ``protocol.py``
-itself. This file is CPython-only test scaffolding; nothing under
-``src/`` imports it.
+``identity()``/``now()``/``status()``/``on_estop()``. Ticket 002 adds
+the GET/SET/TLM canned answers (``get_overrides``/``field_names`` for
+``on_get()``/``field_count()``/``field_name()``, ``set_result`` for
+``on_set()``, ``tlm_calls`` for ``on_tlm()``). Ticket 003 (WHEELS/STOP)
+extends this SAME class further -- this file is purely additive across
+the sprint, same as ``protocol.py`` itself. This file is CPython-only
+test scaffolding; nothing under ``src/`` imports it.
 """
 
 from core import protocol
@@ -51,6 +51,26 @@ class MockAdapter(object):
         self.status_calls = 0
         self.estop_calls = 0
 
+        # ---- GET/SET/TLM canned answers (ticket 002 scope) ----
+        # GET: name -> float, the adapter's own name/value store; a
+        # name with no entry here is "unknown" (protocol.md Sec 7.1:
+        # GET pure-delegates, no field table lives in the handler).
+        self.get_overrides = {}
+        self.get_calls = []
+        # Bare GET's enumeration order (protocol.md Sec 6:
+        # "one get line per field, entirely the adapter's business").
+        self.field_names = []
+        # SET: one canned Result for every on_set() call in a test
+        # (mirrors mock_adapter.h's "canned answers as plain public
+        # attributes" convention -- the golden-vector fixture's own
+        # "SETUP setresult <ordinal>" arms this per block). Defaults to
+        # OK so a test that never sets it still gets a successful SET.
+        self.set_result = protocol.Result.OK
+        self.set_calls = []
+        # TLM carries no Result back to the wire at all (Sec 6), so
+        # there is nothing to arm here beyond recording the calls.
+        self.tlm_calls = []
+
     def identity(self):
         self.identity_calls += 1
         return (self.name, self.serial, self.drivetrain, self.profile,
@@ -69,6 +89,24 @@ class MockAdapter(object):
 
     def on_estop(self):
         self.estop_calls += 1
+
+    def on_get(self, name):
+        self.get_calls.append(name)
+        return self.get_overrides.get(name)
+
+    def field_count(self):
+        return len(self.field_names)
+
+    def field_name(self, index):
+        return self.field_names[index]
+
+    def on_set(self, name, value, reply_id):
+        self.set_calls.append((name, value, reply_id))
+        return self.set_result
+
+    def on_tlm(self, mode):
+        self.tlm_calls.append(mode)
+        return protocol.Result.OK
 
 
 class RecordingSink(protocol.Sink):

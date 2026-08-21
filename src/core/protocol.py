@@ -56,6 +56,18 @@ reply) until ticket 002 (GET/SET/TLM) and ticket 003 (WHEELS/STOP) give
 it a real body. ``HELP``'s text already lists all of them, since it
 walks this same table.
 
+Ticket 002 scope (this file, as it lands here): ``GET``/``SET``/``TLM``
+get real bodies -- pure delegation to the Adapter, the handler holding
+no field table and no bounds of its own (protocol.md Sec 7); the full
+``Result`` -> wire-error-code table (Sec 6.1, all 8 rejection codes,
+plus ``OK``); the guarded numeric-field parser
+(``_parse_wire_float()``) that pins Sec 9.4's hex-float/leading-
+whitespace findings and adds the whitespace/underscore guards Python's
+own ``float()`` needs that C++'s ``strtof()`` did not; and
+``formatConfigValue()``'s NaN-clamp fix (Sec 9.4 finding 1), ported as
+``_format_config_value()``. ``WHEELS``/``STOP`` remain registered-
+name-only stubs -- ticket 003's job.
+
 Adapter seam (protocol.md Sec 4), as far as this ticket calls it --
 duck-typed, no ABC (MicroPython has no ``abc`` module):
 
@@ -64,10 +76,14 @@ duck-typed, no ABC (MicroPython has no ``abc`` module):
     status() -> (ready, active, conn_left, conn_right, otos, wedge,
                  flags, tlm) -- booleans, `flags` an int, `tlm` a str
     on_estop() -> None
+    on_get(name) -> float or None          -- None means "unknown name"
+    on_set(name, value, reply_id) -> Result
+    on_tlm(mode) -> Result                 -- Result never reaches the wire
+    field_count() -> int                   -- for bare GET
+    field_name(index) -> str
 
-Later tickets grow this contract (``on_wheels``/``on_stop``/``on_get``/
-``on_set``/``on_tlm``/``field_count``/``field_name``, protocol.md Sec
-4) as GET/SET/TLM/WHEELS/STOP get real bodies; the real adapter
+Ticket 003 grows this contract further (``on_wheels``/``on_stop``,
+protocol.md Sec 4) as WHEELS/STOP get real bodies; the real adapter
 (``src/hardware/protocol_adapter.py``) is ticket 005.
 
 Design decisions this port makes, beyond a line-for-line translation:
@@ -99,12 +115,20 @@ Design decisions this port makes, beyond a line-for-line translation:
   do BEFORE tokenizing) has no reason to exist in this port: the
   tokenized field list is never truncated, so its own last element IS
   the line's true raw last token whenever there is one.
-- ``Result`` carries only ``OK``/``UNKNOWN``/``BADARG`` in this ticket
-  -- the two malformed-line rejection codes ``dispatch()``/the session
-  verbs' own arity checks use. The rest of protocol.md Sec 6.1's error
-  code table, and any ordinal-to-wire-code mapping a concrete Adapter
-  needs, is ticket 002's own stated scope ("Result-to-error-code
-  table").
+- ``Result``'s class attributes are the wire error codes themselves
+  (``Result.RANGE == 3``, matching protocol.md Sec 6.1's ``ERR_RANGE``
+  wire value directly), not a declaration-order ordinal the way the
+  C++ archetype's ``enum class Result`` is (there, ``kRange`` is
+  ordinal 3 but ``kUnimplemented`` is ordinal 5 mapping to wire code 6
+  -- ordinal and wire code diverge past ``kFull``, which is exactly
+  why the archetype needs its own ``resultCode()`` switch at all).
+  This port skips that indirection: a ``Result`` value already IS its
+  own wire code. ``result_code()`` still exists, mirroring the
+  archetype's contract 1:1 (every rejection path calls it, never a
+  bare ``Result`` attribute, so a future Result value this table
+  hasn't been taught about is caught centrally) -- it is close to an
+  identity function here, but that is a property of THIS port's
+  numbering choice, not a reason to skip having the function.
 
 LANDMINE: no f-strings, no PEP 604/generic-subscript type hints, no
 host-only stdlib -- must import and run unmodified under both CPython
@@ -115,6 +139,13 @@ __all__ = [
     "ProtocolHandler",
     "Sink",
     "Result",
+    "result_code",
+    "parse_wire_float",
+    "resolve_trailing_optional_id",
+    "ID_OMITTED",
+    "ID_ZERO",
+    "ID_NONZERO",
+    "ID_MALFORMED",
     "MAX_LINE_BYTES",
 ]
 
@@ -130,16 +161,51 @@ class Result(object):
     available -- see ``src/core/msgs.py``'s ``VerbEntry`` for the same
     plain-class convention elsewhere in this codebase).
 
-    Ticket 001 scope: only ``OK``/``UNKNOWN``/``BADARG`` are defined --
-    every code this ticket's own dispatch()/session-verb arity checks
-    use. The remaining codes in protocol.md Sec 6.1's table (``RANGE``/
-    ``FULL``/``UNIMPLEMENTED``/``NOT_READY``/``BUSY``/``DUPLICATE_ID``)
-    land with ticket 002, which owns building the fuller
-    "Result-to-error-code table" this ticket does not need yet."""
+    protocol.md Sec 6.1's full error-code table (ticket 002 scope):
+    every non-``OK`` attribute's own int value IS its wire error code
+    directly -- ``Result.RANGE == 3`` doubles as ``ERR_RANGE``'s wire
+    spelling, unlike the C++ archetype's declaration-order ``enum
+    class Result``, which needs a ``resultCode()`` switch precisely
+    because its ordinals and the wire codes diverge (see this module's
+    own ``result_code()`` and the docstring note above it). ``OK``
+    itself is never emitted as an error code (Sec 4's own comment on
+    the archetype's ``kOk``); it is included here only so a Result
+    variable can hold either outcome uniformly."""
 
     OK = 0
     UNKNOWN = 1
     BADARG = 2
+    RANGE = 3
+    FULL = 4
+    UNIMPLEMENTED = 6
+    NOT_CONFIGURED = 8
+    BUSY = 10
+    DUPLICATE_ID = 11
+
+    # Every value this class declares, OK included -- result_code()'s
+    # own membership check walks this rather than a second, separately
+    # maintained list that could drift from the attributes above.
+    _ALL_VALUES = (OK, UNKNOWN, BADARG, RANGE, FULL, UNIMPLEMENTED,
+                   NOT_CONFIGURED, BUSY, DUPLICATE_ID)
+
+
+def result_code(result):
+    """protocol.md Sec 4/6.1: ``Result`` -> wire error code, the same
+    contract the C++ archetype's ``resultCode()`` implements as a
+    ``switch`` over a declaration-order ordinal. In this port each
+    ``Result`` attribute's own int value already IS its wire code (see
+    the class docstring above), so this is close to an identity
+    function for any value the class actually declares -- but it is
+    kept as its own callable, and every rejection-reply path below
+    calls it rather than a bare ``Result`` attribute, for the same
+    reason the archetype's own switch ends in a defensive fallthrough
+    (its own comment: "kept so a FUTURE enumerator trips -Wswitch
+    instead of silently falling through a default case"): a value this
+    table has not been taught about maps onto ``ERR_UNKNOWN`` here,
+    rather than emitting some other int with no listed meaning."""
+    if result in Result._ALL_VALUES:
+        return result
+    return Result.UNKNOWN
 
 
 class Sink(object):
@@ -193,6 +259,182 @@ def _recover_trailing_id(token):
     if parsed is None or parsed == 0:
         return None
     return parsed
+
+
+# ---- optional trailing-id resolution (SET, and ticket 003's WHEELS) -------
+# protocol.md Sec 8.2's now-unambiguous rule for a verb whose id is
+# OPTIONAL: omitted, explicit "#0" ("no ack wanted"), an explicit
+# nonzero "#<n>", or a trailing token that is present but is NOT a
+# well-formed id at all -- which, since neither verb has any OTHER use
+# for that positional slot, means the WHOLE LINE is malformed, not
+# merely "id-less" (ported from protocol_handler.cpp's own
+# resolveTrailingOptionalId()/IdOutcome). Plain int constants, not
+# ``enum.Enum`` -- same MicroPython-clean convention as ``Result``.
+ID_OMITTED = 0
+ID_ZERO = 1
+ID_NONZERO = 2
+ID_MALFORMED = 3
+
+
+def resolve_trailing_optional_id(token):
+    """``token`` is the raw trailing field that IS the id slot for a
+    verb whose id is optional, given the caller has already decided
+    (by field count) that a trailing token is present at all -- an
+    OMITTED id is ``ID_OMITTED``, decided by the caller without ever
+    calling this function (mirrors the C++ archetype: it is only
+    called when ``fieldCount`` already proves a trailing token
+    exists). Returns ``(outcome, id)`` -- ``id`` is ``0`` unless
+    ``outcome`` is ``ID_NONZERO``."""
+    if token[0:1] != b"#":
+        return ID_MALFORMED, 0
+    parsed = _parse_id_digits(token[1:])
+    if parsed is None:
+        return ID_MALFORMED, 0
+    if parsed == 0:
+        return ID_ZERO, 0
+    return ID_NONZERO, parsed
+
+
+# ---- guarded numeric-field parser (protocol.md Sec 2.2/7.2/9.4) ----------
+# Shared by SET's value field now, and meant to be reused as-is by any
+# future numeric field (ticket 003's WHEELS) rather than a second
+# parser that might diverge (this ticket's own Implementation Plan).
+
+# The field grammar (Sec 2) is "any bytes except ' ' and '\n'" -- ' '
+# can therefore never reach a field token at all (the tokenizer's own
+# space-run splitting guarantees it; protocol.md Sec 9.4's own
+# leading-whitespace finding calls this case closed structurally, not
+# by this guard). What DOES legally reach a field token, and is
+# exactly the residue Sec 9.4 flags: '\t' (9), '\v' (11), '\f' (12),
+# '\r' (13) -- all of which Python's int()/float() would silently
+# ``.strip()`` from EITHER end (not just the leading end C's
+# strtol/strtof skip), reproducing the same leniency bug for a wider
+# set of bytes and a wider set of positions than the C++ archetype's
+# own single-byte, leading-only check. '_' (95) is Python's own
+# addition, with no C++ analogue at all: int()/float() accept it as a
+# digit-group separator ("1_000") that has no wire spelling whatsoever.
+_DISALLOWED_FIELD_BYTES = (9, 11, 12, 13, 95)
+
+
+def _has_disallowed_field_byte(field):
+    for byte in field:
+        if byte in _DISALLOWED_FIELD_BYTES:
+            return True
+    return False
+
+
+def parse_wire_float(field):
+    """Guarded float decode for a wire config value (protocol.md Sec
+    7.2). Returns the parsed float, or ``None`` if ``field`` is not a
+    well-formed wire numeric value.
+
+    Guards, beyond a bare ``float()`` call:
+
+    - empty field -- rejected (``float("")`` itself already raises,
+      but stated explicitly so the empty-field case reads as
+      deliberate, not incidental);
+    - any byte in ``_DISALLOWED_FIELD_BYTES`` -- Python's own leniency
+      findings, Sec 9.4 (whitespace variants position-independent,
+      '_' with no wire spelling at all);
+    - ``'e'``/``'E'`` anywhere -- Sec 2's "no exponents" applies to
+      config values too (Sec 7.2's own posture, matching the C++
+      archetype's ``parseFloatField()`` comment: "nothing in this
+      project ever needs a robot to accept '1e10' ... as a gain").
+      Unlike the archetype, this guard does NOT need to separately bar
+      ``'x'``/``'X'`` for the hex-float bypass (Sec 9.4 finding 2):
+      that bug was a C++-only divergence -- neither CPython's nor
+      MicroPython's ``float()`` accepts hex-float syntax at all, so
+      ``float("0x1.8p3")`` already raises ``ValueError`` with no help
+      needed from this function (pinned by this ticket's own explicit
+      test, not just assumed);
+    - a successfully parsed but non-finite result (``NaN``/``Inf``) --
+      Sec 2's "no NaN, no inf", checked the same way the archetype's
+      ``std::isnan``/``std::isinf`` do post-parse, since ``float()``
+      itself happily parses the literal text ``"nan"``/``"inf"``."""
+    if len(field) == 0 or _has_disallowed_field_byte(field):
+        return None
+    for byte in field:
+        if byte == 101 or byte == 69:  # 'e' 'E' -- no exponents (Sec 2)
+            return None
+    try:
+        text = field.decode("ascii")
+    except UnicodeError:
+        return None
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    if value != value:  # NaN != itself -- no math.isnan() import needed
+        return None
+    if value == float("inf") or value == float("-inf"):
+        return None
+    return value
+
+
+# ---- config-value formatting (protocol.md Sec 7.2) ------------------------
+
+_FORMAT_DIVISOR = 1000000  # 10**6 -- Sec 7.2's fixed six fractional digits
+# Ported from formatConfigValue()'s own fixed-point clamp bound
+# ("largest float < UINT32_MAX") -- ``+-Inf`` clamps to this
+# representation's own max magnitude, purely a consequence of the
+# chosen fixed-point arithmetic, not an independent design decision.
+_FORMAT_MAX_SCALED = 4294967040.0
+
+
+def _format_config_value(value):
+    """protocol.md Sec 7.2's ``formatFixed()``, ported from
+    ``protocol_handler.cpp``'s ``formatConfigValue()``: six fractional
+    digits, always present, no exponent -- ``_format_config_value(0.02)``
+    -> ``"0.020000"``, ``_format_config_value(-51.5)`` ->
+    ``"-51.500000"`` (the spec's own literal examples).
+
+    ``value`` is NOT wire-parsed here -- it is whatever the Adapter's
+    own ``on_get()`` handed back, so unlike a value that arrived
+    through ``parse_wire_float()`` (which already rejects ``NaN``/
+    ``Inf`` on the way in), it is not guaranteed finite. Sec 9.4
+    finding 1: the C++ archetype cast a ``NaN`` straight to
+    ``uint32_t`` here, undefined behavior caught live by UBSan,
+    reachable only through the Adapter seam (an adapter's own stored
+    value being ``NaN``, read back by ``GET`` -- never through the
+    wire). Ported as an explicit clamp to ``0.0`` -- there is no wire
+    spelling for ``NaN`` to preserve -- rather than reproducing the bug
+    class. ``+-Inf`` clamps to the fixed-point representation's own
+    max magnitude, the same as the archetype's own arithmetic already
+    did for free."""
+    if value != value:  # NaN clamp (Sec 9.4 finding 1) -- NaN != itself
+        value = 0.0
+    negative = value < 0.0
+    magnitude = -value if negative else value
+    scaled = magnitude * _FORMAT_DIVISOR + 0.5
+    if scaled > _FORMAT_MAX_SCALED:
+        scaled = _FORMAT_MAX_SCALED
+    scaled_int = int(scaled)
+    whole_part = scaled_int // _FORMAT_DIVISOR
+    frac_part = scaled_int % _FORMAT_DIVISOR
+    return "%s%d.%06d" % ("-" if negative else "", whole_part, frac_part)
+
+
+def _decode_field_name(field):
+    """Field content is "any bytes except ' ' and '\\n'" (protocol.md
+    Sec 2) -- not restricted to ASCII, even though every real
+    field-table name this library or any adapter declares always is
+    one. Decoding a wire-supplied name must never crash the handler,
+    even on a byte no real name would ever contain (the same
+    never-crash-on-untrusted-input posture ``feed()`` itself takes).
+    Returns the decoded ``str``, or ``None`` on a decode failure -- a
+    ``None`` can never equal a real (always-ASCII) field-table name,
+    so callers treat it exactly like "name not found"."""
+    try:
+        return field.decode("ascii")
+    except UnicodeError:
+        return None
+
+
+# ---- TLM mode decode (protocol.md Sec 6) ----------------------------------
+# "OFF/POSE/FULL/NOW/AUTO/BUFFER decoded" -- the handler only decodes
+# and validates the mode name; anything past "persist it" is the
+# calling application's job (Sec 6's own table entry for TLM).
+_TLM_MODES = (b"OFF", b"POSE", b"FULL", b"NOW", b"AUTO", b"BUFFER")
 
 
 class ProtocolHandler(object):
@@ -336,8 +578,17 @@ class ProtocolHandler(object):
 
     # ---- reply formatting ------------------------------------------------
 
+    def _reply_ok(self, reply_id):
+        self._write_line("ok #%d\n" % reply_id)
+
+    def _reply_ok_bare(self):
+        self._write_line("ok\n")
+
     def _reply_err(self, reply_id, code):
         self._write_line("err #%d %d\n" % (reply_id, code))
+
+    def _reply_err_bare(self, code):
+        self._write_line("err %d\n" % code)
 
     def _write_line(self, text):
         self._sink.write(text)
@@ -417,14 +668,124 @@ class ProtocolHandler(object):
         self._adapter.on_estop()
         # No reply, ever.
 
-    def _handle_unimplemented_this_ticket(self, fields, last_field_token):
-        """GET/SET/TLM/WHEELS/STOP: registered dispatch NAMES only in
-        this ticket. An inbound line for one of them is recognized (so
-        it never falls into the generic "unknown verb" malformed path)
-        but is otherwise a deliberate no-op -- no arity check, no
-        Adapter call, no reply, no malformed-count change -- until
-        ticket 002 (GET/SET/TLM) or ticket 003 (WHEELS/STOP) gives it a
-        real body. See this module's own docstring."""
+    # ---- configuration: pure delegation, no storage here (protocol.md
+    # Sec 7: "the handler holds no field table, no bounds, no storage.
+    # Which names are valid is entirely the adapter's business") -------
+
+    def _handle_get(self, fields, last_field_token):
+        if len(fields) > 1:
+            self._reject_malformed(last_field_token, Result.BADARG)
+            return
+
+        if len(fields) == 0:
+            # Bare GET: one "get name value" line per field the
+            # Adapter declares (Sec 6: "one get line per field (bare
+            # GET)") -- entirely the Adapter's own enumeration, this
+            # handler holds no list of its own.
+            total = self._adapter.field_count()
+            for index in range(total):
+                name = self._adapter.field_name(index)
+                value = self._adapter.on_get(name)
+                if value is None:
+                    continue
+                self._write_line(
+                    "get %s %s\n" % (name, _format_config_value(value)))
+            return
+
+        name = _decode_field_name(fields[0])
+        # Unknown name: GET never carries an id (Sec 3.1: "GET |
+        # [name]", no id slot at all), so there is no wire channel to
+        # reject it on -- silent, and NOT counted malformed (Sec 7.1,
+        # stated explicitly). A name that fails to decode as ASCII can
+        # never match a real (always-ASCII) field-table name either,
+        # so it takes the exact same silent path.
+        if name is None:
+            return
+        value = self._adapter.on_get(name)
+        if value is None:
+            return
+        self._write_line(
+            "get %s %s\n" % (name, _format_config_value(value)))
+
+    def _handle_set(self, fields, last_field_token):
+        if len(fields) != 2 and len(fields) != 3:
+            self._reject_malformed(last_field_token, Result.BADARG)
+            return
+
+        id_provided = len(fields) == 3
+        if id_provided:
+            id_outcome, reply_id = resolve_trailing_optional_id(fields[2])
+            if id_outcome == ID_MALFORMED:
+                # The 3rd token is present but not a well-formed
+                # "#id" -- SET has no other use for a 3rd positional
+                # field, so this is a malformed line, not "a SET with
+                # an id-less extra field".
+                self._reject_malformed(last_field_token, Result.BADARG)
+                return
+        else:
+            id_outcome, reply_id = ID_OMITTED, 0
+
+        value = parse_wire_float(fields[1])
+        if value is None:
+            # The VALUE field itself is malformed -- a handler-level
+            # decode failure (Sec 7.2: SET's value is decoded by the
+            # handler), never reaching on_set(). Still applies the
+            # same id-outcome-driven reply shape the success path
+            # uses, so a typo'd value on an otherwise well-formed SET
+            # still gets the ack format its own id calls for.
+            self._malformed_count += 1
+            if id_outcome == ID_NONZERO:
+                self._reply_err(reply_id, Result.BADARG)
+            elif id_outcome == ID_OMITTED:
+                self._reply_err_bare(Result.BADARG)
+            # ID_ZERO: "#0" -- no ack wanted, stays silent.
+            return
+
+        name = _decode_field_name(fields[0])
+        # A name that fails to decode as ASCII can never match a real
+        # field-table name -- treat it exactly like the Adapter itself
+        # answering "no such name" (ERR_UNKNOWN), rather than calling
+        # on_set() with something that isn't a usable name at all.
+        result = (self._adapter.on_set(name, value, reply_id)
+                   if name is not None else Result.UNKNOWN)
+
+        if id_outcome == ID_ZERO:
+            return  # executes silently, no ack at all (Sec 8.2)
+        if id_outcome == ID_OMITTED:
+            if result == Result.OK:
+                self._reply_ok_bare()
+            else:
+                self._reply_err_bare(result_code(result))
+            return
+        # ID_NONZERO
+        if result == Result.OK:
+            self._reply_ok(reply_id)
+        else:
+            self._reply_err(reply_id, result_code(result))
+
+    # ---- telemetry mode (protocol.md Sec 6) -------------------------------
+
+    def _handle_tlm(self, fields, last_field_token):
+        if len(fields) != 1:
+            self._reject_malformed(last_field_token, Result.BADARG)
+            return
+        mode_bytes = fields[0]
+        if mode_bytes not in _TLM_MODES:
+            self._reject_malformed(last_field_token, Result.BADARG)
+            return
+        # TLM carries no id (Sec 3.1) -- no wire channel to ack or
+        # reject on. The Adapter's own Result (e.g. for logging) never
+        # surfaces on the wire (mirrors protocol_handler.cpp's
+        # `(void)adapter_.onTlm(mode);`).
+        self._adapter.on_tlm(mode_bytes.decode("ascii"))
+
+    def _handle_wheels_stop_stub(self, fields, last_field_token):
+        """WHEELS/STOP: registered dispatch NAMES only, still. An
+        inbound line for one of them is recognized (so it never falls
+        into the generic "unknown verb" malformed path) but is
+        otherwise a deliberate no-op -- no arity check, no adapter
+        call, no reply, no malformed-count change -- until ticket 003
+        gives it a real body. See this module's own docstring."""
         pass
 
     VERB_TABLE = (
@@ -434,10 +795,10 @@ class ProtocolHandler(object):
         (b"VER", _handle_ver),
         (b"STATUS", _handle_status),
         (b"HELP", _handle_help),
-        (b"GET", _handle_unimplemented_this_ticket),
-        (b"SET", _handle_unimplemented_this_ticket),
-        (b"TLM", _handle_unimplemented_this_ticket),
-        (b"WHEELS", _handle_unimplemented_this_ticket),
-        (b"STOP", _handle_unimplemented_this_ticket),
+        (b"GET", _handle_get),
+        (b"SET", _handle_set),
+        (b"TLM", _handle_tlm),
+        (b"WHEELS", _handle_wheels_stop_stub),
+        (b"STOP", _handle_wheels_stop_stub),
         (b"ESTOP", _handle_estop),
     )

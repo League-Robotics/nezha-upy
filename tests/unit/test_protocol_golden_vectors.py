@@ -87,7 +87,7 @@ def test_fixture_block_count_is_stable():
 # GET/SET/TLM/WHEELS/STOP deferred to tickets 002/003).
 # ---------------------------------------------------------------------------
 
-_DEFERRED_VERBS = (b"GET", b"SET", b"TLM", b"WHEELS", b"STOP")
+_DEFERRED_VERBS = (b"WHEELS", b"STOP")
 _OUT_OF_SPRINT_SCOPE_VERBS = (b"RUN",)
 
 
@@ -111,7 +111,7 @@ def _classify(block):
 
     if verb_bytes in _DEFERRED_VERBS:
         return "skip", (
-            "%s's real body lands in ticket 002 or 003 -- ticket 001 "
+            "%s's real body lands in ticket 003 -- ticket 002 still "
             "dispatches it as a recognized-but-stub verb name" % verb_text)
     if verb_bytes in _OUT_OF_SPRINT_SCOPE_VERBS:
         return "skip", (
@@ -132,12 +132,42 @@ def _classify(block):
 def test_golden_vector_classification_counts():
     """Pinned split so a change to _classify() (or a fixture re-sync)
     is visible as a deliberate count change, not a silent drift in how
-    much of the fixture this ticket actually exercises."""
+    much of the fixture this ticket actually exercises. Ticket 002
+    moves the fixture's 12 SET blocks (its only GET/SET/TLM coverage --
+    the fixture has zero GET or TLM blocks at all, see this ticket's
+    own new test_get_*/test_tlm_* functions below for that coverage
+    instead) from skip to run: 12 (ticket 001) + 12 (SET, ticket 002)
+    = 24 run, 31 - 12 = 19 skip."""
     run_count = sum(1 for b in _BLOCKS if _classify(b)[0] == "run")
     skip_count = sum(1 for b in _BLOCKS if _classify(b)[0] == "skip")
-    assert run_count == 12
-    assert skip_count == 31
+    assert run_count == 24
+    assert skip_count == 19
     assert run_count + skip_count == len(_BLOCKS)
+
+
+# The fixture's own SETUP key comment: "setresult <ordinal> --
+# Protocol::Result's declaration-order ordinal, see
+# test_protocol_harness.py's RESULT_* map". This is the C++
+# archetype's own enum declaration order (kOk=0, kUnknown=1,
+# kBadArg=2, kRange=3, kFull=4, kUnimplemented=5, kNotReady=6,
+# kBusy=7, kDuplicateId=8), which is NOT the same sequence as this
+# port's own protocol.Result values (protocol.py's own Result
+# docstring: each attribute's value already IS its wire code, so
+# kUnimplemented's ordinal 5 lands on wire code 6, etc.) -- this table
+# is the fixture-format's own translation from one numbering to the
+# other, kept here rather than in protocol.py because it is a property
+# of THIS fixture's SETUP syntax, not of the port itself.
+_SETRESULT_ORDINAL_TO_RESULT = (
+    protocol.Result.OK,             # 0
+    protocol.Result.UNKNOWN,        # 1
+    protocol.Result.BADARG,         # 2
+    protocol.Result.RANGE,          # 3
+    protocol.Result.FULL,           # 4
+    protocol.Result.UNIMPLEMENTED,  # 5
+    protocol.Result.NOT_CONFIGURED,  # 6
+    protocol.Result.BUSY,           # 7
+    protocol.Result.DUPLICATE_ID,   # 8
+)
 
 
 def _apply_setup(adapter, key, tokens):
@@ -160,6 +190,8 @@ def _apply_setup(adapter, key, tokens):
         adapter.status_wedge = bool(int(wedge))
         adapter.status_flags = int(flags)
         adapter.status_tlm = tlm
+    elif key == "setresult":
+        adapter.set_result = _SETRESULT_ORDINAL_TO_RESULT[int(tokens[0])]
     else:
         raise ValueError(
             "SETUP key %r not recognized by this ticket's mock adapter -- "
@@ -482,9 +514,11 @@ def test_help_text_is_generated_from_the_dispatch_table():
 
 
 def test_help_lists_every_verb_this_sprint_scopes_including_stubs():
-    """This ticket's own description: HELP's text must list GET/SET/
-    TLM/WHEELS/STOP even though their bodies are stubs in this ticket
-    -- the reply text can't drift because it walks the SAME table
+    """Ticket 001's own description: HELP's text must list every verb
+    this sprint scopes in, GET/SET/TLM/WHEELS/STOP included, whether
+    or not each one's body is a real implementation yet (GET/SET/TLM
+    are real as of ticket 002; WHEELS/STOP remain stubs until ticket
+    003) -- the reply text can't drift because it walks the SAME table
     dispatch() uses (see the test above), so this is really just
     pinning the expected content once, literally. Twelve verbs, no
     RUN -- this sprint's own reduced scope (see this fixture's own
@@ -502,3 +536,364 @@ def test_help_wrong_arity_recovers_id():
     handler.feed(b"HELP #3\n")
     assert sink.lines() == ["err #3 2"]
     assert handler.malformed_count() == 1
+
+
+# ---------------------------------------------------------------------------
+# Result -> wire error-code table (protocol.md Sec 4/6.1), ticket 002.
+# ---------------------------------------------------------------------------
+
+def test_result_code_covers_every_declared_error_code():
+    """protocol.md Sec 6.1's full table, all 8 rejection codes -- in
+    this port each Result attribute's own int value already IS its
+    wire code (protocol.py's own Result docstring), so this is mostly
+    an identity check, but it is pinned one attribute at a time, the
+    same way the C++ archetype's own resultCode() switch is exercised
+    one enumerator at a time in its own test suite."""
+    assert protocol.result_code(protocol.Result.UNKNOWN) == 1
+    assert protocol.result_code(protocol.Result.BADARG) == 2
+    assert protocol.result_code(protocol.Result.RANGE) == 3
+    assert protocol.result_code(protocol.Result.FULL) == 4
+    assert protocol.result_code(protocol.Result.UNIMPLEMENTED) == 6
+    assert protocol.result_code(protocol.Result.NOT_CONFIGURED) == 8
+    assert protocol.result_code(protocol.Result.BUSY) == 10
+    assert protocol.result_code(protocol.Result.DUPLICATE_ID) == 11
+
+
+def test_result_code_falls_back_to_unknown_for_an_untaught_value():
+    """Mirrors the C++ archetype's own defensive switch fallthrough
+    ("kept so a FUTURE enumerator trips -Wswitch instead of silently
+    falling through a default case") -- an int this table has never
+    declared maps onto ERR_UNKNOWN here, not onto itself."""
+    assert protocol.result_code(99) == protocol.Result.UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# GET (protocol.md Sec 6/7.1): pure delegation, no field table, no
+# bounds -- the handler holds none of that; ticket 002. The fixture
+# has ZERO GET blocks at all (grep protocol_golden_vectors.txt for
+# "^IN GET" -- nothing), so every GET behavior below is this ticket's
+# own explicit coverage, not a golden-vector un-skip.
+# ---------------------------------------------------------------------------
+
+def test_get_named_field_returns_one_get_reply():
+    handler, adapter, sink = _new_handler()
+    adapter.get_overrides["wheel_control.pid_kp"] = 0.03
+    handler.feed(b"GET wheel_control.pid_kp\n")
+    assert sink.lines() == ["get wheel_control.pid_kp 0.030000"]
+    assert handler.malformed_count() == 0
+    assert adapter.get_calls == ["wheel_control.pid_kp"]
+
+
+def test_get_unknown_name_is_silent_not_malformed():
+    """protocol.md Sec 7.1, stated explicitly: "GET with an unknown
+    name is silent -- no reply, and not counted malformed." This is
+    the one unknown-token case in the whole grammar that does NOT
+    increment malformed_count() -- distinct from every other
+    unknown-name/unknown-verb case this test module otherwise covers,
+    which is exactly why the ticket calls out this case as worth its
+    own test."""
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"GET no.such.field\n")
+    assert sink.lines() == []
+    assert handler.malformed_count() == 0
+    assert adapter.get_calls == ["no.such.field"]
+
+
+def test_get_bare_dumps_one_line_per_declared_field_in_order():
+    """Bare GET (protocol.md Sec 6: "one get line per field") -- the
+    Adapter's own field_count()/field_name() enumeration, in order;
+    the handler holds no field list of its own."""
+    handler, adapter, sink = _new_handler()
+    adapter.field_names = ["wheel_control.pid_kp", "wheel_control.pid_ki"]
+    adapter.get_overrides["wheel_control.pid_kp"] = 0.03
+    adapter.get_overrides["wheel_control.pid_ki"] = 0.002
+    handler.feed(b"GET\n")
+    assert sink.lines() == [
+        "get wheel_control.pid_kp 0.030000",
+        "get wheel_control.pid_ki 0.002000",
+    ]
+    assert handler.malformed_count() == 0
+
+
+def test_get_bare_skips_a_declared_field_the_adapter_cannot_answer():
+    """A name the Adapter declares (via field_name()) but cannot
+    currently answer (on_get() returns None for it) is skipped in the
+    bare-GET dump, not emitted with a placeholder value -- mirrors
+    protocol_handler.cpp's own `if (!adapter_.onGet(name, value))
+    continue;`."""
+    handler, adapter, sink = _new_handler()
+    adapter.field_names = ["known", "unanswerable"]
+    adapter.get_overrides["known"] = 1.0
+    handler.feed(b"GET\n")
+    assert sink.lines() == ["get known 1.000000"]
+
+
+def test_get_wrong_arity_recovers_id():
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"GET a b #4\n")
+    assert sink.lines() == ["err #4 2"]
+    assert handler.malformed_count() == 1
+    assert adapter.get_calls == []
+
+
+def test_get_clamps_nan_from_adapter_to_zero():
+    """protocol.md Sec 9.4 finding 1: formatConfigValue() casting a
+    NaN straight to uint32_t was undefined behavior in the C++
+    archetype, reachable only through the Adapter seam (a stored
+    config value that is itself NaN, read back by GET -- never through
+    the wire, since parse_wire_float() already rejects NaN on the way
+    in). Ported as an explicit clamp to 0.0 rather than reproducing the
+    bug class."""
+    handler, adapter, sink = _new_handler()
+    adapter.get_overrides["weird"] = float("nan")
+    handler.feed(b"GET weird\n")
+    assert sink.lines() == ["get weird 0.000000"]
+
+
+def test_get_name_that_fails_ascii_decode_is_silent_like_unknown():
+    """A wire name field can be any byte except ' '/'\\n' (protocol.md
+    Sec 2) -- not restricted to ASCII, even though every real
+    field-table name is. A non-ASCII name can never match a real name,
+    so it takes the exact same silent path as an ordinary unknown
+    name, and the handler must not crash trying to decode it."""
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"GET \xff\xfe\n")
+    assert sink.lines() == []
+    assert handler.malformed_count() == 0
+
+
+# ---------------------------------------------------------------------------
+# SET's guarded numeric-field parser (protocol.md Sec 2.2/7.2/9.4),
+# ticket 002's own named findings -- underscore, embedded whitespace,
+# hex-float. The fixture's own SET blocks (test_golden_vector_block,
+# now unskipped) already cover the id-outcome/Result-code matrix in
+# depth; these tests cover what a tidy golden vector never exercises.
+# ---------------------------------------------------------------------------
+
+def test_set_rejects_underscore_digit_separator():
+    """protocol.md Sec 9.4: Python's float() accepts '_' as a digit
+    group separator ('1_000' == 1000.0) -- the wire grammar has no such
+    spelling at all. Guarded explicitly so this is ERR_BADARG, not a
+    silently accepted value."""
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"SET wheel_control.pid_kp 1_000 #9\n")
+    assert sink.lines() == ["err #9 2"]
+    assert handler.malformed_count() == 1
+    assert adapter.set_calls == []
+
+
+@pytest.mark.parametrize("byte_value", [9, 11, 12, 13], ids=["tab", "vt", "ff", "cr"])
+def test_set_rejects_field_containing_disallowed_whitespace_byte(byte_value):
+    """protocol.md Sec 9.4's leading-whitespace finding, generalized:
+    this test is NOT covering the leading-literal-SPACE case -- that
+    one is closed structurally by the tokenizer itself (a run of
+    spaces is one separator, protocol.md Sec 2), so a value field can
+    never begin with a literal ' ' byte at all. What this test DOES
+    cover is the field grammar's own residue: '\\t'/'\\v'/'\\f'/'\\r'
+    are all ordinary, legal field bytes under "any bytes except ' '
+    and '\\n'", and Python's float() would silently .strip() any of
+    them from either end, exactly reproducing the bug class for a
+    byte set the space-grammar migration never touched."""
+    handler, adapter, sink = _new_handler()
+    value_field = bytes([byte_value]) + b"5.0"
+    handler.feed(b"SET wheel_control.pid_kp " + value_field + b" #9\n")
+    assert sink.lines() == ["err #9 2"]
+    assert handler.malformed_count() == 1
+    assert adapter.set_calls == []
+
+
+def test_set_value_field_never_sees_a_literal_leading_space():
+    """The structural companion to the test above: this pins that a
+    run of extra spaces between SET's name and value tokens is
+    absorbed by the tokenizer as ONE separator (protocol.md Sec 2), so
+    the value field itself never begins with a literal ' ' byte for
+    the guard to even have an opinion about -- the leading-space case
+    this module's own docstrings describe as "closed structurally"."""
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"SET wheel_control.pid_kp     5.0 #9\n")
+    assert sink.lines() == ["ok #9"]
+    assert adapter.set_calls == [("wheel_control.pid_kp", 5.0, 9)]
+
+
+def test_hex_float_literal_rejected_by_numeric_parser():
+    """protocol.md Sec 9.4 finding 2: a hex-float literal
+    ("0x1.8p3") bypassed the C++ archetype's own "no exponents" guard
+    entirely -- that guard only checked for 'e'/'E', not hex-float's
+    'p' exponent marker, gated behind a '0x' prefix the guard never
+    looked for, so strtof silently decoded it to 12.0. A C++-only
+    divergence: neither CPython's nor MicroPython's float() accepts
+    hex-float syntax at all, so no additional guard code is needed
+    here -- but it is pinned directly with this test so it can never
+    silently regress if the parsing helper changes later (this
+    ticket's own stated acceptance criterion)."""
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"SET wheel_control.pid_kp 0x1.8p3 #9\n")
+    assert sink.lines() == ["err #9 2"]
+    assert handler.malformed_count() == 1
+    assert adapter.set_calls == []
+
+
+def test_set_rejects_decimal_exponent_notation():
+    """protocol.md Sec 2: "No exponents" -- unlike the hex-float case
+    above, Python's float() DOES accept plain decimal-exponent syntax
+    ("1e2" == 100.0), so this guard is genuinely load-bearing, not
+    merely a pin of accidental ValueError behavior."""
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"SET wheel_control.pid_kp 1e2 #9\n")
+    assert sink.lines() == ["err #9 2"]
+    assert handler.malformed_count() == 1
+    assert adapter.set_calls == []
+
+
+def test_set_rejects_inf_and_nan_literal_text():
+    """protocol.md Sec 2: "no NaN, no inf" -- Python's float() parses
+    the literal text "inf"/"nan" successfully (no exponent, no
+    underscore, no stray whitespace involved), so this is checked
+    post-parse via a non-finite result, the same way the C++
+    archetype's own std::isnan/std::isinf calls do."""
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"SET wheel_control.pid_kp inf #9\n")
+    assert sink.lines() == ["err #9 2"]
+    handler.feed(b"SET wheel_control.pid_kp nan #8\n")
+    assert sink.lines() == ["err #9 2", "err #8 2"]
+    assert handler.malformed_count() == 2
+    assert adapter.set_calls == []
+
+
+def test_set_bad_value_with_nonzero_id_still_recovers_id():
+    """The fixture's own bad-value block only exercises the id-omitted
+    arm (OUT err 2, no id token) -- this covers the id-present arm the
+    fixture leaves untested: a malformed VALUE with a nonzero id still
+    acks against that id, same as protocol_handler.cpp's own
+    idOutcome-driven reply after a parseFloatField() failure."""
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"SET wheel_control.pid_kp notanumber #9\n")
+    assert sink.lines() == ["err #9 2"]
+    assert handler.malformed_count() == 1
+    assert adapter.set_calls == []
+
+
+def test_set_bad_value_with_id_zero_suppresses_reply():
+    """"#0" suppresses every reply, success or failure alike (Sec
+    8.2) -- including a handler-level value-decode failure that never
+    even reaches on_set()."""
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"SET wheel_control.pid_kp notanumber #0\n")
+    assert sink.lines() == []
+    assert handler.malformed_count() == 1
+    assert adapter.set_calls == []
+
+
+def test_set_third_field_not_a_well_formed_id_is_malformed():
+    """SET has no OTHER use for a 3rd positional field -- a token
+    that is present but not '#'-shaped (or not well-formed digits)
+    makes the WHOLE line malformed, not merely "SET with an id-less
+    extra field" (protocol_handler.cpp's own resolveTrailingOptionalId()
+    comment, ported as a design decision, not just an implementation
+    detail)."""
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"SET wheel_control.pid_kp 0.03 notanid\n")
+    assert sink.lines() == []
+    assert handler.malformed_count() == 1
+    assert adapter.set_calls == []
+
+
+def test_set_wrong_arity_one_field_recovers_id():
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"SET #4\n")
+    assert sink.lines() == ["err #4 2"]
+    assert handler.malformed_count() == 1
+    assert adapter.set_calls == []
+
+
+def test_set_wrong_arity_too_many_fields_no_recoverable_id():
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"SET name value extra stuff\n")
+    assert sink.lines() == []
+    assert handler.malformed_count() == 1
+    assert adapter.set_calls == []
+
+
+def test_set_name_that_fails_ascii_decode_is_treated_as_unknown():
+    """A non-ASCII name field can never match a real (always-ASCII)
+    field-table name -- treated as ERR_UNKNOWN, the same code a real
+    Adapter would return for any other name it does not recognize,
+    rather than crashing on the decode."""
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"SET \xff\xfe 5.0 #9\n")
+    assert sink.lines() == ["err #9 1"]
+    assert handler.malformed_count() == 0
+    assert adapter.set_calls == []
+
+
+# ---------------------------------------------------------------------------
+# TLM (protocol.md Sec 6): mode decode only, no reply, no id. The
+# fixture has ZERO TLM blocks at all (its own EMIT-driven telemetry
+# vectors exercise emitTelemetry(), which is ticket 003's scope, not
+# the TLM verb itself) -- every TLM behavior below is this ticket's own
+# explicit coverage.
+# ---------------------------------------------------------------------------
+
+def test_tlm_valid_mode_persists_via_adapter_with_no_reply():
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"TLM POSE\n")
+    assert sink.lines() == []
+    assert adapter.tlm_calls == ["POSE"]
+    assert handler.malformed_count() == 0
+
+
+@pytest.mark.parametrize(
+    "mode", ["OFF", "POSE", "FULL", "NOW", "AUTO", "BUFFER"])
+def test_tlm_decodes_every_documented_mode(mode):
+    handler, adapter, sink = _new_handler()
+    handler.feed(("TLM %s\n" % mode).encode("ascii"))
+    assert sink.lines() == []
+    assert adapter.tlm_calls == [mode]
+    assert handler.malformed_count() == 0
+
+
+def test_tlm_unknown_mode_is_malformed():
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"TLM SIDEWAYS #3\n")
+    assert sink.lines() == ["err #3 2"]
+    assert handler.malformed_count() == 1
+    assert adapter.tlm_calls == []
+
+
+def test_tlm_mode_is_case_sensitive():
+    """The mode table's names are the same uppercase-command spelling
+    as every other wire token (protocol.md Sec 2.1) -- "pose" is not
+    "POSE"."""
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"TLM pose #3\n")
+    assert sink.lines() == ["err #3 2"]
+    assert adapter.tlm_calls == []
+
+
+def test_tlm_wrong_arity_recovers_id():
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"TLM POSE EXTRA #3\n")
+    assert sink.lines() == ["err #3 2"]
+    assert handler.malformed_count() == 1
+    assert adapter.tlm_calls == []
+
+
+def test_tlm_invalid_mode_that_looks_like_an_id_still_recovers_it():
+    """TLM's single field IS the line's own last token -- when that
+    field is not a valid mode name, the generic malformed-line #id
+    recovery rule (protocol.md Sec 2.3) still applies to it, exactly
+    as it would to any other malformed trailing token; this is
+    distinct from wrong arity (there IS exactly one field here)."""
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"TLM #3\n")
+    assert sink.lines() == ["err #3 2"]
+    assert handler.malformed_count() == 1
+    assert adapter.tlm_calls == []
+
+
+def test_tlm_bare_no_field_at_all_has_no_recoverable_id():
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"TLM\n")
+    assert sink.lines() == []
+    assert handler.malformed_count() == 1
+    assert adapter.tlm_calls == []

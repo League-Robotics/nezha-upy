@@ -2,9 +2,13 @@
 id: '002'
 title: 'Protocol handler: GET/SET/TLM verbs, Result-to-error-code table, hex-float/whitespace/underscore
   guards'
-status: open
-use-cases: [SUC-003, SUC-004, SUC-005]
-depends-on: ['001']
+status: done
+use-cases:
+- SUC-003
+- SUC-004
+- SUC-005
+depends-on:
+- '001'
 github-issue: ''
 issue: port-v6-line-protocol-hard-cutover-from-v5.md
 completes_issue: true
@@ -58,20 +62,20 @@ Port-specific decisions this ticket must pin with tests
 
 ## Acceptance Criteria
 
-- [ ] `GET`/`SET`/`TLM` implemented in `protocol.py`, dispatched
+- [x] `GET`/`SET`/`TLM` implemented in `protocol.py`, dispatched
       through the same tokenizer/dispatch core from ticket 001.
-- [ ] `Result` → error-code table complete (all 8 codes), with a
+- [x] `Result` → error-code table complete (all 8 codes), with a
       `resultCode()`-equivalent helper tested against every code.
-- [ ] Golden-vector harness green for every `GET`/`SET`/`TLM` vector,
+- [x] Golden-vector harness green for every `GET`/`SET`/`TLM` vector,
       including bare `GET` (multi-line reply) and unknown-name-silent.
-- [ ] Explicit tests: `SET` rejects an underscore-separated numeric
+- [x] Explicit tests: `SET` rejects an underscore-separated numeric
       field; `SET` rejects a tab/`\v`/`\f`/`\r`-containing field
       (still legal per the field grammar's byte class, but the
       leading-space case is already closed by the tokenizer — the
       test should say which case it's actually covering); hex-float
       literal rejected by the numeric parser (pinned, not just
       assumed).
-- [ ] `py_compile` clean; no MicroPython-incompatible syntax.
+- [x] `py_compile` clean; no MicroPython-incompatible syntax.
 
 ## Testing
 
