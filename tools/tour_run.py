@@ -26,7 +26,7 @@ diffdrive.configure(left_port=2, right_port=1, fwd_sign_left=-1,
     full_duty_velocity=8500.0, pid_kp=0.0, pid_ki=12.0,
     pid_i_max=230.0, pid_kaff=0.0, pid_max=384.0, pos_err_max=60.0,
     v_min=77.0, bias_max=91.0, tau_adapt=30.0, a_steady=115.0, twist_hold_gain=2.0,
-    stall_speed=58.0, stall_demand=154.0, stall_window=500.0,
+    stall_speed=58.0, stall_demand=0.0, stall_window=500.0,
     wheel_gain_left=0.908, wheel_gain_right=1.154,
     wheel_intercept_left=0.0, wheel_intercept_right=0.0)
 diffdrive.begin()
@@ -55,10 +55,10 @@ def move(dmm, ydeg, spd, yr):
     if dur <= 0: return
     vel = dt / dur; tw = yt / dur
     pure = (yt != 0 and dt == 0)
-    floor = 0.15 if pure else 0.25
-    dmargin = 10.0; ymargin = 6.0 if pure else 10.0
+    floor = 0.15 if pure else 0.18
+    dmargin = 35.0; ymargin = 12.0 if pure else 35.0
     start = time.ticks_ms()
-    deadline = int(dur * 1000) + 2500
+    deadline = int(dur * 1800) + 4000
     print('PH,loop,%%d' %% time.ticks_ms())
     diffdrive.drive(vel * floor, tw * floor, 500)
     while True:
@@ -68,7 +68,7 @@ def move(dmm, ydeg, spd, yr):
         scale = 1.0; dd = True; yd_ = True
         if dt:
             rem = abs(dt) - abs(mp); dd = rem <= dmargin
-            s = rem / 400.0
+            s = rem / 600.0
             if s < scale: scale = s
         if yt:
             rem = abs(yt) - abs(dp); yd_ = rem <= ymargin
@@ -94,6 +94,9 @@ def move(dmm, ydeg, spd, yr):
     diffdrive.neutral()
     for _ in range(14):
         tlm(); time.sleep_ms(25)
+    o = diffdrive.output()
+    dl = o['positionLeft'] - p0l; dr = o['positionRight'] - p0r
+    print('MV,%%.1f,%%.1f,%%.1f,%%.1f' %% (dt, yt, (dl+dr)*0.5, (dr-dl)*0.5))
 for _leg in range(4):
     move(%(side)f, 0.0, %(speed)f, 90.0)
     move(0.0, 90.0, %(speed)f, 60.0)
@@ -139,6 +142,9 @@ def capture(port, side_mm, speed, cpm, track):
                     rows.append(tuple(float(v) for v in p[1:]))
                 except ValueError:
                     pass  # corrupt sample; drop, never crash the run
+        elif ln.startswith('MV,'):
+            p2 = ln.split(',')
+            rows.append(('MV',) + tuple(float(v) for v in p2[1:]))
         elif ln.startswith('PH,'):
             p2 = ln.split(',')
             rows.append(('PH', p2[1], float(p2[2])))
@@ -202,7 +208,15 @@ def main():
     if len(rows) < 10:
         sys.exit('capture failed -- too few samples')
     markers = [(r[1], r[2]) for r in rows if r[0] == 'PH']
-    rows = [r for r in rows if r[0] != 'PH']
+    moves = [r[1:] for r in rows if r[0] == 'MV']
+    rows = [r for r in rows if r[0] not in ('PH', 'MV')]
+    for dt_t, yt_t, mp, dp in moves:
+        if dt_t:
+            err = (abs(mp) - abs(dt_t)) / a.cpm
+            print('MOVE leg   target %6.0fmm  overshoot %+6.1fmm' % (dt_t / a.cpm, err))
+        else:
+            err = (abs(dp) - abs(yt_t)) / a.cpm / a.track * 2 * 57.2958
+            print('MOVE turn  target %6.0fdeg overshoot %+6.2fdeg' % (yt_t / a.cpm / a.track * 2 * 57.2958, err))
     rows, dropped = clean(rows, a.cpm)
     if dropped:
         print('glitch samples dropped:', dropped)

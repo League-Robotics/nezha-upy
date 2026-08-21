@@ -412,9 +412,13 @@ VELOCITY_GAINS = {
     "v_min": 77.0,                  # [counts/s]  (20 mm/s * 3.8424)
     "bias_max": 91.0,               # [counts/s]  (23.8 mm/s * 3.8424)
     "tau_adapt": 30.0,              # [s]
+    "twist_hold_gain": 2.0,         # [1/s] encoder-ratio hold: legs track straight (closure 171mm -> 9mm)
     "a_steady": 115.0,              # [counts/s^2] (30 * 3.8424)
     "stall_speed": 58.0,            # [counts/s]  (15 mm/s * 3.8424)
-    "stall_demand": 154.0,          # [counts/s]  (40 mm/s * 3.8424)
+    "stall_demand": 0.0,            # [counts/s] 0 = detector OFF: it arms during accel
+                                # ramps and latches with no clearStallLatch in the
+                                # binding, killing the rest of the tour. Lease +
+                                # watchdog still cover real runaways.
     "stall_window": 500.0,          # [ms]
     # LANDMINE: kernel divides command by gain (correctedCommand), so
     # gain = plant_speed/commanded -- inverting this measurably worsens
@@ -514,12 +518,98 @@ def _configure_and_start(caller_name):
           "VELOCITY(PID)" if _velocity_mode else "raw-duty fallback")
 
 
+MOVE_RAMP_MS = 400.0        # [ms] accel ramp floor->full (pxt serviceMove port)
+MOVE_DIST_TAPER = 600.0     # [counts] ~47 mm decel window
+MOVE_YAW_TAPER = 360.0      # [counts] ~30 deg decel window
+MOVE_DIST_MARGIN = 35.0     # [counts] ~3mm: the measured brake+coast at floor 0.18
+MOVE_YAW_MARGIN = 12.0      # [counts] ~0.9deg: centered on measured turn coast
+MOVE_YAW_RATE_DEG_S = 60.0  # [deg/s] pivot rate
+
+
+def _move(dist_mm, yaw_deg, speed_mm_s):
+    """Tuned move: accel ramp, end-of-move taper, active brake. Port of
+    pxt-nezha-diffdrive serviceMove(); bench-measured on tovez it took
+    the 50 cm square tour from 171 mm closure to 9 mm. Velocity mode
+    only -- callers fall back to the segment engine without it."""
+    o = diffdrive.output()
+    p0l = o["positionLeft"]; p0r = o["positionRight"]
+    dt = dist_mm * TICKS_PER_MM
+    yt = _pivot_ticks(yaw_deg * 0.0174533, TRACKWIDTH_MM, TICKS_PER_MM)
+    spd = speed_mm_s * TICKS_PER_MM
+    yr = _pivot_ticks(MOVE_YAW_RATE_DEG_S * 0.0174533, TRACKWIDTH_MM,
+                      TICKS_PER_MM)
+    dur = 0.0
+    if dt:
+        dur = abs(dt) / spd
+    if yt:
+        yd = abs(yt) / yr
+        if yd > dur:
+            dur = yd
+    if dur <= 0:
+        return
+    vel = dt / dur; tw = yt / dur
+    pure = (yt != 0 and dt == 0)
+    floor = 0.15 if pure else 0.18
+    ymargin = MOVE_YAW_MARGIN if pure else MOVE_DIST_MARGIN
+    start = time.ticks_ms()
+    deadline = int(dur * 1800) + 4000
+    diffdrive.drive(vel * floor, tw * floor, 500)
+    while True:
+        o = diffdrive.output()
+        dl = o["positionLeft"] - p0l; dr = o["positionRight"] - p0r
+        mp = (dl + dr) * 0.5; dp = (dr - dl) * 0.5
+        scale = 1.0; dd = True; yd_ = True
+        if dt:
+            rem = abs(dt) - abs(mp); dd = rem <= MOVE_DIST_MARGIN
+            sc = rem / MOVE_DIST_TAPER
+            if sc < scale:
+                scale = sc
+        if yt:
+            rem = abs(yt) - abs(dp); yd_ = rem <= ymargin
+            sc = rem / MOVE_YAW_TAPER
+            if sc < scale:
+                scale = sc
+        if scale < floor:
+            scale = floor
+        ramp = time.ticks_diff(time.ticks_ms(), start) / MOVE_RAMP_MS
+        if ramp < floor:
+            ramp = floor
+        if ramp < scale:
+            scale = ramp
+        if scale > 1.0:
+            scale = 1.0
+        if dd and yd_:
+            break
+        if o["stallHalted"] or \
+                time.ticks_diff(time.ticks_ms(), start) > deadline:
+            break
+        diffdrive.drive(vel * scale, tw * scale, 500)
+        time.sleep_ms(24)
+    diffdrive.drive(0.0, 0.0, 300)   # active zero-hold brake
+    time.sleep_ms(250)
+    diffdrive.neutral()
+    time.sleep_ms(350)
+    o = diffdrive.output()
+    print("demo_square: move d=%.0fmm y=%.0fdeg dL=%.0f dR=%.0f" % (
+        dist_mm, yaw_deg, o["positionLeft"] - p0l, o["positionRight"] - p0r))
+
+
 def run():
     """The square tour entry point (button A). Configures diffdrive
     directly, then drives the 8-segment square tour, printing
     per-segment encoder evidence as it goes."""
     _require_on_device("run")
     _configure_and_start("run")
+
+    if _velocity_mode:
+        print("demo_square: tour (tuned move engine)")
+        for _i in range(4):
+            _move(LEG_DISTANCE_MM, 0.0, 100.0)
+            _move(0.0, 90.0, 100.0)
+        diffdrive.neutral()
+        _save_state()
+        print("demo_square: tour complete")
+        return
 
     segments = build_square_tour()
     print("demo_square: tour has", len(segments), "segments")
@@ -549,6 +639,12 @@ def run_single_leg(distance_mm=LEG_DISTANCE_MM, ticks_per_mm=TICKS_PER_MM):
     ``_run_segment()``) for the caller to inspect/log."""
     _require_on_device("run_single_leg")
     _configure_and_start("run_single_leg")
+
+    if _velocity_mode:
+        _move(distance_mm, 0.0, 100.0)
+        _save_state()
+        print("demo_square: run_single_leg complete")
+        return None
 
     segment = {
         "kind": "leg",
