@@ -18,16 +18,30 @@ import subprocess
 import sys
 import time
 
+# Design values in mm/s -- multiplied by the robot's REAL ticks/mm at
+# build time. The old table hardcoded counts computed from 3.8424
+# ticks/mm (the disproven calibration), leaving every limit 3.3x too
+# small on a robot that actually reads 12.76.
+G = dict(
+    max_duty=100.0, full_duty_velocity=10715.0,   # MEASURED (tools/plant_id.py)
+    kp=0.0, ki=6.0,
+    i_max_mm=60.0, pid_max_mm=100.0, pos_err_mm=10.0,
+    v_min_mm=20.0, bias_max_mm=23.8, a_steady_mm=30.0,
+    stall_speed_mm=15.0, twist_hold=2.0,
+    wheel_gain_left=0.892, wheel_gain_right=1.108,  # MEASURED
+)
+
 DEVICE_SCRIPT = r"""
 import gc, time, diffdrive
 gc.collect()
 diffdrive.configure(left_port=2, right_port=1, fwd_sign_left=-1,
-    fwd_sign_right=1, max_duty=25.0, cycle_period_ms=24,
-    full_duty_velocity=8500.0, pid_kp=0.0, pid_ki=12.0,
-    pid_i_max=230.0, pid_kaff=0.0, pid_max=384.0, pos_err_max=60.0,
-    v_min=77.0, bias_max=91.0, tau_adapt=30.0, a_steady=115.0, twist_hold_gain=2.0,
-    stall_speed=58.0, stall_demand=0.0, stall_window=500.0,
-    wheel_gain_left=0.908, wheel_gain_right=1.154,
+    fwd_sign_right=1, max_duty=%(maxduty)f, cycle_period_ms=32,
+    full_duty_velocity=%(fdv)f, pid_kp=%(kp)f, pid_ki=%(ki)f,
+    pid_i_max=%(imax)f, pid_kaff=0.0, pid_max=%(pidmax)f,
+    pos_err_max=%(poserr)f, v_min=%(vmin)f, bias_max=%(biasmax)f,
+    tau_adapt=30.0, a_steady=%(asteady)f, twist_hold_gain=%(twist)f,
+    stall_speed=%(stallspd)f, stall_demand=0.0, stall_window=500.0,
+    wheel_gain_left=%(wgl)f, wheel_gain_right=%(wgr)f,
     wheel_intercept_left=0.0, wheel_intercept_right=0.0)
 diffdrive.begin()
 diffdrive.start()
@@ -55,8 +69,8 @@ def move(dmm, ydeg, spd, yr):
     if dur <= 0: return
     vel = dt / dur; tw = yt / dur
     pure = (yt != 0 and dt == 0)
-    floor = 0.15 if pure else 0.18
-    dmargin = 35.0; ymargin = 12.0 if pure else 35.0
+    floor = 0.36 if pure else 0.18
+    dmargin = 30.0; ymargin = 14.0 if pure else 30.0
     start = time.ticks_ms()
     deadline = int(dur * 1800) + 4000
     print('PH,loop,%%d' %% time.ticks_ms())
@@ -85,7 +99,7 @@ def move(dmm, ydeg, spd, yr):
         if time.ticks_diff(time.ticks_ms(), start) > deadline:
             print('TIMEOUT'); break
         diffdrive.drive(vel * scale, tw * scale, 500)
-        time.sleep_ms(24)
+        time.sleep_ms(32)
     print('PH,brake,%%d' %% time.ticks_ms())
     diffdrive.drive(0.0, 0.0, 300)
     for _ in range(6):
@@ -119,8 +133,16 @@ def _interrupt(port):
 
 
 def capture(port, side_mm, speed, cpm, track):
+    tpm = cpm
     script = DEVICE_SCRIPT % {
-        'cpm': cpm, 'track': track, 'side': side_mm, 'speed': speed}
+        'cpm': cpm, 'track': track, 'side': side_mm, 'speed': speed,
+        'maxduty': G['max_duty'], 'fdv': G['full_duty_velocity'],
+        'kp': G['kp'], 'ki': G['ki'], 'imax': G['i_max_mm'] * tpm,
+        'pidmax': G['pid_max_mm'] * tpm, 'poserr': G['pos_err_mm'] * tpm,
+        'vmin': G['v_min_mm'] * tpm, 'biasmax': G['bias_max_mm'] * tpm,
+        'asteady': G['a_steady_mm'] * tpm, 'twist': G['twist_hold'],
+        'stallspd': G['stall_speed_mm'] * tpm,
+        'wgl': G['wheel_gain_left'], 'wgr': G['wheel_gain_right']}
     lines = []
     for attempt in range(4):
         _interrupt(port)
@@ -201,8 +223,14 @@ def main():
     ap.add_argument('--track', type=float, default=115.0)  # [mm]
     ap.add_argument('--out', default='.tmp/tour.png')
     ap.add_argument('--no-open', action='store_true')
+    ap.add_argument('--kp', type=float, default=None)
+    ap.add_argument('--ki', type=float, default=None)
     a = ap.parse_args()
 
+    if a.kp is not None:
+        G['kp'] = a.kp
+    if a.ki is not None:
+        G['ki'] = a.ki
     rows, status = capture(a.port, a.side_mm, a.speed, a.cpm, a.track)
     print('samples:', len(rows), status)
     if len(rows) < 10:
@@ -267,11 +295,20 @@ def main():
     ax1.set_xlabel('x [mm]'); ax1.set_ylabel('y [mm]')
     ax1.set_aspect('equal'); ax1.grid(alpha=0.25); ax1.legend(loc='best')
     ax1.set_title('trajectory (encoder odometry)')
-    ax2.plot(ts, vl, color=S1, lw=1.2, label='left wheel')
-    ax2.plot(ts, vr, color=S2, lw=1.2, label='right wheel')
+    def smooth(v, n=7):
+        out = []
+        for i in range(len(v)):
+            lo = max(0, i - n // 2); hi = min(len(v), i + n // 2 + 1)
+            out.append(sum(v[lo:hi]) / (hi - lo))
+        return out
+    # raw stays visible -- smoothing the plot must not hide the data
+    ax2.plot(ts, vl, color=S1, lw=0.6, alpha=0.25)
+    ax2.plot(ts, vr, color=S2, lw=0.6, alpha=0.25)
+    ax2.plot(ts, smooth(vl), color=S1, lw=1.6, label='left wheel')
+    ax2.plot(ts, smooth(vr), color=S2, lw=1.6, label='right wheel')
     ax2.set_xlabel('time [s]'); ax2.set_ylabel('wheel speed [cm/s]')
     ax2.grid(alpha=0.25); ax2.legend(loc='best')
-    ax2.set_title('wheel speeds')
+    ax2.set_title('wheel speeds (raw faint, 7-sample mean bold)')
     fig.suptitle('Square Tour — %s — %.0f cm sides — '
                  'closure %.0f mm' % (a.robot, a.side_mm / 10, closure),
                  fontsize=14)

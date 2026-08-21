@@ -128,11 +128,18 @@ PIVOT_ANGLE_RAD = PI / 2.0  # 90 degrees, LEFT (CCW)
 OMEGA_MAX_RAD_S = 2.4  # [rad/s] reference ceiling only -- not achievable via driveDuty() (see module docstring)
 
 # --- Duty / timing -- bench-verified; see module docstring ----------
-MAX_DUTY_PERCENT = 25.0       # [%] diffdrive.configure()'s authority rail
+MAX_DUTY_PERCENT = 25.0       # [%] LEGACY duty-mode rail: balanced_duties()
+                              # clamps to it and SEGMENT_DUTY_PERCENT is
+                              # calibrated against it. Not the velocity-mode
+                              # rail -- see VELOCITY_MAX_DUTY.
+VELOCITY_MAX_DUTY = 100.0     # [%] velocity-mode authority rail. 25% left
+                              # almost no headroom over ~18% cruise, so the
+                              # PID could not correct; the kernel's own duty
+                              # limiting keeps this safe.
 SEGMENT_DUTY_PERCENT = 15.0   # [%] commanded duty per segment -- 6% sat
                                # below breakaway on combined-load drive;
                                # 15% clears it on both robots (bench log)
-CYCLE_PERIOD_MS = 24          # [ms]
+CYCLE_PERIOD_MS = 32          # [ms]
 
 SEGMENT_LEASE_MS = 600        # [ms] per-driveDuty() safety lease --
                                # REFRESHED periodically (LEASE_REFRESH_MS),
@@ -402,30 +409,40 @@ def _require_on_device(caller_name):
 # the kernel is counts-native). fullDutyVelocity is bench-derived:
 # 15%->~1050 c/s, 25%->~1915 c/s per wheel => ~8500 c/s at 100%.
 VELOCITY_GAINS = {
-    "full_duty_velocity": 8500.0,   # [counts/s] bench-extrapolated
-    "pid_kp": 0.0,                  # tovez ships pure-I
-    "pid_ki": 12.0,                 # [1/s] (doubled from tovez's 6.0: faster residual wind at demo timescales)
-    "pid_i_max": 230.0,             # [counts/s]  (60 mm/s * 3.8424)
+    # Design values in mm-based units, scaled to counts by the robot's
+    # OWN ticks/mm at import. The old table hardcoded counts derived from
+    # 3.8424 ticks/mm -- the calibration disproved by the encoder audit --
+    # so on tovez (12.76) every limit was 3.3x too small: the PID had
+    # 30 mm/s of authority where 100 was intended. That starvation, not
+    # the move profile, was the field wobble.
+    "full_duty_velocity": 10715.0,  # [counts/s] MEASURED, tools/plant_id.py
+    "pid_kp": 0.6,                  # [1] was 0.0 (pure-I). The kernel models
+                                    # gain by |speed| only, so a pivot's
+                                    # reversed wheel -- ~16% weaker in reverse,
+                                    # measured -- is mismodeled and only the
+                                    # integrator could fix it. kp cuts turn
+                                    # scatter from 6.4 deg range to ~2.
+    "pid_ki": 6.0,                  # [1/s]
+    "pid_i_max": 60.0 * TICKS_PER_MM,
     "pid_kaff": 0.0,
-    "pid_max": 384.0,               # [counts/s]  (100 mm/s * 3.8424)
-    "pos_err_max": 60.0,            # [counts] (widened for faster I authority)
-    "v_min": 77.0,                  # [counts/s]  (20 mm/s * 3.8424)
-    "bias_max": 91.0,               # [counts/s]  (23.8 mm/s * 3.8424)
+    "pid_max": 100.0 * TICKS_PER_MM,
+    "pos_err_max": 10.0 * TICKS_PER_MM,
+    "v_min": 20.0 * TICKS_PER_MM,   # [counts/s] ~3% duty: the motor deadband.
+                                    # NOTE applySpeedFloor rescales BOTH wheels
+                                    # up to this, so a taper crawl commanded
+                                    # below it does not actually slow down.
+    "bias_max": 23.8 * TICKS_PER_MM,
     "tau_adapt": 30.0,              # [s]
-    "twist_hold_gain": 2.0,         # [1/s] encoder-ratio hold: legs track straight (closure 171mm -> 9mm)
-    "a_steady": 115.0,              # [counts/s^2] (30 * 3.8424)
-    "stall_speed": 58.0,            # [counts/s]  (15 mm/s * 3.8424)
-    "stall_demand": 0.0,            # [counts/s] 0 = detector OFF: it arms during accel
-                                # ramps and latches with no clearStallLatch in the
-                                # binding, killing the rest of the tour. Lease +
-                                # watchdog still cover real runaways.
+    "a_steady": 30.0 * TICKS_PER_MM,
+    "twist_hold_gain": 2.0,         # [1/s] encoder-ratio straightness hold
+    "stall_speed": 15.0 * TICKS_PER_MM,
+    "stall_demand": 0.0,            # detector OFF: arms during accel ramps and
+                                    # the binding exposes no clearStallLatch,
+                                    # so one latch killed the rest of a tour.
+                                    # Lease + watchdog still cover runaways.
     "stall_window": 500.0,          # [ms]
-    # LANDMINE: kernel divides command by gain (correctedCommand), so
-    # gain = plant_speed/commanded -- inverting this measurably worsens
-    # the split (confirmed by a first attempt that did). Bench-fit:
-    # commanded 1300 c/s -> L 1180/R 1500 => gains 0.908/1.154.
-    "wheel_gain_left": 0.908,
-    "wheel_gain_right": 1.154,
+    "wheel_gain_left": 0.892,       # MEASURED (plant_id): L 9554 c/s full duty
+    "wheel_gain_right": 1.108,      # MEASURED: R 11875 c/s full duty
     "wheel_intercept_left": 0.0,
     "wheel_intercept_right": 0.0,
 }
@@ -500,7 +517,7 @@ def _configure_and_start(caller_name):
         cfg = diffdrive.configure(
             left_port=LEFT_PORT, right_port=RIGHT_PORT,
             fwd_sign_left=FWD_SIGN_LEFT, fwd_sign_right=FWD_SIGN_RIGHT,
-            max_duty=MAX_DUTY_PERCENT,
+            max_duty=VELOCITY_MAX_DUTY,
             cycle_period_ms=CYCLE_PERIOD_MS, **gains)
     except TypeError:
         cfg = diffdrive.configure(
@@ -584,7 +601,7 @@ def _move(dist_mm, yaw_deg, speed_mm_s):
                 time.ticks_diff(time.ticks_ms(), start) > deadline:
             break
         diffdrive.drive(vel * scale, tw * scale, 500)
-        time.sleep_ms(24)
+        time.sleep_ms(32)
     diffdrive.drive(0.0, 0.0, 300)   # active zero-hold brake
     time.sleep_ms(250)
     diffdrive.neutral()
