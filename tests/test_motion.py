@@ -2,7 +2,6 @@
 logic against a stub diffdrive backend, with an explicit regression
 assertion that durations are treated as milliseconds, not seconds."""
 
-import struct
 import sys
 from pathlib import Path
 
@@ -312,122 +311,6 @@ def test_go_to_refused_while_faulted():
     ok = queue.go_to(target_x=100.0, target_y=0.0, current_pose=(0.0, 0.0, 0.0),
                       speed=50.0, omega=1.0)
     assert ok is False
-
-
-# --- RobotDispatch: MOVE / WHEELS / STOP / ESTOP / GO_TO / CALIBRATE ---
-
-def _pack_move(corr_id, queue_mode, v, twist, duration_ms, stop_distance_mm=None):
-    has_stop = 1 if stop_distance_mm is not None else 0
-    return (
-        bytes([corr_id, queue_mode])
-        + struct.pack("<f", v)
-        + struct.pack("<f", twist)
-        + struct.pack("<I", duration_ms)
-        + bytes([has_stop])
-        + struct.pack("<f", stop_distance_mm or 0.0)
-    )
-
-
-class _FakeConfigDispatch:
-    def __init__(self):
-        self.calls = []
-
-    def handle_command(self, verb_name, payload, now):
-        self.calls.append((verb_name, payload, now))
-        return (payload[0] if payload else None, 0)
-
-
-def _make_dispatch():
-    diffdrive = _StubDiffDrive()
-    queue = motion.MoveQueue(diffdrive)
-    config_dispatch = _FakeConfigDispatch()
-    dispatch = motion.RobotDispatch(config_dispatch, queue)
-    return dispatch, diffdrive, queue, config_dispatch
-
-
-def test_dispatch_routes_config_family_to_config_dispatch():
-    dispatch, diffdrive, queue, config_dispatch = _make_dispatch()
-    result = dispatch.handle_command("SET_FIELD", bytes([5]), 1000)
-    assert result == (5, 0)
-    assert config_dispatch.calls == [("SET_FIELD", bytes([5]), 1000)]
-
-
-def test_dispatch_move_enqueues():
-    dispatch, diffdrive, queue, _ = _make_dispatch()
-    payload = _pack_move(3, motion.QUEUE_MODE_APPEND, 1.0, 0.0, 500)
-    result = dispatch.handle_command("MOVE", payload, 1000)
-    assert result == (3, motion.ERR_OK)
-    assert queue.depth() == 1
-
-
-def test_dispatch_move_rejects_duration_too_long():
-    dispatch, diffdrive, queue, _ = _make_dispatch()
-    payload = _pack_move(3, motion.QUEUE_MODE_APPEND, 1.0, 0.0,
-                          motion.MAX_MOVE_DURATION_MS + 1)
-    result = dispatch.handle_command("MOVE", payload, 1000)
-    assert result == (3, motion.ERR_DURATION_TOO_LONG)
-    assert queue.depth() == 0
-
-
-def test_dispatch_move_malformed_length():
-    dispatch, diffdrive, queue, _ = _make_dispatch()
-    result = dispatch.handle_command("MOVE", bytes([1, 2, 3]), 1000)
-    assert result == (1, motion.ERR_MALFORMED)
-
-
-def test_dispatch_wheels_calls_drive_duty_and_clears_queue():
-    dispatch, diffdrive, queue, _ = _make_dispatch()
-    queue.enqueue(motion.Move(v=1.0, duration_ms=1000))
-    payload = bytes([4]) + struct.pack("<f", 0.5) + struct.pack("<f", -0.5) + struct.pack("<I", 1000)
-    result = dispatch.handle_command("WHEELS", payload, 1000)
-    assert result == (4, motion.ERR_OK)
-    assert diffdrive.duty_calls == [(0.5, -0.5, 1000)]
-    assert queue.depth() == 0
-
-
-def test_dispatch_stop():
-    dispatch, diffdrive, queue, _ = _make_dispatch()
-    queue.enqueue(motion.Move(v=1.0, duration_ms=1000))
-    result = dispatch.handle_command("STOP", bytes([6]), 1000)
-    assert result == (6, motion.ERR_OK)
-    assert diffdrive.neutral_calls == 1
-    assert queue.depth() == 0
-
-
-def test_dispatch_estop():
-    dispatch, diffdrive, queue, _ = _make_dispatch()
-    result = dispatch.handle_command("ESTOP", bytes([7]), 1000)
-    assert result == (7, motion.ERR_OK)
-    assert diffdrive.estop_calls == 1
-
-
-def test_dispatch_go_to_with_pose_provider():
-    diffdrive = _StubDiffDrive()
-    queue = motion.MoveQueue(diffdrive)
-    config_dispatch = _FakeConfigDispatch()
-    dispatch = motion.RobotDispatch(config_dispatch, queue, pose_provider=lambda: (0.0, 0.0, 0.0))
-    payload = (
-        bytes([8]) + struct.pack("<f", 100.0) + struct.pack("<f", 0.0)
-        + struct.pack("<f", 50.0) + struct.pack("<f", 1.0)
-    )
-    result = dispatch.handle_command("GO_TO", payload, 1000)
-    assert result == (8, motion.ERR_OK)
-    assert queue.depth() == 2
-
-
-def test_dispatch_go_to_without_pose_provider_acks_malformed():
-    dispatch, diffdrive, queue, _ = _make_dispatch()
-    payload = (
-        bytes([8]) + struct.pack("<f", 100.0) + struct.pack("<f", 0.0)
-        + struct.pack("<f", 50.0) + struct.pack("<f", 1.0)
-    )
-    result = dispatch.handle_command("GO_TO", payload, 1000)
-    assert result == (8, motion.ERR_MALFORMED)
-
-
-def test_dispatch_unknown_verb_returns_none():
-    dispatch, diffdrive, queue, _ = _make_dispatch()
-    assert dispatch.handle_command("VER", b"", 1000) is None
 
 
 # --- Generator-driven move mode (ticket 007, SUC-001/SUC-002) ----------

@@ -1,6 +1,21 @@
 """motion -- move queue, stop conditions, timeout fault, replace
-semantics, GO_TO, CALIBRATE, and the CONFIG-family/motion verb dispatch
-router, spec Sec 6/7.2, UC-013.
+semantics, and GO_TO, spec Sec 6/7.2, UC-013.
+
+Sprint 007 ticket 006 (v6 line-protocol cutover): the CONFIG-family/
+motion binary verb dispatch router (``RobotDispatch`` and its
+``_handle_move``/``_handle_wheels``/``_handle_stop``/``_handle_estop``/
+``_handle_go_to``/``_handle_calibrate`` methods, plus the module-level
+``_corr_id_or_none()``/``_unpack_f32_le()`` helpers and ``ERR_*``
+reply-code constants that existed only to serve it) is DELETED --
+superseded by ``hardware/protocol_adapter.py``'s ``ProtocolAdapter``,
+which dispatches v6's text-line ``WHEELS``/``STOP``/``ESTOP`` verbs
+straight onto ``MoveQueue``'s underlying ``diffdrive`` (bypassing the
+queue for those three, per ``protocol.md`` Sec 5.1 -- see
+``protocol_adapter.py``'s own docstring). ``MOVE``/``GO_TO``/
+``CALIBRATE`` are out of scope for v6 entirely (sprint.md's own Scope
+section) -- a later sprint rebuilds a motion API for them; until then
+``MoveQueue.enqueue()``/``go_to()`` remain reachable only from direct
+student/REPL code, not from any wire verb.
 
 **Every duration in this module is MILLISECONDS.** A sec/ms slip once
 ran wheels 8+ minutes unsupervised -- this is a load-bearing regression
@@ -14,9 +29,11 @@ open item 4):
 
 DECIDED: no ``on_tick()`` callback framework is implemented. This
 module exposes plain, direct function calls (``MoveQueue.enqueue()``/
-``stop()``/``estop()``/``go_to()``), driven either by ``comms.py``'s
-verb dispatch (the primary, wire-driven path -- ``RobotDispatch``
-below) or directly from student/REPL code. The vendored kernel
+``stop()``/``estop()``/``go_to()``), driven directly from student/REPL
+code (v6's wire path reaches ``MoveQueue.diffdrive`` directly through
+``hardware/protocol_adapter.py`` for ``WHEELS``/``STOP``/``ESTOP``,
+never through this queue -- see this module's own top-of-file note).
+The vendored kernel
 (``vendor/differential_drive.h``) free-runs its own control cadence on
 a CODAL fiber, independent of Python's call stack (spec Sec 5/7.1) --
 so "loop ownership" for wheel motion resolves to "the kernel owns
@@ -41,31 +58,12 @@ generator where each ``next()`` runs one ``diffdrive.step()`` cycle
 inline, the generator owning pacing. Mutually exclusive with the
 background/fiber mode above at the native layer (mode latches on
 whichever of ``start()``/``step()`` is called first this boot, ticket
-006) -- ``MoveQueue``/``RobotDispatch`` above are unchanged either way.
-See ``clasi/issues/generator-driven-control-loop-mode-addition-not-
+006) -- ``MoveQueue`` above is unchanged either way. See
+``clasi/issues/generator-driven-control-loop-mode-addition-not-
 replacement.md`` and sprint 006 SUC-001/SUC-002.
-
----
-
-Verb payload shapes (hand-decoded convention -- ``msgs.py`` has no
-per-verb protobuf field tables yet, same discipline as ``config.py``'s
-CONFIG-family dispatch):
-
-  MOVE:      corr_id:u8, queue_mode:u8 (0=replace,1=append), v:f32-LE,
-             twist:f32-LE, duration_ms:u32-LE, has_stop_distance:u8,
-             stop_distance_mm:f32-LE                       (19 bytes)
-  WHEELS:    corr_id:u8, duty_left:f32-LE, duty_right:f32-LE,
-             lease_ms:u32-LE                                (13 bytes)
-  STOP:      corr_id:u8                                      (1 byte)
-  ESTOP:     corr_id:u8                                      (1 byte)
-  GO_TO:     corr_id:u8, x:f32-LE, y:f32-LE, speed:f32-LE,
-             omega:f32-LE                                   (17 bytes)
-  CALIBRATE: corr_id:u8, kind:u8 (0=line_cal_min,1=line_cal_max)
-                                                               (2 bytes)
 """
 
 import math
-import struct
 
 __all__ = [
     "MAX_QUEUE_DEPTH",
@@ -77,12 +75,6 @@ __all__ = [
     "MoveQueueError",
     "Move",
     "MoveQueue",
-    "RobotDispatch",
-    "ERR_OK",
-    "ERR_QUEUE_FULL",
-    "ERR_FAULTED",
-    "ERR_DURATION_TOO_LONG",
-    "ERR_MALFORMED",
     "GEN_LEASE_PERIODS",
     "drive",
     "MoveHandle",
@@ -116,12 +108,6 @@ TIMEOUT_GRACE_MS = 250
 
 QUEUE_MODE_REPLACE = 0
 QUEUE_MODE_APPEND = 1
-
-ERR_OK = 0
-ERR_QUEUE_FULL = 1
-ERR_FAULTED = 2
-ERR_DURATION_TOO_LONG = 3
-ERR_MALFORMED = 4
 
 
 class MoveQueueError(ValueError):
@@ -355,134 +341,9 @@ def _duration_for_distance_ms(distance, speed):
     return duration
 
 
-def _unpack_f32_le(data):
-    return struct.unpack("<f", bytes(data))[0]
-
-
-class RobotDispatch:
-    """The single composite object wired as ``comms.Comms(...,
-    dispatch=...)`` -- routes CONFIG-family verbs to a
-    ``config.ConfigDispatch`` and motion verbs (MOVE/WHEELS/STOP/ESTOP/
-    GO_TO/CALIBRATE) to a ``MoveQueue``, matching ``comms.py``'s own
-    single-dispatch-object interface
-    (``handle_command(verb_name, payload, now) -> (corr_id, err_code) |
-    None``). ``line_sensor`` (optional, a ``line.LineSensor``) backs
-    CALIBRATE; ``pose_provider`` (optional, a zero-arg callable
-    returning ``(x, y, heading_rad)``) backs GO_TO -- both may be
-    ``None`` if this robot has no line sensor / no pose estimate wired
-    yet, in which case the corresponding verb acks ``ERR_MALFORMED``
-    rather than raising."""
-
-    def __init__(self, config_dispatch, move_queue, line_sensor=None, pose_provider=None):
-        self._config_dispatch = config_dispatch
-        self._queue = move_queue
-        self._line_sensor = line_sensor
-        self._pose_provider = pose_provider
-
-    def handle_command(self, verb_name, payload, now):
-        if verb_name in ("CONFIG", "SET_FIELD", "GET_CONFIG"):
-            return self._config_dispatch.handle_command(verb_name, payload, now)
-        if verb_name == "MOVE":
-            return self._handle_move(payload)
-        if verb_name == "WHEELS":
-            return self._handle_wheels(payload)
-        if verb_name == "STOP":
-            return self._handle_stop(payload)
-        if verb_name == "ESTOP":
-            return self._handle_estop(payload)
-        if verb_name == "GO_TO":
-            return self._handle_go_to(payload)
-        if verb_name == "CALIBRATE":
-            return self._handle_calibrate(payload)
-        return None
-
-    def _handle_move(self, payload):
-        if len(payload) != 19:
-            return (_corr_id_or_none(payload), ERR_MALFORMED)
-        corr_id = payload[0]
-        queue_mode = payload[1]
-        v = _unpack_f32_le(payload[2:6])
-        twist = _unpack_f32_le(payload[6:10])
-        duration_ms = struct.unpack("<I", bytes(payload[10:14]))[0]
-        has_stop_distance = payload[14]
-        stop_distance_mm = _unpack_f32_le(payload[15:19]) if has_stop_distance else None
-
-        if duration_ms == 0 or duration_ms > MAX_MOVE_DURATION_MS:
-            return (corr_id, ERR_DURATION_TOO_LONG)
-        try:
-            move = Move(v=v, twist=twist, duration_ms=duration_ms,
-                        stop_distance_mm=stop_distance_mm)
-        except MoveQueueError:
-            return (corr_id, ERR_DURATION_TOO_LONG)
-
-        ok = self._queue.enqueue(move, queue_mode=queue_mode)
-        if not ok:
-            return (corr_id, ERR_FAULTED if self._queue.fault else ERR_QUEUE_FULL)
-        return (corr_id, ERR_OK)
-
-    def _handle_wheels(self, payload):
-        if len(payload) != 13:
-            return (_corr_id_or_none(payload), ERR_MALFORMED)
-        corr_id = payload[0]
-        duty_left = _unpack_f32_le(payload[1:5])
-        duty_right = _unpack_f32_le(payload[5:9])
-        lease_ms = struct.unpack("<I", bytes(payload[9:13]))[0]
-
-        self._queue.stop()  # WHEELS is an immediate teleop command -- clears the queue first
-        status = self._queue.diffdrive.driveDuty(duty_left, duty_right, lease_ms)
-        return (corr_id, ERR_OK if status == "ok" else ERR_MALFORMED)
-
-    def _handle_stop(self, payload):
-        if len(payload) != 1:
-            return (_corr_id_or_none(payload), ERR_MALFORMED)
-        self._queue.stop()
-        return (payload[0], ERR_OK)
-
-    def _handle_estop(self, payload):
-        if len(payload) != 1:
-            return (_corr_id_or_none(payload), ERR_MALFORMED)
-        self._queue.estop()
-        return (payload[0], ERR_OK)
-
-    def _handle_go_to(self, payload):
-        if len(payload) != 17:
-            return (_corr_id_or_none(payload), ERR_MALFORMED)
-        corr_id = payload[0]
-        if self._pose_provider is None:
-            return (corr_id, ERR_MALFORMED)
-        x = _unpack_f32_le(payload[1:5])
-        y = _unpack_f32_le(payload[5:9])
-        speed = _unpack_f32_le(payload[9:13])
-        omega = _unpack_f32_le(payload[13:17])
-        ok = self._queue.go_to(x, y, self._pose_provider(), speed, omega)
-        return (corr_id, ERR_OK if ok else ERR_QUEUE_FULL)
-
-    def _handle_calibrate(self, payload):
-        if len(payload) != 2:
-            return (_corr_id_or_none(payload), ERR_MALFORMED)
-        corr_id = payload[0]
-        kind = payload[1]
-        if self._line_sensor is None:
-            return (corr_id, ERR_MALFORMED)
-        reading = self._line_sensor.reading
-        if kind == 0:
-            self._line_sensor.cal_min = list(reading.raw)
-        elif kind == 1:
-            self._line_sensor.cal_max = list(reading.raw)
-        else:
-            return (corr_id, ERR_MALFORMED)
-        return (corr_id, ERR_OK)
-
-
-def _corr_id_or_none(payload):
-    if payload:
-        return payload[0]
-    return None
-
-
 # --- Generator-driven move mode (SUC-001/SUC-002) -----------------------
-# Additive: a new, separate entry point alongside MoveQueue/RobotDispatch
-# above (unchanged). Mode latches natively on the first diffdrive.step()
+# Additive: a new, separate entry point alongside MoveQueue above
+# (unchanged). Mode latches natively on the first diffdrive.step()
 # call this boot (ticket 006's start()/step() latch) -- no mode tracking
 # here duplicates that.
 

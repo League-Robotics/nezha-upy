@@ -76,7 +76,28 @@ Verified directly during exploration:
   WiFi UART must be a tiny UARTE1 C shim (the stock port never exposes
   the second UARTE); the AT state machine on top is Python.
 
-## 4. v5 wire contract
+## 4. v5 wire contract (superseded — see sprint 007)
+
+**Superseded by sprint 007's v6 ASCII line protocol (hard cutover,
+ticket 006): `src/core/wire.py`/`src/core/msgs.py` and every binary/
+COBS+CRC verb described below are DELETED from this repo — there is
+no dual-stack period; the device never runs both engines.** v6 is a
+plain-text line grammar (`VERB field field ... [#id]\n`), ported from
+`docs/design/protocol.md` (radio-robot-lib) into `src/core/protocol.py`
+(`ProtocolHandler`) and `src/hardware/protocol_adapter.py`
+(`ProtocolAdapter`) — one `ProtocolHandler` per registered transport,
+sharing one `ProtocolAdapter` (one robot, not one dispatch engine per
+channel). In-scope verbs this sprint: `HELLO PING ID VER STATUS HELP
+GET SET TLM WHEELS STOP ESTOP` (12 verbs — `RUN` and the archetype's
+`debug` unsolicited emission are explicitly NOT ported). Accepted
+behavior change: `WHEELS` now commands velocity through
+`countsPerLength` (`wheels.ticks_per_mm`), not v5's raw open-loop duty
+— see sprint 007's `sprint.md` Architecture section (Design Rationale)
+for the full reasoning this section's own v5 record predates. The rest
+of this section is kept as the historical record of what v5 was (the
+transports, radio framing, and telemetry emit-policy CADENCE it
+describes are otherwise unchanged by the cutover) — read it as
+"how this used to work," not as the current wire contract.
 
 Truth = radio-robot `src/protos/` + `src/firm/core/comms.cpp` +
 `telemetry.cpp` (`docs/protocol-v5.md` is stale). Contract:

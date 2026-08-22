@@ -1,11 +1,15 @@
-"""M5 gate: `src/core/config.py`'s fail-closed key validation and the
-`wheel_control` -> `DiffDrive::Config` mapping (travel_calib x10).
+"""M5 gate / sprint 007 ticket 006: `src/core/config.py`'s fail-closed
+key validation and the `wheel_control` -> `DiffDrive::Config` mapping
+(travel_calib x10).
 
   - fail-closed key validation against data/tovez.json, data/gopiv.json,
     and a deliberately-malformed fixture (refusal asserted);
   - wheel_control -> DiffDrive::Config mapping (travel_calib x10)
     against known input/output pairs;
-  - the CONFIG/SET_FIELD/GET_CONFIG dispatch wiring.
+  - the name-keyed get_field()/set_field() accessors v6's GET/SET verbs
+    delegate to (sprint 007 ticket 005) -- v5's own binary
+    CONFIG/SET_FIELD/GET_CONFIG dispatch retired with the v6 cutover
+    (ticket 006) and is no longer tested here.
 """
 
 import sys
@@ -21,7 +25,6 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from core import config  # noqa: E402  (path must be set up first)
-from core import wire  # noqa: E402
 
 
 # --- fail-closed key validation ----------------------------------------
@@ -155,99 +158,9 @@ def test_radio_channel():
     assert config.radio_channel(robot_config) == 3
 
 
-# --- CONFIG/SET_FIELD/GET_CONFIG dispatch -------------------------------
-
-class _FakeTransport:
-    def __init__(self):
-        self.sent = []
-
-    def send(self, data):
-        self.sent.append(bytes(data))
-
-
 def _make_dispatch():
     robot_config = config.load_robot_config(str(DATA_DIR / "tovez.json"))
     return config.ConfigDispatch(robot_config)
-
-
-def test_set_field_applies_live_and_acks_ok():
-    dispatch = _make_dispatch()
-    import struct
-    payload = bytes([7, config.CONFIG_GROUP_WHEEL_CONTROL, 0]) + struct.pack("<f", 99.0)
-    result = dispatch.handle_command("SET_FIELD", payload, 1000)
-    assert result == (7, config.ERR_OK)
-    assert dispatch.current_wheel_control()["v_min"] == pytest.approx(99.0)
-
-
-def test_set_field_rejects_unwired_group():
-    dispatch = _make_dispatch()
-    import struct
-    payload = bytes([7, 99, 0]) + struct.pack("<f", 1.0)
-    result = dispatch.handle_command("SET_FIELD", payload, 1000)
-    assert result == (7, config.ERR_UNIMPLEMENTED)
-
-
-def test_set_field_rejects_bad_field_index():
-    dispatch = _make_dispatch()
-    import struct
-    payload = bytes([7, config.CONFIG_GROUP_WHEEL_CONTROL, 200]) + struct.pack("<f", 1.0)
-    result = dispatch.handle_command("SET_FIELD", payload, 1000)
-    assert result == (7, config.ERR_MALFORMED)
-
-
-def test_set_field_rejects_wrong_length():
-    dispatch = _make_dispatch()
-    result = dispatch.handle_command("SET_FIELD", bytes([7, 1]), 1000)
-    assert result == (7, config.ERR_MALFORMED)
-
-
-def test_config_bulk_applies_whole_group():
-    dispatch = _make_dispatch()
-    import struct
-    body = bytes([9, config.CONFIG_GROUP_WHEEL_CONTROL])
-    for i in range(len(config.WHEEL_CONTROL_FIELDS)):
-        body += struct.pack("<f", float(i))
-    result = dispatch.handle_command("CONFIG", body, 1000)
-    assert result == (9, config.ERR_OK)
-    wc = dispatch.current_wheel_control()
-    for i, (json_field, _kernel_field) in enumerate(config.WHEEL_CONTROL_FIELDS):
-        assert wc[json_field] == pytest.approx(float(i))
-
-
-def test_get_config_acks_and_broadcasts_cfg_frame():
-    dispatch = _make_dispatch()
-    transport = _FakeTransport()
-    dispatch.add_transport(transport)
-    payload = bytes([3, config.CONFIG_GROUP_WHEEL_CONTROL])
-    result = dispatch.handle_command("GET_CONFIG", payload, 1000)
-    assert result == (3, config.ERR_OK)
-    assert len(transport.sent) == 1
-
-    decoded = wire.decode_frame(transport.sent[0], command=b"CFG")
-    assert decoded is not None
-    assert decoded[0] == config.CONFIG_GROUP_WHEEL_CONTROL
-
-
-def test_get_config_unwired_group_acks_unimplemented_no_broadcast():
-    dispatch = _make_dispatch()
-    transport = _FakeTransport()
-    dispatch.add_transport(transport)
-    payload = bytes([3, 99])
-    result = dispatch.handle_command("GET_CONFIG", payload, 1000)
-    assert result == (3, config.ERR_UNIMPLEMENTED)
-    assert transport.sent == []
-
-
-def test_get_config_with_no_transports_still_acks():
-    dispatch = _make_dispatch()
-    payload = bytes([3, config.CONFIG_GROUP_WHEEL_CONTROL])
-    result = dispatch.handle_command("GET_CONFIG", payload, 1000)
-    assert result == (3, config.ERR_OK)
-
-
-def test_unknown_verb_returns_none():
-    dispatch = _make_dispatch()
-    assert dispatch.handle_command("WHEELS", b"", 1000) is None
 
 
 # --- name-keyed get_field/set_field (sprint 007 ticket 005) -------------

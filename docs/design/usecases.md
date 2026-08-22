@@ -2,8 +2,10 @@
 
 Actors: **Developer** (builds/flashes the image, runs offline suites),
 **Student** (writes MicroPython on the robot), **Wire client** (host
-tooling — rogo, relay, benches — speaking v5), **Stakeholder** (bench
-acceptance on tovez, radio channel 3, via mbdeploy).
+tooling — rogo, relay, benches — speaking v5 through UC-011, v6 line
+protocol from sprint 007 ticket 006 onward; see that sprint's
+`sprint.md` for the cutover), **Stakeholder** (bench acceptance on
+tovez, radio channel 3, via mbdeploy).
 
 ---
 
@@ -68,42 +70,70 @@ acceptance on tovez, radio channel 3, via mbdeploy).
 - **Postconditions:** wheels stop and stay stopped through boot.
 - **Error flows:** none tolerated — this is a hard M1 gate case.
 
-## UC-006 — Wire codec round-trips the golden vectors
+## UC-006 — Wire grammar round-trips the golden vectors
+
+*Superseded by the v6 line protocol, sprint 007 (tickets 001-006):
+retired `src/core/wire.py`/`src/core/msgs.py` and the binary/COBS
+codec entirely — see sprint 007's `sprint.md` for the full cutover
+rationale.*
 
 - **Actor:** Developer (offline)
-- **Preconditions:** `src/wire.py`, `src/msgs.py`,
-  `tests/fixtures/wire_golden_vectors.txt`.
-- **Main flow:** run the golden-vector suite under CPython: decode and
-  encode all 8 cross-language vectors; round-trip every binary verb
-  against the host pb2.
-- **Postconditions:** 8/8; byte-exact encodes; `mpy-cross` lint passes
-  on every `src/*.py`.
-- **Error flows:** any vector mismatch fails the suite; CRC or COBS
-  divergence is a blocker, not a warning.
+- **Preconditions:** `src/core/protocol.py`,
+  `tests/fixtures/protocol_golden_vectors.txt`.
+- **Main flow:** run the golden-vector suite under CPython: parse
+  every SETUP/IN/EMIT/OUT block and drive `protocol.ProtocolHandler`
+  (a mock `Adapter`) through every in-scope verb (`HELLO PING ID VER
+  STATUS HELP GET SET TLM WHEELS STOP ESTOP`).
+- **Postconditions:** every applicable vector green (the archetype
+  fixture's `RUN`/`debug` vectors are out of this sprint's verb scope
+  and skipped, not deleted); `mpy-cross` lints `core/protocol.py` and
+  `hardware/protocol_adapter.py`.
+- **Error flows:** any vector mismatch fails the suite; the
+  embedded-NUL divergence and hex-float-rejection cases are pinned as
+  explicit tests, not silently passing by accident.
 
-## UC-007 — Host tooling pings the robot through the relay, unchanged
+## UC-007 — Host tooling pings the robot over radio (v6 line protocol)
+
+*Superseded by the v6 line protocol, sprint 007. The wire grammar
+changed (ASCII text lines, not COBS+CRC binary frames); the relay/
+radio transport and the scheduled-pump mechanics beneath it did not.*
 
 - **Actor:** Wire client
-- **Preconditions:** M3 image flashed; relay running; radio channel per
-  robot JSON (bench: 3), group 10.
-- **Main flow:** `rogo repl <robot> ping` with completely unchanged
-  host tooling; the Python v5 engine parses (relay sigils dropped
-  first), acks (ring depth 12, repeats 3), banner byte-frozen.
-- **Postconditions:** ping acknowledged; REPL on USB stays interactive
-  throughout (scheduled pump, bounded work per call).
-- **Error flows:** NACK carries err code; unknown verb → protocol
-  error ack, engine keeps running.
+- **Preconditions:** v6 image flashed (sprint 007 ticket 006 landed);
+  radio transport registered; radio channel per robot JSON (bench: 3),
+  group 10.
+- **Main flow:** client sends an uppercase command line (e.g. `PING`)
+  over radio; `RadioLink.read_line()` hands the reassembled message to
+  that transport's OWN `protocol.ProtocolHandler.feed()` (one handler
+  per transport, sharing one `ProtocolAdapter` — sprint.md's Design
+  Rationale); the handler replies on the same transport (`pong <now>`
+  for `PING`).
+- **Postconditions:** reply received; REPL on USB stays interactive
+  throughout (scheduled pump, one line read per transport per cycle).
+- **Error flows:** unknown verb or wrong arity → malformed count
+  increments, a reply is sent only if the line's raw last token is a
+  well-formed nonzero `#id`; `ESTOP` never replies, even malformed.
 
-## UC-008 — Motion command over radio produces motion and acks
+## UC-008 — WHEELS over radio produces motion (v6 line protocol)
+
+*Superseded by the v6 line protocol, sprint 007. Accepted behavior
+change (sprint.md Design Rationale): `WHEELS` now commands velocity
+through `countsPerLength`, not v5's raw open-loop duty.*
 
 - **Actor:** Wire client
 - **Preconditions:** UC-007.
-- **Main flow:** WHEELS command over radio → engine dispatches to the
-  kernel binding; wheels move under lease; acks emitted; telemetry
-  reflects motion.
-- **Postconditions:** motion matches command; lease semantics as
-  UC-003.
-- **Error flows:** quiet host → lease expiry stops wheels (kill test).
+- **Main flow:** `WHEELS <left> <right> <duration> [#id]` over radio →
+  the handler tokenizes/validates, then `ProtocolAdapter.on_wheels()`
+  scales `[mm/s]` by `countsPerLength` into `[counts/s]`, splits into
+  velocity/twist, and calls `MoveQueue.diffdrive.drive()` DIRECTLY —
+  no queue involved (`protocol.md` Sec 5.1: "there is no queue in this
+  library").
+- **Postconditions:** wheels move under the commanded lease; the
+  5000 ms duration ceiling is enforced by the adapter ABOVE the kernel
+  call, before `drive()` is ever reached.
+- **Error flows:** quiet host → lease expiry stops wheels (kill test);
+  a duration over the ceiling → `err ... 3` (RANGE), refused before
+  any kernel call.
 
 ## UC-009 — WiFi REPL mirror session
 
@@ -117,16 +147,27 @@ acceptance on tovez, radio channel 3, via mbdeploy).
 - **Error flows:** module state stale across reflash → power-cycle
   discipline; AT flood avoided (one CIPSEND per datagram).
 
-## UC-010 — UDP v5 plane on WiFi
+## UC-010 — UDP v6 plane on WiFi
+
+*Superseded by the v6 line protocol, sprint 007 — the join point is
+this UDP payload swapping from v5 binary frames to v6 ASCII lines;
+`wifi_at.py`'s AT state machine, per-datagram coalescing, and TLM
+throttle beneath it are UNCHANGED (sprint.md: "no new source module").*
 
 - **Actor:** Wire client
-- **Preconditions:** UC-009 network up.
-- **Main flow:** v5 datagrams on UDP :7654; per-datagram coalescing;
-  TLM throttled ≥50 ms on this plane; acks survive throttling
-  (repeats 3).
-- **Postconditions:** `wifi_bench_gate.py --port wifi: --skip-drive`
-  9/9 with an `nc` REPL session held open.
-- **Error flows:** READY handled on new-peer edge in the pump.
+- **Preconditions:** UC-009 network up; v6 image (sprint 007 ticket
+  006 landed).
+- **Main flow:** v6 ASCII lines on UDP :7654, one datagram per line;
+  per-datagram coalescing (one `AT+CIPSEND` per datagram, never per
+  character); `TLM` throttled ≥50 ms on this plane
+  (`wifi_at.TlmThrottle`).
+- **Postconditions:** `wifi_bench_gate.py`'s framing/peer-learning
+  mechanics validate unmodified against the v6 payload — the prober is
+  built protocol-agnostic (raw text lines) specifically so it needs no
+  v6-awareness of its own (sprint.md Design Rationale).
+- **Error flows:** READY handled on new-peer edge in the pump
+  (`wifi_at.pump()` → `comms.send_ready()`, unchanged mechanism —
+  still a raw "READY" broadcast, not a v6 wire verb).
 
 ## UC-011 — Robot config loads fail-closed at boot
 

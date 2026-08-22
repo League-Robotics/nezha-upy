@@ -41,12 +41,16 @@ surface; ``wheel_control_to_diffdrive_config()`` produces the full
 15-field mapping for GET_CONFIG/SET_FIELD wire reporting and for
 whichever ticket adds the native call.
 
-CONFIG/SET_FIELD/GET_CONFIG wire wiring: see ``ConfigDispatch`` below.
-``msgs.py`` has no per-verb protobuf field tables yet, so this module
-hand-decodes a small, documented payload shape for exactly these three
-verbs -- group id convention borrowed from radio-robot-elite's
-``ConfigGroupTarget`` enum (``src/protos/robot_config.proto``:
-``WHEEL_CONTROL = 4``); only the WHEEL_CONTROL group is wired.
+``ConfigDispatch`` below backs v6's ``GET``/``SET`` verbs (sprint 007)
+through its name-keyed ``get_field()``/``set_field()`` accessors
+(ticket 005) -- the JSON-field-name <-> live-value store is the same
+one either way, only the wire dispatch on top of it changed. v5's own
+binary ``CONFIG``/``SET_FIELD``/``GET_CONFIG`` verb dispatch
+(``handle_command()``/``_handle_set_field()``/``_handle_config()``/
+``_handle_get_config()``/``build_cfg_reply()``) retired with the v6
+cutover (sprint 007 ticket 006) -- their shared dependency on
+``wire.encode_frame()``/index-keyed ``WHEEL_CONTROL_FIELDS`` payloads
+is gone along with them, not left dead-code-in-place.
 
 MicroPython-only imports are guarded so this module runs under CPython
 too.
@@ -57,20 +61,12 @@ try:
 except ImportError:
     import json
 
-import struct
-
-from core import wire
-
 __all__ = [
     "ConfigError",
     "REQUIRED_KEYS",
     "WHEEL_CONTROL_FIELDS",
     "DEFAULT_MAX_DUTY",
     "DEFAULT_CYCLE_PERIOD_MS",
-    "CONFIG_GROUP_WHEEL_CONTROL",
-    "ERR_OK",
-    "ERR_UNIMPLEMENTED",
-    "ERR_MALFORMED",
     "parse_robot_config",
     "load_robot_config",
     "wheel_control_to_diffdrive_config",
@@ -151,16 +147,6 @@ DEFAULT_CYCLE_PERIOD_MS = 24
 # proper multi-robot derivation; the old 10.0 was too small -- every
 # velocity command railed at max_duty.
 _TRAVEL_CALIB_TO_FULL_DUTY_VELOCITY = 10845.0   # [counts/s per mm/deg]
-
-# ConfigGroupTarget group id this module wires -- borrowed from
-# radio-robot-elite's robot_config.proto enum (WHEEL_CONTROL = 4).
-CONFIG_GROUP_WHEEL_CONTROL = 4
-
-# Ack err codes this dispatch returns (msgs.py has no generated
-# error-code table yet).
-ERR_OK = 0
-ERR_UNIMPLEMENTED = 1  # a config group other than WHEEL_CONTROL
-ERR_MALFORMED = 2  # wrong payload length / out-of-range field index
 
 
 def _get_group(doc, group):
@@ -266,65 +252,36 @@ def radio_channel(robot_config):
 
 
 class ConfigDispatch:
-    """Backs ``src/core/comms.py``'s firmware-layer dispatch interface
-    (``handle_command(verb_name, payload, now) -> (corr_id, err_code) |
-    None``) for the CONFIG/SET_FIELD/GET_CONFIG verbs.
+    """The live ``wheel_control`` name/value store -- backs v6's
+    ``GET``/``SET`` verbs through the name-keyed ``get_field()``/
+    ``set_field()`` accessors below (sprint 007 ticket 005), which
+    ``src/hardware/protocol_adapter.py``'s ``ProtocolAdapter.on_get()``/
+    ``on_set()`` delegate to exclusively.
 
-    Payload shapes (hand-decoded convention -- see module docstring for
-    why no generated field table exists to decode against instead):
+    v5's binary ``CONFIG``/``SET_FIELD``/``GET_CONFIG`` verb dispatch
+    (index-keyed payloads, a ``transports`` list of its own for
+    broadcasting a COBS+CRC ``CFG`` reply frame) retired with the v6
+    cutover (sprint 007 ticket 006) -- see module docstring. This class
+    is now just the field store; it owns no transport of its own."""
 
-      SET_FIELD: corr_id:u8, group_id:u8, field_index:u8, value:f32-LE
-                 (7 bytes). Applies ONE wheel_control field live (RAM
-                 only -- spec Sec 8: "No on-flash tuning store").
-      CONFIG:    corr_id:u8, group_id:u8, value:f32-LE x 15 (62 bytes).
-                 Bulk-applies the WHOLE wheel_control group at once, in
-                 ``WHEEL_CONTROL_FIELDS`` order.
-      GET_CONFIG: corr_id:u8, group_id:u8 (2 bytes). See below.
-
-    Only ``CONFIG_GROUP_WHEEL_CONTROL`` (4) is wired -- any other group
-    id acks ``ERR_UNIMPLEMENTED`` (the native call needed to push other
-    groups into the kernel does not exist yet either).
-
-    GET_CONFIG note: ``comms.py``'s ``handle_command`` interface gets no
-    requesting transport and offers no reply-frame channel beyond the
-    ack ring (``(corr_id, err_code)``). This dispatch therefore keeps
-    its own ``transports`` list (``add_transport()``, independent of
-    ``comms.Comms``'s own registration) and, on a valid GET_CONFIG,
-    broadcasts a ``CFG`` reply frame (``build_cfg_reply()`` below,
-    COBS+CRC via ``wire.encode_frame()``) to every registered transport,
-    in addition to acking via the ring -- mirroring the
-    broadcast-to-all-transports shape ``Comms.send_banner()``/
-    telemetry's own frame emission already use. A caller that never
-    calls ``add_transport()`` still gets a correct ack, just no CFG
-    data frame.
-    """
-
-    def __init__(self, robot_config, transports=None):
+    def __init__(self, robot_config):
         # Deliberately does NOT retain robot_config. Only wheel_control is
-        # ever read (see current_wheel_control/_handle_*), and the parsed
-        # document costs ~6.9 KB of a ~16.7 KB heap -- measured on tovez.
-        # Holding it here kept it alive for the whole session.
+        # ever read (see current_wheel_control/get_field/set_field), and the
+        # parsed document costs ~6.9 KB of a ~16.7 KB heap -- measured on
+        # tovez. Holding it here kept it alive for the whole session.
         self._wheel_control = dict(robot_config.get("wheel_control") or {})
-        self._transports = list(transports) if transports else []
-
-    def add_transport(self, transport):
-        self._transports.append(transport)
 
     def current_wheel_control(self):
-        """The live (possibly SET_FIELD/CONFIG-patched) wheel_control
-        dict, JSON field names -- what ``build_cfg_reply()`` reads from."""
+        """The live (possibly ``set_field()``-patched) wheel_control
+        dict, JSON field names."""
         return self._wheel_control
 
     def get_field(self, name):
         """Name-keyed read accessor (sprint 007 ticket 005: v6's
-        ``GET``/``SET`` are by-name, not by-index -- ``src/hardware/
-        protocol_adapter.py``'s ``on_get()`` delegates here rather than
-        reaching into ``_wheel_control`` directly). ``name`` is a JSON
+        ``GET``/``SET`` are by-name, not by-index). ``name`` is a JSON
         ``wheel_control`` field name (``WHEEL_CONTROL_FIELDS``'s left
         column, e.g. ``"v_min"``) -- returns its current live value, or
-        ``None`` if ``name`` is not one of the 15 known fields.
-        Additive: does not touch ``_handle_set_field()``'s own binary,
-        index-keyed path, which retires separately (ticket 006)."""
+        ``None`` if ``name`` is not one of the 15 known fields."""
         for json_field, _kernel_field in WHEEL_CONTROL_FIELDS:
             if json_field == name:
                 return self._wheel_control.get(json_field)
@@ -333,99 +290,14 @@ class ConfigDispatch:
     def set_field(self, name, value):
         """Name-keyed write accessor, the ``SET`` counterpart to
         ``get_field()`` above (sprint 007 ticket 005). Applies ``value``
-        to ``name`` live, RAM only -- no on-flash persistence, matching
-        ``_handle_set_field()``'s own contract and ``protocol.md`` Sec 7
-        ("the library stores none"). Returns ``True`` on success,
-        ``False`` if ``name`` is not one of the 15 known
-        ``WHEEL_CONTROL_FIELDS`` names -- the caller (``ProtocolAdapter.
-        on_set()``) maps a ``False`` onto the wire's ``Result.UNKNOWN``."""
+        to ``name`` live, RAM only -- no on-flash persistence
+        (``protocol.md`` Sec 7: "the library stores none"). Returns
+        ``True`` on success, ``False`` if ``name`` is not one of the 15
+        known ``WHEEL_CONTROL_FIELDS`` names -- the caller
+        (``ProtocolAdapter.on_set()``) maps a ``False`` onto the wire's
+        ``Result.UNKNOWN``."""
         for json_field, _kernel_field in WHEEL_CONTROL_FIELDS:
             if json_field == name:
                 self._wheel_control[json_field] = value
                 return True
         return False
-
-    def build_cfg_reply(self, group_id):
-        """Pure function: pack the given group's current field values
-        into a COBS+CRC-framed ``CFG`` wire frame (group_id:u8 then 15x
-        f32-LE), or ``None`` for an unwired group_id."""
-        if group_id != CONFIG_GROUP_WHEEL_CONTROL:
-            return None
-        body = bytearray()
-        body.append(group_id & 0xFF)
-        for json_field, _kernel_field in WHEEL_CONTROL_FIELDS:
-            body.extend(_pack_f32_le(float(self._wheel_control[json_field])))
-        return wire.encode_frame(bytes(body), command=b"CFG")
-
-    def handle_command(self, verb_name, payload, now):
-        if verb_name == "SET_FIELD":
-            return self._handle_set_field(payload)
-        if verb_name == "CONFIG":
-            return self._handle_config(payload)
-        if verb_name == "GET_CONFIG":
-            return self._handle_get_config(payload)
-        return None
-
-    def _handle_set_field(self, payload):
-        if len(payload) != 7:
-            return (_corr_id_or_none(payload), ERR_MALFORMED)
-        corr_id = payload[0]
-        group_id = payload[1]
-        field_index = payload[2]
-        if group_id != CONFIG_GROUP_WHEEL_CONTROL:
-            return (corr_id, ERR_UNIMPLEMENTED)
-        if field_index >= len(WHEEL_CONTROL_FIELDS):
-            return (corr_id, ERR_MALFORMED)
-        value = _unpack_f32_le(payload[3:7])
-        json_field, _kernel_field = WHEEL_CONTROL_FIELDS[field_index]
-        self._wheel_control[json_field] = value
-        return (corr_id, ERR_OK)
-
-    def _handle_config(self, payload):
-        expected_len = 2 + 4 * len(WHEEL_CONTROL_FIELDS)
-        if len(payload) != expected_len:
-            return (_corr_id_or_none(payload), ERR_MALFORMED)
-        corr_id = payload[0]
-        group_id = payload[1]
-        if group_id != CONFIG_GROUP_WHEEL_CONTROL:
-            return (corr_id, ERR_UNIMPLEMENTED)
-        offset = 2
-        values = []
-        for _ in WHEEL_CONTROL_FIELDS:
-            values.append(_unpack_f32_le(payload[offset:offset + 4]))
-            offset += 4
-        for (json_field, _kernel_field), value in zip(WHEEL_CONTROL_FIELDS, values):
-            self._wheel_control[json_field] = value
-        return (corr_id, ERR_OK)
-
-    def _handle_get_config(self, payload):
-        if len(payload) != 2:
-            return (_corr_id_or_none(payload), ERR_MALFORMED)
-        corr_id = payload[0]
-        group_id = payload[1]
-        frame = self.build_cfg_reply(group_id)
-        if frame is None:
-            return (corr_id, ERR_UNIMPLEMENTED)
-        for transport in self._transports:
-            transport.send(frame)
-        return (corr_id, ERR_OK)
-
-
-def _corr_id_or_none(payload):
-    """Best-effort ack target for a malformed-length payload -- the
-    corr_id byte may still be present. ``None`` only if even that byte
-    is missing (matches comms.py's "None = no ack possible" convention)."""
-    if payload:
-        return payload[0]
-    return None
-
-
-def _pack_f32_le(value):
-    """Pack ``value`` as IEEE-754 binary32, little-endian. ``struct``
-    ships on both CPython and MicroPython, unlike ``ujson``/
-    ``micropython`` elsewhere in this port, so no import guard needed."""
-    return struct.pack("<f", value)
-
-
-def _unpack_f32_le(data):
-    return struct.unpack("<f", bytes(data))[0]

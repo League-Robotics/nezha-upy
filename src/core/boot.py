@@ -24,10 +24,15 @@ duck-typed-dependency-injection testing convention.
 The six steps ``run()`` performs, in order:
   1. Load the robot's JSON config, fail-closed.
   2. ``diffdrive.configure/begin/start`` -- only if step 1 succeeded
-     AND a diffdrive-shaped module is available. Also wires
-     ``motion.RobotDispatch`` as ``comms.Comms``'s dispatch.
-  3. Bring up ``comms.Comms`` and the radio transport unconditionally;
-     bring up WiFi only when ``wifi_secrets.json`` is present.
+     AND a diffdrive-shaped module is available. Also builds a
+     ``hardware.protocol_adapter.ProtocolAdapter`` (backed by a real
+     ``MoveQueue``/``ConfigDispatch`` on that path, or by
+     ``_NullDiffDrive``/an empty ``ConfigDispatch`` on the fail-closed
+     path -- see ``_NullDiffDrive``'s own docstring for why comms must
+     ALWAYS get a real adapter, never ``None``).
+  3. Bring up ``comms.Comms`` (wired to that SAME ``ProtocolAdapter``)
+     and the radio transport unconditionally; bring up WiFi only when
+     ``wifi_secrets.json`` is present.
   4. Start the scheduled pump, wired to ``microbit.run_every()``.
   5. ``comms.send_banner()`` then ``comms.send_ready()`` -- always,
      regardless of step 1/2's outcome (fail-closed: comms/REPL must
@@ -41,11 +46,45 @@ robot-agnostic, bare (no leading slash) name; this port ENOENTs the
 leading-slash form. Whichever robot's JSON is copied onto a unit's
 filesystem at bench time goes under this name.
 
-Banner/ID content mirrors ``tests/test_comms_loopback.py``'s
-``BANNER = "DEVICE:NEZHA2:robot:testbot:12345"`` fixture, with real
-per-robot data (``identity.robot_name``, ``connection.serial_last_6``)
--- not independently re-verified byte-for-byte against radio-robot's
-real C++ source.
+Sprint 007 ticket 006 (v6 line-protocol cutover): this module no
+longer builds a banner or ``id_line`` string of its own the way v5's
+``_identity_lines()`` did -- ``core/protocol.py``'s ``ProtocolHandler``
+now formats "device NEZHA2 robot <name> <serial>" (``HELLO``/the
+banner) and "id <drivetrain> <profile> <version>" (``ID``) ON DEMAND
+from the shared ``ProtocolAdapter.identity()``, so boot only needs to
+hand that adapter the right SCALARS (``_identity_fields()`` below),
+never a pre-formatted line. This is the simpler of the two options the
+ticket left open, and is what actually made a static ``id_line``
+string obsolete: identity() is called fresh every time, so nothing
+here can go stale relative to what the wire reports. Field mapping
+(this ticket's own call, since ``robot_config.schema.json`` names none
+of these "the v6 identity fields" itself):
+
+  - ``name`` (the banner's own field) = ``identity.uid`` -- the
+    ROBOT's stable identity, not its currently-loaded config profile;
+    critically, it is guaranteed a single wire token, unlike
+    ``robot_name`` (``data/tovez_nocal.json``'s own
+    ``identity.robot_name`` is the literal two-word string "tovez
+    nocal" -- a banner field containing a space would misparse under
+    protocol.md's space-delimited field grammar). Falls back to
+    ``robot_name`` if ``uid`` is absent (older/malformed JSON).
+  - ``profile`` = ``identity.robot_name`` -- which named config
+    variant is loaded (e.g. "tovez" vs "tovez nocal"), a required key
+    (``REQUIRED_KEYS``) so always present when config load succeeded.
+  - ``drivetrain`` = ``identity.get("drivetrain_type", "differential")``
+    -- most robot JSONs omit this key entirely (this sprint's kernel
+    is DiffDrive-only, CLAUDE.md), but ``data/togov.json`` already
+    carries ``"drivetrain_type": "mecanum"``, so reading it when
+    present (rather than hardcoding "differential" unconditionally)
+    reports that robot's real hardware over the wire without this
+    port needing to understand mecanum kinematics at all.
+  - ``serial`` = ``connection.serial_last_6`` (unchanged from v5).
+  - ``counts_per_length`` (WHEELS' geometry factor, sprint.md Design
+    Rationale) = ``wheels.ticks_per_mm`` (``data/tovez.json``:
+    12.7602) -- optional (not in ``REQUIRED_KEYS``; ``data/togov.
+    json`` carries an explicit JSON ``null`` here, not just a missing
+    key), falls back to ``1.0`` when absent/null/non-positive, mirroring
+    ``ProtocolAdapter``'s own constructor guard for the same value.
 
 MicroPython-only modules (``diffdrive``, ``microbit``, ``utime``) are
 import-guarded so this module imports under CPython (the offline test
@@ -72,6 +111,7 @@ except ImportError:  # CPython has no utime -- fall back to time.monotonic()
 from core import comms
 from core import config
 from hardware import motion
+from hardware import protocol_adapter
 from core import radio_shim
 from core import wifi_at
 
@@ -99,7 +139,8 @@ DEFAULT_RADIO_CHANNEL = 7
 # cyclePeriod default) so the pump keeps pace with fresh diffdrive output.
 PUMP_PERIOD_MS = config.DEFAULT_CYCLE_PERIOD_MS
 
-# See module docstring "Banner/ID content" -- spec Sec 10 open item 1.
+# Reported by ID/VER (via ProtocolAdapter.identity()) -- spec Sec 10
+# open item 1.
 VERSION = "nezha-upy-0.1"
 
 _DEFAULT_SERIAL_SUFFIX = "000000"
@@ -114,20 +155,63 @@ def _now_ms():
     return int(_time.monotonic() * 1000)
 
 
-def _identity_lines(robot_config, version):
-    """Build the (banner, id_line) pair -- see module docstring.
-    ``robot_config`` may be ``None`` (fail-closed path); this never
-    raises, since the banner must still emit either way."""
+def _identity_fields(robot_config):
+    """``(name, serial, drivetrain, profile, counts_per_length)`` for
+    the v6 ``ProtocolAdapter`` -- see module docstring's field-mapping
+    note for what each maps from and why. ``robot_config`` may be
+    ``None`` (fail-closed path); this never raises, since HELLO/ID
+    must still answer either way."""
     if robot_config is not None:
-        robot_name = robot_config["identity"]["robot_name"]
+        identity = robot_config.get("identity") or {}
+        robot_name = identity["robot_name"]
+        name = identity.get("uid", robot_name)
+        drivetrain = identity.get("drivetrain_type", "differential")
+        profile = robot_name
         connection = robot_config.get("connection") or {}
-        serial_suffix = connection.get("serial_last_6", _DEFAULT_SERIAL_SUFFIX)
+        serial = connection.get("serial_last_6", _DEFAULT_SERIAL_SUFFIX)
+        wheels = robot_config.get("wheels") or {}
+        raw_counts_per_length = wheels.get("ticks_per_mm")
+        counts_per_length = (
+            float(raw_counts_per_length) if raw_counts_per_length else 1.0
+        )
     else:
-        robot_name = "unconfigured"
-        serial_suffix = _DEFAULT_SERIAL_SUFFIX
-    banner = "DEVICE:NEZHA2:robot:%s:%s" % (robot_name, serial_suffix)
-    id_line = "ID:nezha:%s:%s" % (robot_name, version)
-    return banner, id_line
+        name = "unconfigured"
+        drivetrain = "differential"
+        profile = "unconfigured"
+        serial = _DEFAULT_SERIAL_SUFFIX
+        counts_per_length = 1.0
+    return name, serial, drivetrain, profile, counts_per_length
+
+
+class _NullDiffDrive(object):
+    """No-op diffdrive stand-in for the fail-closed path (config load
+    failed, or no diffdrive-shaped module is available). Step 3 brings
+    up comms/REPL unconditionally (module docstring), and v6's
+    ``protocol.ProtocolHandler`` always needs a real ``ProtocolAdapter``
+    -- unlike v5's ``NullDispatch``, there is no "no adapter at all"
+    option (``ProtocolHandler.__init__`` takes one positionally, not an
+    optional). Wrapping THIS in a real ``MoveQueue`` gives
+    ``ProtocolAdapter`` something duck-typed to call that never touches
+    any real hardware. ``drive()`` answers the exact status string
+    (``"refused_unconfigured"``) ``protocol_adapter.py``'s own
+    ``_STATUS_TO_RESULT`` table already maps onto
+    ``protocol.Result.NOT_CONFIGURED`` -- no new mapping needed."""
+
+    def drive(self, velocity, twist, lease_ms):
+        return "refused_unconfigured"
+
+    def neutral(self):
+        pass
+
+    def estop(self):
+        pass
+
+    def output(self):
+        return {
+            "ready": False, "estopped": False, "leaseExpired": False,
+            "stallHalted": False, "connectedLeft": False,
+            "connectedRight": False, "velocity": 0.0, "twist": 0.0,
+        }
 
 
 class _BootPumpTimer(comms.PumpTimer):
@@ -159,7 +243,7 @@ class BootResult:
         self.config_loaded = False  # survives the release -- readiness flag
         self.config_error = None
         self.diffdrive_ready = False
-        self.dispatch = None
+        self.dispatch = None  # set in Step 2 -- always a ProtocolAdapter once run() returns
         self.comms = None
         self.radio_link = None
         self.wifi_link = None
@@ -202,9 +286,12 @@ def run(config_path=CONFIG_PATH, secrets_path=SECRETS_PATH,
         result.config_error = exc
         print("BOOT: robot config load failed -- motion refused:", exc)
 
-    # --- Step 2: diffdrive configure/begin/start + dispatch wiring, ----
-    # only on a valid config AND an available diffdrive-shaped module.
-    dispatch = None
+    # --- Step 2: diffdrive configure/begin/start + ProtocolAdapter -----
+    # wiring. diffdrive itself is armed only on a valid config AND an
+    # available diffdrive-shaped module; the ProtocolAdapter (and the
+    # MoveQueue/ConfigDispatch it wraps) is built EITHER WAY -- comms
+    # must always get a real adapter, never None (see _NullDiffDrive's
+    # own docstring for why).
     if result.robot_config is not None and diffdrive_module is not None:
         kwargs = config.diffdrive_configure_kwargs(result.robot_config)
         diffdrive_module.configure(**kwargs)
@@ -214,26 +301,37 @@ def run(config_path=CONFIG_PATH, secrets_path=SECRETS_PATH,
         # (bench log). Boot stages a valid config; the FIRST motion
         # consumer begins/starts the fiber.
         result.diffdrive_ready = True
-
         move_queue = motion.MoveQueue(diffdrive_module)
+    else:
+        move_queue = motion.MoveQueue(_NullDiffDrive())
+
+    if result.robot_config is not None:
         config_dispatch = config.ConfigDispatch(result.robot_config)
-        dispatch = motion.RobotDispatch(config_dispatch, move_queue)
-    result.dispatch = dispatch
+    else:
+        config_dispatch = config.ConfigDispatch({"wheel_control": {}})
+
+    # `robot_serial` (not `serial`) -- Step 3 below reuses the name
+    # `serial` for the WiFi AT byte-pipe object; keeping these two
+    # distinct avoids a same-name-different-thing trap even though the
+    # ProtocolAdapter call below already captures this value first.
+    name, robot_serial, drivetrain, profile, counts_per_length = (
+        _identity_fields(result.robot_config))
+    result.dispatch = protocol_adapter.ProtocolAdapter(
+        move_queue, config_dispatch, counts_per_length,
+        name, robot_serial, drivetrain, profile, version, now_fn=now_fn)
 
     # --- Step 3: comms.Comms + transports. ------------------------------
-    banner, id_line = _identity_lines(result.robot_config, version)
-
     # Release the parsed config: everything downstream needs only the
     # scalars already extracted above (diffdrive kwargs, the
-    # wheel_control copy inside ConfigDispatch, and these identity
-    # strings). Measured on tovez: the document is ~6.9 KB of a ~16.7 KB
-    # heap -- 41% of it -- and holding it was the single largest resident
-    # allocation on the device. Callers use config_ok(), not
-    # `robot_config is not None`.
+    # wheel_control copy inside ConfigDispatch, and the identity/geometry
+    # scalars just pulled for the ProtocolAdapter). Measured on tovez: the
+    # document is ~6.9 KB of a ~16.7 KB heap -- 41% of it -- and holding
+    # it was the single largest resident allocation on the device.
+    # Callers use config_ok(), not `robot_config is not None`.
     result.robot_config = None
     gc.collect()
 
-    result.comms = comms.Comms(banner, id_line, dispatch=dispatch, version=version)
+    result.comms = comms.Comms(result.dispatch)
 
     if result.robot_config is not None:
         channel = config.radio_channel(result.robot_config)

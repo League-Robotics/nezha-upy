@@ -2,9 +2,14 @@
 id: '006'
 title: 'Hard cutover: retire wire.py/msgs.py/RobotDispatch/comms.py''s v5 dispatch
   core; rewire comms.py + boot.py to v6'
-status: open
-use-cases: [SUC-001, SUC-002, SUC-003, SUC-004]
-depends-on: ['005']
+status: done
+use-cases:
+- SUC-001
+- SUC-002
+- SUC-003
+- SUC-004
+depends-on:
+- '005'
 github-issue: ''
 issue: port-v6-line-protocol-hard-cutover-from-v5.md
 completes_issue: true
@@ -77,26 +82,26 @@ generator-mode tests unchanged).
 
 ## Acceptance Criteria
 
-- [ ] `src/core/wire.py`, `src/core/msgs.py`,
+- [x] `src/core/wire.py`, `src/core/msgs.py`,
       `tests/unit/test_wire_golden_vectors.py`,
       `tests/fixtures/wire_golden_vectors.txt` deleted.
-- [ ] `motion.RobotDispatch` and its six `_handle_*` methods deleted;
+- [x] `motion.RobotDispatch` and its six `_handle_*` methods deleted;
       `git diff` shows `motion.Move`/`MoveQueue`/generator-mode
       functions byte-identical.
-- [ ] `config.ConfigDispatch`'s binary dispatch methods deleted; its
+- [x] `config.ConfigDispatch`'s binary dispatch methods deleted; its
       name-keyed accessors (ticket 005) remain and are what
       `ProtocolAdapter` now calls exclusively.
-- [ ] `comms.py`'s `Comms` builds one `ProtocolHandler` per transport
+- [x] `comms.py`'s `Comms` builds one `ProtocolHandler` per transport
       at `add_transport()` time, sharing one `ProtocolAdapter`; the
       old v5 dispatch/ack-ring/telemetry-policy code is gone, not
       dead-code-left-in-place.
-- [ ] `boot.py` wires `ProtocolAdapter` as step 2/3's dispatch object;
+- [x] `boot.py` wires `ProtocolAdapter` as step 2/3's dispatch object;
       banner updated to `device NEZHA2 robot <name> <serial>`.
-- [ ] `tests/test_comms_loopback.py`, `tests/test_boot_sequence.py`,
+- [x] `tests/test_comms_loopback.py`, `tests/test_boot_sequence.py`,
       `tests/test_motion.py` updated and green.
-- [ ] `python3 -m pytest tests/` fully green; `git diff --exit-code --
+- [x] `python3 -m pytest tests/` fully green; `git diff --exit-code --
       vendor/` stays clean (no vendored kernel touched).
-- [ ] `./build.sh --clean --with-diffdrive` still links (confirms no
+- [x] `./build.sh --clean --with-diffdrive` still links (confirms no
       accidental native-binding breakage from the Python-side
       refactor — this ticket touches no native code, but the gate
       should still be run once as a sanity check).
@@ -147,3 +152,92 @@ of this sprint but explicitly not auto-rewritten by the sprint
 process itself, since design-doc opt-in is disabled for this
 project) — fold that documentation pass into this ticket since it's
 the ticket that makes the description true.
+
+## Completion Notes
+
+- **id_line/banner resolution**: `boot.py` no longer builds a banner
+  or `id_line` string of its own at all. `core/protocol.py`'s
+  `ProtocolHandler.send_banner()`/`_handle_id()`/`_handle_ver()`
+  already format "device NEZHA2 robot &lt;name&gt; &lt;serial&gt;" /
+  "id &lt;drivetrain&gt; &lt;profile&gt; &lt;version&gt;" / "ver
+  &lt;version&gt;" ON DEMAND from the shared `ProtocolAdapter.
+  identity()` — so boot only has to hand the adapter the right
+  scalars once, at construction. This is the simpler of the two
+  options the ticket named, and is what makes a static `id_line`
+  string genuinely obsolete (nothing can go stale relative to what the
+  wire reports, since `identity()` is called fresh every time).
+- **Identity field mapping** (boot's own call — `robot_config.
+  schema.json` names none of these "the v6 identity fields" itself):
+  `name` = `identity.uid` (falls back to `robot_name`) — chosen over
+  `robot_name` because `data/tovez_nocal.json`'s own
+  `identity.robot_name` is the two-word string "tovez nocal", and a
+  banner field containing a space would misparse under protocol.md's
+  space-delimited grammar; `profile` = `identity.robot_name` (which
+  named config variant is loaded); `drivetrain` =
+  `identity.get("drivetrain_type", "differential")` — `data/
+  togov.json` already carries `"drivetrain_type": "mecanum"`, so
+  reading it when present reports that robot's real hardware without
+  this port needing to understand mecanum kinematics; `serial` =
+  `connection.serial_last_6` (unchanged from v5); `counts_per_length`
+  = `wheels.ticks_per_mm` (falls back to `1.0` when absent/`null`/
+  non-positive — `data/togov.json` carries an explicit JSON `null`
+  here, not just a missing key).
+- **Fail-closed adapter, not a `None` dispatch**: v5's `NullDispatch`
+  had a "no dispatch wired at all" option; v6's `ProtocolHandler`
+  does not (`__init__` takes an `Adapter` positionally, not optional),
+  and Step 3 brings up comms/REPL unconditionally even on a bad
+  config. `boot.py` adds a small private `_NullDiffDrive` (drive() ->
+  `"refused_unconfigured"`, the exact status string `protocol_adapter.
+  py`'s own `_STATUS_TO_RESULT` table already maps to
+  `Result.NOT_CONFIGURED`) so a real `ProtocolAdapter` — never `None`
+  — is always what `Comms` gets, on every boot path. `BootResult.
+  dispatch` is therefore always a `ProtocolAdapter` now, a change from
+  v5 where it could be `None`.
+- **Telemetry-emission cadence** (underspecified above the ticket
+  level — sprint.md records the one-handler-per-transport/shared-
+  adapter decision, not a column-projection contract, and no
+  `ProtocolAdapter` telemetry-columns method exists or was added):
+  `comms.py`'s cadence gates `emit_telemetry()` on the shared
+  adapter's own `status()`-reported `tlm` mode (off/auto/on, using
+  `active` for auto — the v5 2000 ms coast-holdoff grace window is
+  deliberately NOT reproduced) so `TLM:OFF` actually silences the
+  stream, and projects a small column set straight from `status()`'s
+  own fields (ready/active/connL/connR/otos/wedge/flags). `src/core/
+  telemetry.py`'s full 22-field frame builder is untouched — it was
+  built for v5's own `emit_callback` contract and wiring it to v6's
+  `emit_telemetry(columns)` shape is future work, not this ticket's.
+- **wifi_at.py surface preserved**: `wifi_at.pump()`'s
+  READY-on-new-peer-edge call (`comms.send_ready()`) still works
+  unchanged — `Comms.send_ready()` stays a raw, handler-bypassing
+  broadcast of the literal text `"READY"` (v6's 12-verb scope has no
+  READY verb and `ProtocolHandler` has no unsolicited-emission method
+  for one, unlike `send_banner()`).
+- **Also deleted, tightly coupled to what the ticket named**:
+  `motion.py`'s `_corr_id_or_none()`/`ERR_*` constants (existed only
+  to serve `RobotDispatch`); `config.py`'s `_corr_id_or_none()`/
+  `_pack_f32_le()`/`CONFIG_GROUP_WHEEL_CONTROL`/`ERR_*` and
+  `ConfigDispatch`'s now-orphaned `add_transport()`/`_transports`/
+  `transports=` constructor param (existed only to broadcast the
+  deleted `GET_CONFIG`'s `CFG` reply frame). `tests/test_config.py`
+  also needed trimming (its CONFIG/SET_FIELD/GET_CONFIG dispatch
+  section exercised exactly the deleted binary methods) even though
+  the ticket's own file list didn't name it explicitly.
+- **Verification**: `python3 -m pytest tests/` → 446 passed, 11
+  skipped, 518 subtests passed (down from the pre-ticket 521/11/518 —
+  the difference is entirely deleted v5-only tests: the whole wire
+  golden-vector suite, `RobotDispatch`'s tests in `test_motion.py`,
+  and the binary CONFIG/SET_FIELD/GET_CONFIG tests in
+  `test_config.py` — net of the new comms.py wiring tests added).
+  `git diff --exit-code -- vendor/` clean. `./build.sh --clean
+  --with-diffdrive` exit 0; `text 331076 / data 8 / bss 126992 / dec
+  458076` bytes; MicroPython layout `0x00000..0x50d44`, well under
+  `_fs_start` (0x6D000).
+- **Pre-existing bug noticed, NOT fixed (out of this ticket's
+  scope)**: `boot.py`'s radio-channel selection reads
+  `result.robot_config` AFTER it has already been released to `None`
+  a few lines above (Step 3), so `config.radio_channel()` is dead
+  code and every boot silently uses `DEFAULT_RADIO_CHANNEL` (7)
+  regardless of the robot JSON's own `connection.radio_channel`
+  (tovez: 3). This predates ticket 006 and is orthogonal to the v6
+  cutover; left untouched per "don't fix unrelated bugs while
+  rewiring" — worth its own ticket/issue.
