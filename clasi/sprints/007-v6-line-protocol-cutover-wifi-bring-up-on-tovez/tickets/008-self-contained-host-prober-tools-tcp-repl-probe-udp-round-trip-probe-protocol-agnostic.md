@@ -1,9 +1,11 @@
 ---
-id: '008'
+id: 008
 title: 'Self-contained host prober (tools/): TCP REPL probe + UDP round-trip probe,
   protocol-agnostic'
-status: open
-use-cases: [SUC-006, SUC-007]
+status: done
+use-cases:
+- SUC-006
+- SUC-007
 depends-on: []
 github-issue: ''
 issue: wifi-bring-up-on-tovez-tcp-repl-udp-protocol.md
@@ -49,17 +51,17 @@ program* doesn't require it.
 
 ## Acceptance Criteria
 
-- [ ] `tools/wifi_tcp_probe.py` (or similar) implements the TCP half:
+- [x] `tools/wifi_tcp_probe.py` (or similar) implements the TCP half:
       connect, expect-prompt, send-expression, hold-open modes.
-- [ ] `tools/wifi_udp_probe.py` (or similar) implements the UDP half:
+- [x] `tools/wifi_udp_probe.py` (or similar) implements the UDP half:
       fixed source port `7655`, send-to-`:7654`, round-trip
       reporting, inter-send timing report (for throttle observation).
-- [ ] Both tools run as standalone CLI scripts (no `src/` import) and
+- [x] Both tools run as standalone CLI scripts (no `src/` import) and
       have offline unit tests against a local mock/loopback socket.
-- [ ] Both tools' `--host`/`--port` (or equivalent) are parameterized
+- [x] Both tools' `--host`/`--port` (or equivalent) are parameterized
       — not hardcoded to `192.168.4.11` — so they can be pointed at
       tovez or exercised against a local test server.
-- [ ] `python3 -m pytest tests/` green (the tool's own offline tests).
+- [x] `python3 -m pytest tests/` green (the tool's own offline tests).
 
 ## Testing
 
