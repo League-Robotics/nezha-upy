@@ -1065,3 +1065,406 @@ unilaterally.
 - `tools/wifi_udp_probe.py --line` (§17) is now available for any
   future session that needs to send a specific protocol verb rather
   than a generic placeholder.
+
+---
+
+# Ticket 011 session (2026-08-22): the reliability layer proven live over WiFi UDP, with concurrent TCP REPL
+
+Sprint 007, ticket 011 (the sprint's join point: `WifiAtLink` as a v6
+transport, end-to-end over real WiFi UDP hardware, with a concurrent
+TCP REPL). Same bench robot: tovez, same UID/port as §1. tovez's build
+at session start was still commit `709ad22` (ticket 010's build,
+including the `del bytearray[...]` pump-wedge fix) — no rebuild/reflash
+was needed this session; no code defect was found that required one.
+
+## 27. Pre-session state confirmed
+
+```
+$ mbdeploy list
+4  yes  tovez  robot  NEZHA2  /dev/cu.usbmodem2121102  9906360200052820a8fdb5e413abb276000000006e052820
+$ ping -c3 192.168.1.196     # 3/3, 3.9-5.2 ms -- reachable
+$ ping -c2 192.168.4.11      # 0/2 -- still unreachable, matches §8 (unchanged)
+```
+
+Identity and port confirmed by UID (§1's own precedent) without
+touching USB. Per §8's still-standing landmine, used `192.168.1.196`
+directly throughout, never `192.168.4.11`.
+
+## 28. Found: the device was completely unresponsive on BOTH WiFi
+planes at session start — the tracked telemetry-throttle gap's
+predicted worst case, confirmed live
+
+`clasi/issues/wifi-plane-telemetry-throttle-not-wired.md` (opened by
+ticket 010) already predicted "memory grows until the heap gives out"
+as the logical endpoint of the unbounded `WifiAtLink._send_queue`
+growth (§20-21 above). This session found that endpoint actually
+reached, live:
+
+- A `HELLO` over UDP got **no reply at all** within an 8 s timeout +
+  6 s observe window.
+- A further 45 s of pure passive listening (no new sends, matching
+  §21's own "don't add more confusion" discipline) got **zero**
+  datagrams — not a slow trickle, total silence, ruling out "just a
+  large backlog still draining" (which drained at 6-9 lines/s in
+  ticket 010's own measurement — 45 s of that would have produced
+  hundreds of lines).
+- A raw TCP connect (both this sprint's own `tools/wifi_tcp_probe.py`
+  and, independently, a bare `nc 192.168.1.196 7654` with an explicit
+  `\r\n` wake-up line) both got **zero bytes back** — the WiFi TCP
+  REPL mirror, which bypasses `protocol.py` entirely (ticket 009 §18),
+  was equally dead. Using a second, independent tool (`nc`) ruled out
+  a bug in this sprint's own probe scripts.
+- `ping` to the same address kept succeeding throughout (§8 above,
+  re-confirmed) — the ESP module's own AT-firmware IP stack (which
+  answers ICMP directly, independent of the nRF's Python VM) was
+  alive; only the nRF-side comms/pump was dead.
+
+Diagnosis required a USB touch (unavoidable — no wire-level replies at
+all means no way to distinguish "wedged pump" from "lost peer" without
+one). `mpremote connect PORT run <script>` **itself failed**:
+
+```
+mpremote.transport.TransportError: could not enter raw repl
+```
+
+— because the device's serial console was being continuously flooded
+by a repeating, uncaught traceback (71.6 KB captured in the few seconds
+the connection attempt was alive), printed once per scheduled-pump tick
+by the same class of failure ticket 010's §18 already found (an
+exception inside `_BootPumpTimer._pump_now()` wedges the pump for good,
+since nothing after the failure point in that callback runs again):
+
+```
+Traceback (most recent call last):
+  File "core/boot.py", line 231, in _pump_now
+  File "core/comms.py", line 216, in _pump_now
+  File "core/comms.py", line 183, in pump
+  File "core/comms.py", line 194, in _emit_telemetry_cadence
+  File "core/protocol.py", line 787, in emit_telemetry
+  File "core/protocol.py", line 834, in _emit_frame
+  File "core/protocol.py", line 735, in _write_line
+  File "core/comms.py", line 92, in write
+  File "core/wifi_at.py", line 333, in send_reliable
+  File "core/wifi_at.py", line 328, in send
+MemoryError: memory allocation failed, allocating 2048 bytes
+```
+
+**This is the tracked issue's own predicted endpoint, now confirmed
+directly**: `_emit_telemetry_cadence()` → `WifiAtLink.send()` failing
+with `MemoryError` because `_send_queue` (never throttled, per the
+issue) had grown large enough to exhaust the heap, repeating on every
+pump tick forever (the exception recurs identically each time, since
+nothing ever drains the queue once the crash starts). This is *worse*
+than ticket 010's own characterization ("ack delayed a few seconds") —
+once the heap is actually exhausted, the pump is permanently wedged,
+not just backed up, and recovers only via an external reset. Not a new
+defect: this is the SAME already-tracked gap
+(`wifi-plane-telemetry-throttle-not-wired.md`), reaching the conclusion
+that issue file already predicted but had not yet observed directly.
+Per this ticket's own scope (a bench join session, not the architecture
+fix that issue explicitly defers), **not fixed here** — see §29 for
+recovery and the issue file for the added confirmation note.
+
+## 29. Recovery: a software-triggered hard reset (`mpremote ... reset`), not a physical act
+
+`mpremote`'s raw-REPL entry protocol depends on the device's serial
+line being quiet enough to recognize its own handshake — a continuously
+re-crashing pump defeats that, so `run`/`exec` could not even get a
+script onto the device to inspect state (and, per ticket 010 §21, doing
+so would have destroyed the pre-crash evidence anyway, since boot.py's
+own frozen call site re-executes `run()` fresh before any injected
+script's own code has a chance to run). `mpremote connect PORT reset`
+(a **hard** reset, issued entirely over the existing USB connection —
+not a physical button press or a power cycle, so this did not need to
+escalate to the stakeholder as a physical act) succeeded cleanly (exit
+0) despite the flood, and the very next `mpremote run` (a bounded
+wait-for-ready script) confirmed a clean, fast rejoin with **no
+recurrence** of the crash:
+
+```
+BOOT_TOUCH_ALIVE
+HAVE_RESULT True
+STATE 0 configure
+STATE 4518 join
+STATE 6333 ready
+READY_AT_MS 6334
+BOOT_TOUCH_DONE
+```
+
+Fast case (~6.3 s, matching §7's own fast-case range), zero
+`MemoryError` during boot or the ready-wait window. This directly
+confirms the crash was accumulated **state** (the send-queue backlog,
+whatever had been left running since ticket 010's own session ended),
+not a fresh-boot default — a clean boot does not reproduce it, and
+nothing in this session sent a `TLM` command before this point.
+`TLM=off` is also confirmed as the actual boot default a few steps
+later (§31's `STATUS` replies below all show `tlm=off`), ruling out
+"telemetry is on by default" as an alternate explanation.
+
+This was this session's only USB touch until the very end (§33) — the
+whole reliability-layer conversation below ran entirely over WiFi UDP,
+with no further soft-resets, per the standing landmine.
+
+## 30. Acceptance criterion 1: `WifiAtLink` confirmed registered as a v6 transport with its own `ProtocolHandler`, by direct code reading
+
+Not a behavioral inference — read directly:
+
+- `src/core/boot.py` Step 3 (`run()`, around line 374-379):
+  ```python
+  ssid, password = wifi_at.load_secrets(secrets_path)
+  if ssid is not None:
+      serial = wifi_serial_factory()
+      repl_hook = wifi_repl_hook_factory() if wifi_repl_hook_factory is not None else None
+      result.wifi_link = wifi_at.WifiAtLink(serial, ssid, password, repl_hook=repl_hook)
+      result.comms.add_transport(result.wifi_link)
+  ```
+- `src/core/comms.py`'s `Comms.add_transport()` (line 128-138):
+  ```python
+  def add_transport(self, transport):
+      if len(self._handlers) >= MAX_TRANSPORTS:
+          return False
+      handler = protocol.ProtocolHandler(self._adapter, _TransportSink(transport))
+      self._handlers.append((transport, handler))
+      return True
+  ```
+
+`add_transport()` constructs a **fresh** `protocol.ProtocolHandler`
+for whatever transport it is given, sharing the one `self._adapter`
+(`Comms`'s own class docstring: "one `protocol.ProtocolHandler` sharing
+`adapter` ... for every transport"). `WifiAtLink` is passed to this
+exact method, identically to `result.radio_link` a few lines above. No
+WiFi-specific branch exists anywhere in this path — `WifiAtLink`
+receives a `ProtocolHandler` purely by being *a* transport, the same
+mechanism the radio transport uses. **This ticket's own premise — "no
+new source code required purely to wire `WifiAtLink` as a v6
+transport" — holds exactly as written**, confirmed by direct reading,
+not just by the fact that the smoke below worked.
+
+## 31. Full reliability-layer smoke, over WiFi UDP — verbatim wire transcript
+
+One continuous UDP session (peer freshly learned post-§29's reset,
+sequence state fresh from `HELLO`), host source port 7655 throughout
+(`tools/wifi_udp_probe.py`'s fixed default), target `192.168.1.196:7654`.
+Every send below is `-> host` first, then the datagram(s) that came
+back (round-trip capture, then anything caught by a short trailing
+`--observe-seconds` window) in arrival order. `id` numbering is tracked
+by hand against `expected_next` (never guessed) — see the running
+commentary.
+
+```
+host -> HELLO
+robot -> READY                                              (84.9 ms; peer-learned edge)
+robot -> device NEZHA2 robot tovez f137c0                   (HELLO's own banner, separate datagram)
+```
+Two distinct wire-level facts in one exchange: `wifi_at`'s
+peer-learning `READY` broadcast (unsequenced, v5-era convention kept
+alive per `comms.py`'s own docstring) and `protocol.py`'s `HELLO` reply
+proper (the banner) — same two-datagram shape ticket 010 §19 first
+established after its own fix, reproduced here with a genuinely fresh
+peer.
+
+```
+host -> PING #1
+robot -> ack 1 0                                             (157.7 ms)
+robot -> pong 44416
+```
+In-order id 1 (`expected_next` was reset to 1 by `HELLO`): ack fires
+unconditionally, THEN the verb's own reply. `HELLO`/`PING` round-trip
+over WiFi UDP: **confirmed**.
+
+```
+host -> STATUS #2
+robot -> ack 2 0                                              (85.5 ms)
+robot -> status ready=0 active=0 connL=0 connR=0 otos=0 wedge=0 flags=0 tlm=off next=3
+```
+`next=3` (`expected_next` after accepting id 2) present, as the
+2026-08-21 retarget requires. `tlm=off` confirms the boot default is
+`off`, not an autonomous telemetry source (relevant to §28's diagnosis).
+`ready=0` — the diffdrive kernel fiber has not been started this boot
+(see the WHEELS step below; boot.py's own docstring: "deliberately no
+begin()/start() here ... the FIRST motion consumer begins/starts the
+fiber" — nothing had done so yet at this point in the session).
+
+```
+host -> PING #7                                               (deliberate out-of-order id; expected_next=3)
+robot -> nack 3 0                                             (77.4 ms)
+                                                                (nothing else -- no `pong`: NOT executed)
+```
+Gap (`7 > expected_next`): **confirmed** — `nack <expected_next>
+<last_done>`, no execution, `gap_outstanding` set. This is the
+ticket's own "a deliberate out-of-order id → nack" case.
+
+```
+host -> WHEELS 15 15 1000 #3                                  (correct next id -- self-heals the gap)
+robot -> ack 3 0                                               (87.1 ms)
+robot -> err 8 #3
+```
+Self-heal confirmed (the correct next id clears the prior gap and
+advances the sequence normally — no separate "resend the gap" step was
+needed, matching §8.1's own "a lost nack self-heals for free" framing).
+`err 8` is `Result.NOT_CONFIGURED` — `on_wheels()`'s real-kernel call
+was rejected because the diffdrive fiber was never begun/started this
+boot (§30's `ready=0` finding above, not WiFi-specific: the SAME
+rejection would happen identically over the radio transport, since
+`on_wheels()`/`move_queue.diffdrive.drive()` sit entirely below any
+transport). This is exactly the ticket's own anticipated **"real motion
+(or its absence, safely...)"** outcome — absence, safely, with the
+correct `ack`-then-`err <code> #<id>` layered rejection shape. No wheel
+motion occurred on tovez during this session as a direct result. Not a
+WiFi-transport defect, not fixed here (out of this ticket's scope,
+which is the transport composition, not diffdrive kernel lifecycle);
+worth a future ticket asking whether the wire-protocol path should also
+be a "first motion consumer" the way some other bench script currently
+must be.
+
+```
+host -> STATUS #4
+robot -> ack 4 0                                               (74.9 ms)
+robot -> status ready=0 active=0 connL=0 connR=0 otos=0 wedge=0 flags=0 tlm=off next=5
+```
+Confirms no state change from the rejected `WHEELS` (as expected — it
+never reached the kernel).
+
+```
+host -> WHEELS 15 15 1000 #3                                  (retransmit -- SAME stale id, expected_next now 5)
+robot -> ack 4 0                                               (101.0 ms)
+                                                                (nothing else -- no second `err 8 #3`: NOT re-executed)
+```
+**This is the ticket's "a retransmit → ack of highest-accepted without
+re-execution" case, confirmed precisely**: the reply echoes `4`
+(`expected_next - 1`), NOT `3` (the id actually resent) — proving the
+handler answers "I already have everything through here," not "here is
+a fresh ack for what you just resent" (§8.1's own distinction). Just as
+telling: **no second `err 8 #3`** appeared — if this had been
+re-dispatched to `_handle_wheels()`/`on_wheels()`, the identical
+rejection would have fired again (diffdrive's state hadn't changed).
+Its absence is direct, positive proof of non-re-execution, not just an
+absence of a positive result.
+
+```
+host -> STOP #5
+robot -> ack 5 0                                               (120.1 ms)
+                                                                (no err -- on_stop()'s neutral() has no refusal path)
+```
+`WHEELS`/`STOP` ack success shape (no second line on success):
+**confirmed**.
+
+```
+host -> STATUS #6
+robot -> ack 6 0                                               (79.0 ms)
+robot -> status ready=0 active=0 connL=0 connR=0 otos=0 wedge=0 flags=0 tlm=off next=7
+```
+
+```
+host -> SET pid_kp abc #7                                     (deliberate bad value -- err-layering demo)
+robot -> ack 7 0                                               (93.9 ms)
+robot -> err 2 #7
+```
+`err 2` = `Result.BADARG` (`abc` fails `parse_wire_float()` at the
+handler level, before `on_set()` is ever called). Field order
+`err <code> #<id>`, layered AFTER the unconditional ack: **confirmed**,
+matching §8.6/8.2 exactly ("`ok` is gone — the ack already sent IS the
+acceptance; a rejection is a SECOND line layered on top").
+
+```
+host -> ESTOP
+robot -> estop                                                 (91.2 ms)
+```
+Well-formed `ESTOP`, no id, replies the bare word `estop`: **confirmed**
+over WiFi UDP (ticket's step 4 — the radio-transport version of this
+was already proven offline by tickets 012/013; this is its first live
+confirmation over the WiFi plane specifically).
+
+```
+host -> ESTOP #99                                              (trailing junk that LOOKS like an id)
+robot -> estop                                                 (71.9 ms)
+```
+`ESTOP` with trailing junk (here, something that would be a
+well-formed id on any other verb) still replies the bare word `estop`,
+unconditionally: **confirmed** — the "both well-formed and with
+trailing junk" half of the ticket's own acceptance criterion.
+
+```
+host -> PING #8                                                (bonus: does ESTOP disturb sequencing?)
+robot -> ack 8 0                                                (73.4 ms)
+robot -> pong 192664
+```
+`expected_next` continued cleanly at 8 (the value it would have held
+had `ESTOP` never been sent) across BOTH `ESTOP` calls above — direct
+confirmation that `ESTOP`'s sequencing exemption (§8.3) is real: it
+never advances, never resets, and never nacks against the ordinary
+sequence, exactly as designed.
+
+## 32. Dual-plane concurrency: TCP REPL held open for the ENTIRE UDP conversation, wall-clock verified
+
+Following ticket 010 §22's own resolved methodology (explicit shell
+timestamps around the process, immune to output buffering, after that
+session's own first attempt left an unresolved timing question):
+
+```
+$ { echo "TCP_START $(date +%s.%N)"; \
+    python3 tools/wifi_tcp_probe.py --host 192.168.1.196 --hold-seconds 90; \
+    echo "TCP_END $(date +%s.%N)"; } &
+TCP_START 1787387537.780859000
+connect      OK
+prompt       OK  (6 bytes received)
+eval  '2+2' -> expect '4'   OK
+  reply bytes: b'2+2\r\n4\r\n>>> '
+
+holding session open for 90s -- Ctrl-C to stop early
+TCP_END 1787387628.039800000
+```
+
+`TCP_END - TCP_START` = 90.2589 s against a requested `--hold-seconds
+90` (the extra ~0.26 s is connect/prompt/eval overhead before the hold
+itself starts timing) — the **full** requested duration, no early
+exit, no `TimeoutError`/`ConnectionError`. All 13 UDP exchanges in §31
+(including the pre-conversation `HELLO`) were sent and replied to
+**while this hold was open** — the entire reliability-layer smoke
+above happened inside this one 90 s concurrent window, immediately
+after the TCP session's own `connect`/`prompt`/`eval` confirmed it was
+live. **Acceptance criterion "TCP REPL session stays interactive
+throughout the UDP smoke test" is met**, with the same wall-clock rigor
+ticket 010 established.
+
+## 33. USB REPL confirmed live after
+
+Per the bench brief for this ticket: USB REPL concurrency during the
+WiFi work was not attempted (ticket 009 §11's own finding, re-confirmed
+by this ticket's own §28-29: touching USB soft-resets the board,
+which would have destroyed the live UDP session §31/§32 depend on).
+Once all WiFi-plane work was complete, one final USB touch confirmed
+liveness directly:
+
+```
+$ mpremote connect /dev/cu.usbmodem2121102 exec "print('USB_ALIVE', 'nezha-upy ticket 011 smoke complete')"
+USB_ALIVE nezha-upy ticket 011 smoke complete
+```
+
+Exit code 0. This final touch itself soft-resets the board (the same
+unavoidable landmine as every other USB touch this session) — an
+accepted, deliberate cost, taken only after every acceptance criterion
+that needed the WiFi session alive had already been captured above.
+
+## 34. Summary
+
+| Acceptance criterion | Result |
+|---|---|
+| `WifiAtLink` confirmed registered as a v6 transport with its own `ProtocolHandler` (code-level) | Met (§30) |
+| `HELLO`/`PING` round-trip correctly over WiFi UDP | Met (§31) |
+| `WHEELS`/`STOP` round-trip correctly over WiFi UDP (ack success / `err <code> #<id>` rejection) | Met (§31) — rejection path exercised (`err 8`, diffdrive fiber never begun this boot); ack-success shape confirmed via the retransmit case and `STOP`'s own clean ack |
+| `ESTOP` (well-formed and trailing junk) replies bare `estop` over WiFi UDP | Met (§31) |
+| TCP REPL session stays interactive throughout the UDP smoke test | Met (§32), wall-clock verified |
+| Findings appended to the tovez bench log; any composition gap found is recorded and fixed, not patched over | This document — no `WifiAtLink`/`feed()` composition gap was found (§30); the one real defect this session hit (§28) is the ALREADY-tracked, ALREADY-deferred telemetry-throttle architecture issue reaching its predicted worst case, not a new gap, and is out of this ticket's scope to fix per the issue's own "not a small bench fix" reasoning (re-affirmed, not re-litigated, here) |
+
+**No source code was changed by this ticket.** The one real finding
+(§28) confirms and sharpens an already-tracked, already-deferred issue
+(`clasi/issues/wifi-plane-telemetry-throttle-not-wired.md`, updated
+with this session's confirmation) rather than exposing a new one; the
+`WifiAtLink`-as-v6-transport composition itself (this ticket's own
+central question) was confirmed correct both by direct code reading
+(§30) and by a full, clean, thirteen-exchange reliability-layer
+conversation over real WiFi UDP hardware (§31) with a concurrently held
+TCP REPL (§32). `python3 -m pytest tests/` remained at 500 passed / 518
+subtests passed throughout (unchanged from where ticket 010 left it —
+no offline test was added or modified, since no code changed).

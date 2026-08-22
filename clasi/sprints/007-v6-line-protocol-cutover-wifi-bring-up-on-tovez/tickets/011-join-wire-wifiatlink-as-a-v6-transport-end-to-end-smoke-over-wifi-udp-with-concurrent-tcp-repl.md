@@ -2,7 +2,7 @@
 id: '011'
 title: 'Join: wire WifiAtLink as a v6 transport, end-to-end smoke over WiFi UDP with
   concurrent TCP REPL'
-status: open
+status: done
 use-cases:
 - SUC-008
 depends-on:
@@ -66,23 +66,80 @@ sprint's HEAD):
 
 ## Acceptance Criteria
 
-- [ ] `WifiAtLink` confirmed registered as a v6 transport with its
+- [x] `WifiAtLink` confirmed registered as a v6 transport with its
       own `ProtocolHandler` instance (code-level check, not just
       behavior — read `boot.py`'s actual wiring).
-- [ ] `HELLO`/`PING` round-trip correctly over WiFi UDP.
-- [ ] `WHEELS`/`STOP` round-trip correctly over WiFi UDP (`ack`
+- [x] `HELLO`/`PING` round-trip correctly over WiFi UDP.
+- [x] `WHEELS`/`STOP` round-trip correctly over WiFi UDP (`ack`
       success shape / `err <code> #<id>` rejection shape — retargeted
       2026-08-21, see tickets 012/013).
-- [ ] `ESTOP` (well-formed and with trailing junk) replies the bare
+- [x] `ESTOP` (well-formed and with trailing junk) replies the bare
       word `estop` over WiFi UDP, matching the retargeted (2026-08-21)
       radio-transport behavior tickets 012/013 establish offline —
       supersedes this ticket's original "no reply" criterion, which
       pinned SUC-002 before the retarget.
-- [ ] TCP REPL session stays interactive throughout the UDP smoke
+- [x] TCP REPL session stays interactive throughout the UDP smoke
       test.
-- [ ] Findings appended to the tovez bench log; any gap found between
+- [x] Findings appended to the tovez bench log; any gap found between
       "should just work by composition" and actual behavior is
       recorded and fixed, not silently patched over.
+
+## Completion Notes (2026-08-22)
+
+Full session recorded in `docs/bench-log-tovez-wifi-2026-08-21.md`
+§27-34 (continuing tickets 009/010's file). Headline findings:
+
+- **This ticket's own premise held exactly as written**: reading
+  `boot.py`'s Step 3 and `Comms.add_transport()` directly (bench log
+  §30) confirms `WifiAtLink` gets its own `protocol.ProtocolHandler`
+  purely by being registered as a transport, the identical mechanism
+  the radio transport uses — no WiFi-specific branch anywhere in that
+  path, and no source code change was needed to "wire" it.
+- **The reliability layer proven live over WiFi UDP, end to end**: a
+  thirteen-exchange conversation (bench log §31) covering `HELLO`'s
+  peer-learning + banner, in-order `PING`/`STATUS` (with `next=`), a
+  deliberate out-of-order id (`nack`, no execution), a same-payload
+  retransmit of `WHEELS` (echoes the highest-ALREADY-accepted id, NOT
+  the resent one, and does not re-execute — confirmed both by the
+  reply value and by the absence of a second rejection reply), `STOP`,
+  an err-layering case (`SET` with an unparseable value → `ack` then
+  `err 2 #<id>`), and `ESTOP` (well-formed and with trailing junk,
+  both replying the bare word `estop`, and confirmed via a following
+  `PING` to never disturb the ordinary sequence) — all matched
+  `reference/protocol-draft-2026-08-21.md` exactly.
+- **`WHEELS` itself was rejected** (`err 8` / `NOT_CONFIGURED` — the
+  diffdrive kernel fiber was never begun/started this boot,
+  `boot.py`'s own documented "first motion consumer begins/starts the
+  fiber" design), so no real wheel motion occurred. This is
+  transport-agnostic (the identical rejection would occur over radio)
+  and is exactly the ticket's own anticipated "real motion (or its
+  absence, safely...)" outcome — not a WiFi defect, not in this
+  ticket's scope to chase further.
+- **Dual-plane concurrency re-confirmed with the same wall-clock
+  rigor ticket 010 established** (bench log §32): a TCP REPL hold ran
+  its full requested 90 s with no early exit while the entire UDP
+  conversation above executed inside that window.
+- **Real defect found, NOT fixed (already tracked, scope excluded by
+  the team-lead's own briefing)**: at session start, the device was
+  completely unresponsive on both the UDP and TCP WiFi planes — a
+  repeating, uncaught `MemoryError` inside `WifiAtLink.send()`,
+  wedging the scheduled pump permanently (bench log §28). This is the
+  predicted worst case of the already-tracked
+  `clasi/issues/wifi-plane-telemetry-throttle-not-wired.md` (opened by
+  ticket 010), now confirmed to actually occur, and confirmed severe
+  enough that even `mpremote`'s own raw-REPL handshake failed against
+  the flood. Recovered via a software-triggered hard reset
+  (`mpremote ... reset`, not a physical act); the issue file was
+  updated with this confirmation. No code was changed for this —
+  the architecture-level fix remains explicitly out of this ticket's
+  scope, per both the issue's own reasoning and this ticket's brief.
+- No `WifiAtLink`/`feed()` composition gap of any kind was found —
+  the one thing this ticket was most concerned might not compose
+  cleanly ("if this ticket finds that untrue... fix it") turned out to
+  already work correctly.
+- `python3 -m pytest tests/`: **500 passed, 518 subtests passed**,
+  unchanged from where ticket 010 left off — no source file was
+  modified by this ticket.
 
 ## Testing
 
