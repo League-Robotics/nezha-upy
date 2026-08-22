@@ -2,9 +2,13 @@
 id: '007'
 title: Byte-exact loopback test against protocol.md's own literal examples (real boot
   path)
-status: open
-use-cases: [SUC-001, SUC-002, SUC-005]
-depends-on: ['006']
+status: done
+use-cases:
+- SUC-001
+- SUC-002
+- SUC-005
+depends-on:
+- '006'
 github-issue: ''
 issue: port-v6-line-protocol-hard-cutover-from-v5.md
 completes_issue: true
@@ -43,17 +47,17 @@ milestones in this repo.
 
 ## Acceptance Criteria
 
-- [ ] A test boots the engine with a fake `diffdrive` (no hardware),
+- [x] A test boots the engine with a fake `diffdrive` (no hardware),
       real `ProtocolAdapter`/`ProtocolHandler`/`Comms`, and feeds
       wire lines through a fake transport (matching the existing
       `RadioLink`/in-process-pipe test convention from
       `test_comms_loopback.py`).
-- [ ] Banner, `ok`/`err`/`id`-carrying reply shapes are asserted
+- [x] Banner, `ok`/`err`/`id`-carrying reply shapes are asserted
       byte-exact against `protocol.md`'s own literal text, not
       against this port's own prior output (i.e., the assertion
       strings are transcribed from the design doc, not copy-pasted
       from a first passing run).
-- [ ] `python3 -m pytest tests/` green.
+- [x] `python3 -m pytest tests/` green.
 
 ## Testing
 
