@@ -3,8 +3,11 @@ id: '011'
 title: 'Join: wire WifiAtLink as a v6 transport, end-to-end smoke over WiFi UDP with
   concurrent TCP REPL'
 status: open
-use-cases: [SUC-008]
-depends-on: ['007', '010']
+use-cases:
+- SUC-008
+depends-on:
+- '010'
+- '013'
 github-issue: ''
 issue:
 - port-v6-line-protocol-hard-cutover-from-v5.md
@@ -43,11 +46,21 @@ sprint's HEAD):
    the "protocol-agnostic" posture ends here, by design), send
    `HELLO`/`PING` over the UDP plane; confirm typed `device NEZHA2
    robot ...`/`pong <now>` replies.
-3. Send `WHEELS ... #id` / `STOP #id`; confirm `ok`/`err` replies and
-   real motion (or its absence, safely, if run off-stand).
-4. Send a malformed `ESTOP` and a well-formed `ESTOP`; confirm no
-   reply either way (SUC-002, now proven over WiFi too, not just
-   radio).
+3. Send `WHEELS ... #id` / `STOP #id`; confirm the in-order `ack <id>
+   <lastDone>` reply (plus `err <code> #<id>` on rejection, e.g. an
+   over-ceiling duration) and real motion (or its absence, safely, if
+   run off-stand). **Retargeted 2026-08-21** (see tickets 012/013,
+   [[retarget-v6-port-to-reliability-layer-draft]]): the old bare
+   `ok #<id>`/`err #<id> <code>` shapes this step originally named are
+   superseded by the mandatory-sequencing reliability layer — `ok` is
+   gone, `err`'s field order flips.
+4. Send a well-formed `ESTOP` and one with trailing junk (e.g.
+   `ESTOP #5`); confirm **both now reply the bare word `estop`**,
+   written after the stop executes. **Retargeted 2026-08-21**: this
+   supersedes SUC-002's original "never any reply" behavior — see the
+   same tickets/issue as step 3. Confirming the reply arrives over
+   WiFi UDP too (not just radio, where tickets 012/013 already prove
+   it offline) is this step's own contribution.
 5. Hold a TCP REPL session open throughout steps 2–4.
 6. Append findings to the tovez bench log.
 
@@ -57,9 +70,14 @@ sprint's HEAD):
       own `ProtocolHandler` instance (code-level check, not just
       behavior — read `boot.py`'s actual wiring).
 - [ ] `HELLO`/`PING` round-trip correctly over WiFi UDP.
-- [ ] `WHEELS`/`STOP` round-trip correctly over WiFi UDP.
-- [ ] `ESTOP` (well-formed and malformed) produces no reply over WiFi
-      UDP, matching SUC-002's radio-transport behavior.
+- [ ] `WHEELS`/`STOP` round-trip correctly over WiFi UDP (`ack`
+      success shape / `err <code> #<id>` rejection shape — retargeted
+      2026-08-21, see tickets 012/013).
+- [ ] `ESTOP` (well-formed and with trailing junk) replies the bare
+      word `estop` over WiFi UDP, matching the retargeted (2026-08-21)
+      radio-transport behavior tickets 012/013 establish offline —
+      supersedes this ticket's original "no reply" criterion, which
+      pinned SUC-002 before the retarget.
 - [ ] TCP REPL session stays interactive throughout the UDP smoke
       test.
 - [ ] Findings appended to the tovez bench log; any gap found between

@@ -14,6 +14,7 @@ use-cases:
 issues:
 - port-v6-line-protocol-hard-cutover-from-v5.md
 - wifi-bring-up-on-tovez-tcp-repl-udp-protocol.md
+- retarget-v6-port-to-reliability-layer-draft.md
 ---
 <!-- CLASI: Before changing code or making plans, review the SE process in CLAUDE.md -->
 
@@ -474,6 +475,93 @@ wire content.
   might still exceed it (a bare `GET`'s multi-line reply, one line at
   a time, never a single oversized line).
 
+### Revision (2026-08-21): retarget to the reliability-layer draft
+
+**Mid-sprint scope addition, stakeholder decision** — see
+[[retarget-v6-port-to-reliability-layer-draft]] for the full spec;
+this note records only the structural consequence for the
+Architecture above, revised in place per this project's revision
+convention. Tickets 001-007 ported `protocol.py`/`protocol_adapter.py`
+against the protocol.md text committed at session start (`c99e6e8`).
+The design has since moved again in `radio-robot-lib`'s *uncommitted*
+working tree — a stakeholder-authored reliability layer (§8) plus two
+verbs (`RUN`/`debug`, §6.2/§6.3) this sprint had explicitly scoped
+out. New tickets 012 (implementation) and 013 (test-suite
+reconciliation) retarget the two already-built modules to it; no
+module boundary, no cross-module dependency, and no data model
+changes as a result — the component diagram above (`Transports ->
+comms.py -> protocol.py -> protocol_adapter.py -> motion.py/
+config.py`) is unchanged in shape. What changes is the *behavior
+inside* the two existing nodes `core/protocol.py` and
+`hardware/protocol_adapter.py`:
+
+- **Sequencing state moves into the handler.** Each
+  `ProtocolHandler` instance gains `expected_next`/`last_done`/
+  `gap_outstanding` (per-transport, same "one handler per transport"
+  reasoning as the existing `thdr`-tracking state above) — the
+  handler is no longer a pure grammar/dispatch layer with no memory
+  of prior lines; it now tracks a monotonic sequence per connection.
+- **`ack`/`nack` is a new transport-layer reply tier, `err` stays
+  application-layer.** Every sequenced verb now gets an unconditional
+  `ack`/`nack` (did the id arrive, in order?) as a *separate* line
+  from `err` (was the content accepted?) — `ok` is deleted outright;
+  acceptance is the `ack` itself. This is a wire-visible behavior
+  change for every verb this sprint already shipped, not just new
+  ones: `WHEELS`/`STOP`/`SET`/`GET`/`TLM` and even the zero-field
+  session verbs (`PING`/`ID`/`VER`/`STATUS`/`HELP`, previously
+  id-less) all gain a mandatory `#id` and the two-line ack(+err)
+  shape. `err`'s own field order flips (`err <code> #<id>`, code
+  first — §8.6).
+- **`ESTOP` flips from never-replies to always-replies.** SUC-002
+  ("ESTOP never replies, even when malformed") is superseded: `ESTOP`
+  stays outside the sequence (no id, never nacked, maximally
+  forgiving about trailing junk) but now executes the stop and then
+  replies the bare word `estop` — a safety-adjacent behavior change,
+  stakeholder-directed, not a bug fix.
+- **Two verbs added to both existing nodes.** `debug` (an unsolicited,
+  robot-to-host-only emission on `protocol.py`) and `RUN` (invocation
+  by name) bring `hardware/protocol_adapter.py` one new method,
+  `on_run(name, args)`, gated by an explicit registration allowlist —
+  empty by default, mirroring the archetype's own `DiffDriveAdapter`
+  posture, and deliberately **not** a `globals()`-style blanket
+  lookup. This is the one place this retarget adds a real decision
+  surface (below), not just a reply-shape change.
+- **The golden-vector fixture this sprint's own gate depends on is
+  superseded, not deleted.** `tests/fixtures/protocol_golden_vectors.txt`
+  gates the pre-retarget scheme; it is marked superseded in place and
+  a new fixture, derived mechanically from §6/§8's own tables, takes
+  over the harness. Ticket 007's byte-exact loopback test and several
+  hand-authored unit tests that pin the old ESTOP-silence/`ok`/`err`
+  shapes are reconciled by ticket 013.
+
+**Design Rationale addition — the `RUN` allowlist is the one new
+decision surface this revision introduces:**
+
+**Decision: `hardware/protocol_adapter.py`'s `on_run()` starts with an
+empty, explicit registration allowlist; no dynamic `globals()`/
+`getattr()` lookup by name.**
+Context: protocol.md §6.3 states the registration table *is* the
+security boundary for `RUN` — anything registered is remotely
+callable by any host that can talk to the robot, including another
+robot's shared radio channel. A dynamic-language port's natural
+idiom (`globals()[name]`) makes everything importable remotely
+callable unless deliberately restricted (§9.7's own explicit warning
+to a porter).
+Alternatives considered: (a) `globals()`/module-attribute lookup,
+matching Python's own ergonomics; (b) an explicit `{name: callable}`
+allowlist, empty by default.
+Why this choice: (a) would silently turn every function this module
+(or anything it imports) defines into a wire-reachable RPC target —
+a security regression this sprint would be introducing by omission,
+not by decision. (b) matches the C++ archetype's own posture exactly
+(`DiffDriveAdapter` registers nothing, answers every `RUN` with
+`ERR_UNKNOWN`) and keeps the allowlist inspectable and intentional.
+Consequences: this retarget registers no real function — `RUN` is
+wired and testable (empty allowlist → `ERR_UNKNOWN` for anything) but
+not yet useful for a real invocation; populating the allowlist with
+an actual function is explicitly future work, not this retarget's
+job.
+
 ## Use Cases
 
 This sprint supersedes the v5-specific mechanics of the project's
@@ -517,6 +605,15 @@ Parent: UC-007, UC-008
 
 ### SUC-002: ESTOP never replies, even when malformed
 Parent: UC-008
+
+**Superseded 2026-08-21** — see the Architecture's "Revision
+(2026-08-21)" note above. `ESTOP` now always replies the bare word
+`estop` (executed, then written), for both the well-formed and
+trailing-junk cases described below; this SUC's Main Flow and
+Acceptance Criteria describe the *pre-retarget* behavior tickets
+001-007 shipped and are kept here as the historical record tickets
+012/013 revise, not as a description of the sprint's final delivered
+behavior.
 
 - **Actor**: Wire client
 - **Preconditions**: v6 engine assembled.
@@ -678,9 +775,17 @@ Parent: UC-010
 | 008 | Self-contained host prober (tools/): TCP REPL probe + UDP round-trip probe, protocol-agnostic | — |
 | 009 | Bench bring-up on tovez: TCP REPL mirror proven, USB REPL concurrency | 008 |
 | 010 | Bench bring-up on tovez: UDP round-trip, peer-learning, dual-plane concurrency, findings log | 009 |
-| 011 | Join: wire WifiAtLink as a v6 transport, end-to-end smoke over WiFi UDP with concurrent TCP REPL | 007, 010 |
+| 012 | Retarget protocol.py/protocol_adapter.py to the 2026-08-21 reliability-layer draft: sequencing, ack/nack, RUN/debug, new fixture | 007, 008 |
+| 013 | Reconcile protocol test suite to the reliability-layer retarget: ESTOP-reply flips, loopback rewrite, fixture supersession | 012 |
+| 011 | Join: wire WifiAtLink as a v6 transport, end-to-end smoke over WiFi UDP with concurrent TCP REPL | 010, 013 |
 
 Tickets execute serially in the order listed. Tickets 001–007 (Track
 A) and 008–010 (Track B) are independent of each other and may
-interleave in either order; ticket 011 is the join and requires both
-chains complete.
+interleave in either order. **Mid-sprint scope addition (2026-08-21,
+see Architecture's Revision note): tickets 012/013 retarget Track A's
+already-built modules to the reliability-layer draft** — 012 depends
+on 007 (the code it retargets) and 008 (the issue's own explicit
+sequencing instruction: "land after ticket 008"); 013 depends on 012.
+Ticket 011 (the join) now depends on 010 and 013 (was 007/010) —
+it must run after the retarget, not against the superseded scheme, so
+its own WHEELS/STOP/ESTOP smoke test proves the draft protocol.
