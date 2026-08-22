@@ -12,49 +12,46 @@ the class tickets 001-005 already cover in isolation (sprint.md's Test
 Strategy: "the one offline test that stands in for 'does the wiring,
 not just the class, work'").
 
-Every literal reply string asserted below is TRANSCRIBED from
-`radio-robot-lib`'s `docs/design/protocol.md` Sec 2/3/4/6 -- NOT
-copy-pasted from a first passing run of this port (this ticket's own
-acceptance criterion).
+**Design-authority retarget (sprint 007 tickets 012/013, 2026-08-21) --
+historical note.** This file originally pinned the last COMMITTED
+revision of `protocol.md` (`ok [#id]`/`err [#id] <code>`, `ESTOP` never
+replies even when malformed, non-mandatory/non-sequential ids,
+`HELP`'s 12-verb sprint-scoped list) over an uncommitted draft rewrite
+that existed even at that ticket's own time -- a deliberate, considered
+decision, recorded at length below for the record of what was decided
+and why, NOT because the reasoning was wrong at the time:
 
-Byte-level disagreement found while writing this test, and how it was
-resolved (this ticket's own instruction: report, don't silently absorb
-or weaken):
+    At the time this ticket was worked, `radio-robot-lib`'s own working
+    tree carried an UNCOMMITTED draft rewrite of `protocol.md` (a
+    mandatory-sequence-id `ack`/`nack` reliability layer, new
+    `RUN`/`debug` verbs, `ESTOP` gaining a reply) -- `git diff --
+    docs/design/protocol.md` in that repo showed ~540 lines of unstaged
+    changes, none of it committed. That draft was judged NOT that
+    ticket's design authority: it had landed in no gated review, and
+    this sprint's own architecture (sprint.md's Design Rationale;
+    SUC-002, "ESTOP never replies, even when malformed") was built
+    against, and matched byte-for-byte, the last COMMITTED revision. If
+    the uncommitted draft were to land as its own commit, it was
+    flagged as describing a wire-breaking redesign needing its own
+    sprint, not a ticket-sized fix.
 
-1. **Design-authority resolution.** At the time this ticket was worked,
-   `radio-robot-lib`'s own working tree carried an UNCOMMITTED draft
-   rewrite of `protocol.md` (a mandatory-sequence-id `ack`/`nack`
-   reliability layer, new `RUN`/`debug` verbs, `ESTOP` gaining a reply)
-   -- `git diff -- docs/design/protocol.md` in that repo shows ~540
-   lines of unstaged changes as of this writing, none of it committed.
-   That draft is NOT this ticket's design authority: it has landed in
-   no gated review, and this sprint's own architecture (sprint.md's
-   Design Rationale; SUC-002, "ESTOP never replies, even when
-   malformed") was built against, and matches byte-for-byte, the last
-   COMMITTED revision (`git log`: `a380495` colon->space/`#id` grammar
-   migration, `34d12c2` doc consolidation, `c99e6e8` debug/RUN --
-   `c99e6e8` itself does NOT touch Sec 8/the ack/nack layer). This file
-   pins against that committed text (`ok [#id]`/`err [#id] <code>`,
-   `ESTOP` never replies, non-mandatory/non-sequential ids). If/when the
-   uncommitted draft lands as its own commit, it describes a
-   wire-breaking redesign that needs its own sprint, not a ticket-sized
-   fix -- flagged here so it is not mistaken for something this ticket
-   should have implemented.
-2. **`HELP`'s verb count.** Even the committed doc's own Sec 6 table row
-   lists 13 verbs, `... STOP ESTOP RUN` -- but `RUN` is explicitly out
-   of this sprint's verb scope (sprint.md's Architecture Overview;
-   `core/protocol.py`'s own module docstring: "`RUN`... NEITHER is
-   ported here at all, not even deferred to a later ticket"). This is a
-   real, byte-level divergence between the doc's literal text and this
-   port, so `test_help_matches_this_sprints_own_scoped_12_verb_list`
-   below pins the ACTUAL, sprint-scoped 12-verb `HELP` text rather than
-   the doc's literal 13-verb row -- a scope decision already recorded
-   before this ticket, not a new bug to fix here (fixing it would mean
-   porting `RUN`, which sprint.md explicitly does not do).
+That "own sprint" arrived: the stakeholder's 2026-08-21 retarget
+decision (sprint 007 ticket 012's own issue,
+[[retarget-v6-port-to-reliability-layer-draft]]) explicitly OVERRIDES
+the resolution above. `reference/protocol-draft-2026-08-21.md` (this
+repo's own verbatim snapshot of that draft, taken by ticket 012) is now
+the current design authority for this file, and ticket 013 is the
+retarget record for every literal reply string this file pins --
+`ack`/`nack` mandatory sequencing, `ok`'s deletion, `err`'s field-order
+flip, `ESTOP`'s reply flip, and `HELP`'s growth to 13 verbs (`RUN` now
+in scope). The 12-verb/silent-ESTOP text this docstring used to carry
+is preserved above as the changelog record of a real decision that was
+later, explicitly superseded -- not silently dropped as if no one had
+thought about it.
 
-No other disagreement was found: banner, `PING`/`pong`, `ID`/`VER`, the
-`WHEELS`/`STOP` `ok`/`err` pair, and `STATUS`'s field set all matched
-the committed doc text exactly on the first pass.
+Every literal reply string below is TRANSCRIBED from
+`reference/protocol-draft-2026-08-21.md` (ticket 013's own re-pin), not
+copied from a first passing run of this port.
 """
 
 import sys
@@ -194,6 +191,12 @@ def _boot(tmp_path, now_ms=42424):
     # Real ProtocolAdapter, real MoveQueue/diffdrive path -- not the
     # fail-closed _NullDiffDrive fallback (boot.py module docstring).
     assert result.diffdrive_ready is True
+    # BootResult is a plain-attribute object by design ("so tests can
+    # assert on each piece directly" -- its own docstring); stash the
+    # fake stub on it so a test needing to assert on-adapter effects
+    # (e.g. ESTOP reaching the real kernel) does not need its own,
+    # parallel boot() call just to keep a reference to it.
+    result.diffdrive = stub
     return result
 
 
@@ -227,38 +230,49 @@ def test_banner_and_hello_match_protocol_md_literal_banner_shape(tmp_path):
 
 def test_ping_matches_protocol_md_literal_pong_now_shape(tmp_path):
     """protocol.md Sec 6 table: ``PING`` -> ``pong <now>``, ``now`` =
-    robot clock ``[ms]``."""
+    robot clock ``[ms]``. ``PING`` is sequenced as of the 2026-08-21
+    retarget (Sec 8.3/8.4) -- a mandatory ``#id`` now carries the
+    command, and the ``ack <id> <lastDone>`` line (Sec 8.1) fires
+    unconditionally, ahead of ``PING``'s own informational reply (Sec
+    9.8 item 4: "ack first, always")."""
     result = _boot(tmp_path, now_ms=42424)
     send_and_pump = _make_host_harness(result)
 
-    assert send_and_pump(b"PING") == [b"pong 42424"]
+    assert send_and_pump(b"PING #1") == [b"ack 1 0", b"pong 42424"]
 
 
 def test_id_and_ver_match_protocol_md_literal_shapes(tmp_path):
     """protocol.md Sec 6 table: ``ID`` -> ``id <drivetrain> <profile>
-    <version>``; ``VER`` -> ``ver <version>``."""
+    <version>``; ``VER`` -> ``ver <version>``. Both are sequenced now
+    -- each command below carries the next mandatory, strictly
+    increasing id on this transport's own handler, each acked ahead of
+    its own reply."""
     result = _boot(tmp_path)
     send_and_pump = _make_host_harness(result)
 
     version = boot.VERSION.encode("ascii")
-    assert send_and_pump(b"ID") == [b"id differential tovez " + version]
-    assert send_and_pump(b"VER") == [b"ver " + version]
+    assert send_and_pump(b"ID #1") == [
+        b"ack 1 0", b"id differential tovez " + version]
+    assert send_and_pump(b"VER #2") == [b"ack 2 0", b"ver " + version]
 
 
 def test_status_carries_every_protocol_md_key_present_not_positional(tmp_path):
     """protocol.md Sec 6 table: ``STATUS`` -> ``status ready=1 active=0
-    connL=1 connR=1 otos=0 wedge=0 flags=<hex> tlm=off`` -- "k=v, order
-    not guaranteed" (asserted by key/value below, not whole-line
-    equality)."""
+    connL=1 connR=1 otos=0 wedge=0 flags=<hex> tlm=off next=<n>`` -- "k=v,
+    order not guaranteed" (asserted by key/value below, not whole-line
+    equality). ``next`` (Sec 8.7, added 2026-08-21) is the handler's own
+    ``expected_next`` -- 2 here, since the in-order ``#1`` this test
+    sends is the only id this handler has ever accepted."""
     result = _boot(tmp_path)
     send_and_pump = _make_host_harness(result)
 
-    replies = send_and_pump(b"STATUS")
-    assert len(replies) == 1
-    fields = _status_dict(replies[0])
+    replies = send_and_pump(b"STATUS #1")
+    assert len(replies) == 2
+    assert replies[0] == b"ack 1 0"
+    fields = _status_dict(replies[1])
     assert set(fields.keys()) == {
         b"ready", b"active", b"connL", b"connR", b"otos", b"wedge",
-        b"flags", b"tlm",
+        b"flags", b"tlm", b"next",
     }
     assert fields[b"ready"] == b"1"    # _FakeDiffDrive.output()["ready"] = True
     assert fields[b"active"] == b"0"   # velocity == twist == 0.0 -- not moving
@@ -268,52 +282,88 @@ def test_status_carries_every_protocol_md_key_present_not_positional(tmp_path):
     assert fields[b"wedge"] == b"0"    # no line sensor wired this sprint
     assert fields[b"flags"] == b"11"   # READY(0x1) | CONNECTED_LEFT(0x10), lowercase hex
     assert fields[b"tlm"] == b"off"    # ProtocolAdapter's own default subscription
+    assert fields[b"next"] == b"2"     # expected_next after accepting #1
 
 
-def test_help_matches_this_sprints_own_scoped_12_verb_list(tmp_path):
-    """protocol.md's own committed Sec 6 table row lists 13 verbs
-    (``HELLO PING ID VER STATUS HELP GET SET TLM WHEELS STOP ESTOP
-    RUN``) -- but ``RUN`` is explicitly out of this sprint's verb scope
-    (sprint.md's Architecture Overview; ``core/protocol.py``'s own
-    module docstring: "NEITHER [RUN nor debug] is ported here at all,
-    not even deferred to a later ticket"). This is the one byte-level
-    disagreement between the doc's literal text and this port found
-    while writing this test (see module docstring) -- NOT a bug to fix
-    here, since fixing it would mean porting RUN, which sprint.md
-    explicitly does not do this sprint. Pinned against the 12-verb list
-    this port's own ``VERB_TABLE`` actually produces, generated the same
-    way protocol.md Sec 4 says HELP must be ("from the same table
-    dispatch() uses, so it cannot drift") -- just a smaller table than
-    the archetype's."""
+def test_help_matches_this_sprints_own_scoped_13_verb_list(tmp_path):
+    """Renamed from the pre-retarget "...12_verb_list" (sprint 007
+    ticket 013): ``RUN`` came into scope with ticket 012's 2026-08-21
+    reliability-layer retarget, so ``HELP``'s reply now matches
+    ``reference/protocol-draft-2026-08-21.md``'s own Sec 6 table row
+    literally -- 13 verbs, ``RUN`` last -- rather than the 12-verb,
+    RUN-excluded list this test used to pin as a deliberate scope
+    reduction. Reached via a mandatory in-order id now that ``HELP``
+    itself is sequenced, generated the same way Sec 4 says HELP must be
+    ("from the same table dispatch() uses, so it cannot drift")."""
     result = _boot(tmp_path)
     send_and_pump = _make_host_harness(result)
 
-    assert send_and_pump(b"HELP") == [
-        b"help HELLO PING ID VER STATUS HELP GET SET TLM WHEELS STOP ESTOP"
+    assert send_and_pump(b"HELP #1") == [
+        b"ack 1 0",
+        b"help HELLO PING ID VER STATUS HELP GET SET TLM WHEELS STOP "
+        b"ESTOP RUN",
     ]
 
 
-def test_wheels_and_stop_ok_and_err_pair_matches_protocol_md_literal_shapes(tmp_path):
-    """protocol.md Sec 6.1: ``ok [#id]`` (accepted) / ``err [#id]
-    <code>`` (rejected) -- exercised here via a ``WHEELS``/``STOP``
-    round trip (this ticket's own acceptance criterion), through the
-    REAL ``ProtocolAdapter.on_wheels()``/``on_stop()``, not a mock."""
+def test_wheels_and_stop_ack_and_err_pair_matches_protocol_md_literal_shapes(tmp_path):
+    """protocol.md Sec 8.1/8.2/8.6: ``ack <id> <lastDone>`` (every
+    in-order command, accepted or not) / ``err <code> #<id>`` (layered
+    on top, only on rejection) -- exercised here via a
+    ``WHEELS``/``STOP`` round trip, through the REAL
+    ``ProtocolAdapter.on_wheels()``/``on_stop()``, not a mock. ``ok`` is
+    gone (Sec 8.2): the ack alone is the acceptance signal for a
+    successful ``WHEELS``/``STOP``."""
     result = _boot(tmp_path)
     send_and_pump = _make_host_harness(result)
 
     # Accepted: within the 5000 ms WHEELS ceiling (protocol.md Sec 5
-    # point 1 / Sec 9.1) -- "ok", carrying the SAME id the command sent.
-    assert send_and_pump(b"WHEELS 50 50 500 #10") == [b"ok #10"]
+    # point 1 / Sec 9.1) -- just the ack, carrying the id the command
+    # sent; no more standalone "ok".
+    assert send_and_pump(b"WHEELS 50 50 500 #1") == [b"ack 1 0"]
 
-    # Rejected: OVER the 5000 ms ceiling -- "err", code 3 (ERR_RANGE,
-    # protocol.md Sec 6.1's code table), enforced by the adapter (the
-    # handler itself holds no bounds table, Sec 9.1).
-    assert send_and_pump(b"WHEELS 50 50 6000 #11") == [b"err #11 3"]
+    # Rejected: OVER the 5000 ms ceiling -- the ack still fires
+    # (Sec 8.2: an in-order command is acked regardless of content),
+    # THEN "err 3 #<id>" layers on top -- code 3 is ERR_RANGE
+    # (protocol.md Sec 6.1's code table), enforced by the adapter (the
+    # handler itself holds no bounds table, Sec 9.1). Field order is
+    # code-first, id-last (Sec 8.6).
+    assert send_and_pump(b"WHEELS 50 50 6000 #2") == [b"ack 2 0", b"err 3 #2"]
 
     # STOP always accepted (protocol.md Sec 5.1: `neutral()` has no
-    # refusal path of its own) -- "ok", carrying STOP's own (required)
-    # id.
-    assert send_and_pump(b"STOP #12") == [b"ok #12"]
+    # refusal path of its own) -- just the ack, carrying STOP's own
+    # mandatory id.
+    assert send_and_pump(b"STOP #3") == [b"ack 3 0"]
+
+
+def test_estop_reply_flip_matches_protocol_md_through_the_real_engine(tmp_path):
+    """protocol.md Sec 8.3, flipped 2026-08-21: ``ESTOP`` now ALWAYS
+    replies the bare word ``estop``, with the kernel call executed
+    BEFORE that reply is written -- superseding the pre-retarget
+    "ESTOP never replies" rule this file used to pin (SUC-002's own
+    flip, ticket 012's Step 3). This is exactly the kind of thing that
+    could be right in ``protocol.py``'s own handler and wrong in how
+    ``comms.py``'s ``_TransportSink`` bridges it back onto the wire --
+    this file's whole reason to exist is proving the WIRING, not just
+    the class (module docstring), so this test drives ``ESTOP`` through
+    the REAL boot-assembled engine, not the mock-adapter harness ticket
+    012 already covers in ``tests/unit/test_protocol_golden_vectors.py``.
+    ``ESTOP`` is unsequenced (Sec 8.3) -- no id, and it must not disturb
+    a handler that has already accepted other sequenced commands."""
+    result = _boot(tmp_path)
+    send_and_pump = _make_host_harness(result)
+
+    # A sequenced command first, so this test also proves ESTOP does
+    # not consume or disturb the sequence it sits outside of.
+    assert send_and_pump(b"PING #1") == [b"ack 1 0", b"pong 42424"]
+
+    assert send_and_pump(b"ESTOP") == [b"estop"]
+    assert result.diffdrive.estop_calls == 1, (
+        "on_estop() must have reached the REAL, boot-assembled "
+        "DifferentialDrive stub through comms.py/protocol_adapter.py's "
+        "own wiring, not just a mock handler")
+
+    # The sequence is untouched -- the next in-order id is still #2.
+    assert send_and_pump(b"PING #2") == [b"ack 2 0", b"pong 42424"]
 
 
 if __name__ == "__main__":

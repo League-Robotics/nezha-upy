@@ -224,9 +224,13 @@ def test_golden_vector_block(index, block):
 def test_feed_several_complete_lines_in_one_block():
     handler, adapter, sink = _new_handler()
     adapter.now_value = 111
-    handler.feed(b"PING\nPING\nPING\n")
+    handler.feed(b"PING #1\nPING #2\nPING #3\n")
     assert adapter.now_calls == 3
-    assert sink.lines() == ["pong 111"] * 3
+    assert sink.lines() == [
+        "ack 1 0", "pong 111",
+        "ack 2 0", "pong 111",
+        "ack 3 0", "pong 111",
+    ]
     assert handler.malformed_count() == 0
 
 
@@ -236,8 +240,8 @@ def test_feed_block_ending_mid_line_buffers_the_remainder():
     handler.feed(b"PI")
     assert sink.lines() == [], "dispatched before the line completed"
     assert adapter.now_calls == 0
-    handler.feed(b"NG\n")
-    assert sink.lines() == ["pong 222"]
+    handler.feed(b"NG #1\n")
+    assert sink.lines() == ["ack 1 0", "pong 222"]
     assert adapter.now_calls == 1
 
 
@@ -252,8 +256,8 @@ def test_feed_fragment_alone_never_dispatches():
 def test_feed_strips_lone_cr_before_terminator():
     handler, adapter, sink = _new_handler()
     adapter.now_value = 333
-    handler.feed(b"PING\r\n")
-    assert sink.lines() == ["pong 333"]
+    handler.feed(b"PING #1\r\n")
+    assert sink.lines() == ["ack 1 0", "pong 333"]
     assert handler.malformed_count() == 0
 
 
@@ -275,26 +279,26 @@ def test_feed_overlong_line_discarded_not_truncated():
 
     # The parser must resync cleanly on the next line.
     adapter.now_value = 444
-    handler.feed(b"PING\n")
-    assert sink.lines() == ["pong 444"]
+    handler.feed(b"PING #1\n")
+    assert sink.lines() == ["ack 1 0", "pong 444"]
 
 
 def test_feed_exactly_240_bytes_is_accepted():
     """Boundary companion to the overflow test above: a line whose
     TOTAL wire length (content + '\\n') is exactly 240 bytes -- Sec 2's
     own stated maximum -- must be accepted and dispatched normally, not
-    discarded. Built on an unknown verb with a recoverable id (rather
+    discarded. Built on an unknown verb with an in-order id (rather
     than a verb this ticket's own stub bodies don't observably act on)
-    so the assertion below (a real reply) is proof the line was
-    processed, not silently swallowed by the overflow path -- overflow
-    never replies."""
+    so the assertions below (the ack, then the err) are proof the line
+    was processed, not silently swallowed by the overflow path --
+    overflow never replies at all."""
     handler, adapter, sink = _new_handler()
     padding = b"X" * 232
-    line = b"FOO " + padding + b" #7"
+    line = b"FOO " + padding + b" #1"
     assert len(line) + 1 == 240
     handler.feed(line + b"\n")
     assert handler.malformed_count() == 1
-    assert sink.lines() == ["err #7 1"]
+    assert sink.lines() == ["ack 1 0", "err 1 #1"]
 
 
 def test_feed_241_bytes_overflows():
@@ -324,8 +328,8 @@ def test_blank_line_is_silently_ignored_not_malformed():
     assert handler.malformed_count() == 0
 
     adapter.now_value = 666
-    handler.feed(b"PING\n")
-    assert sink.lines() == ["pong 666"]
+    handler.feed(b"PING #1\n")
+    assert sink.lines() == ["ack 1 0", "pong 666"]
 
 
 def test_all_whitespace_line_is_silently_ignored_not_malformed():
@@ -335,8 +339,8 @@ def test_all_whitespace_line_is_silently_ignored_not_malformed():
     assert handler.malformed_count() == 0
 
     adapter.now_value = 777
-    handler.feed(b"PING\n")
-    assert sink.lines() == ["pong 777"]
+    handler.feed(b"PING #1\n")
+    assert sink.lines() == ["ack 1 0", "pong 777"]
 
 
 # ---------------------------------------------------------------------------
@@ -346,16 +350,16 @@ def test_all_whitespace_line_is_silently_ignored_not_malformed():
 
 def test_space_run_between_fields_is_one_separator():
     handler, adapter, sink = _new_handler()
-    handler.feed(b"FOO   1   2   3   #9\n")
-    assert sink.lines() == ["err #9 1"]
+    handler.feed(b"FOO   1   2   3   #1\n")
+    assert sink.lines() == ["ack 1 0", "err 1 #1"]
     assert handler.malformed_count() == 1
 
 
 def test_leading_and_trailing_line_whitespace_is_ignored():
     handler, adapter, sink = _new_handler()
     adapter.now_value = 888
-    handler.feed(b"   PING   \n")
-    assert sink.lines() == ["pong 888"]
+    handler.feed(b"   PING #1  \n")
+    assert sink.lines() == ["ack 1 0", "pong 888"]
     assert handler.malformed_count() == 0
 
 
@@ -370,13 +374,13 @@ def test_lowercase_verb_dropped_silently_not_malformed():
     assert sink.lines() == []
     assert handler.malformed_count() == 0
 
-    handler.feed(b"ok #5\n")
+    handler.feed(b"ack 5 0\n")
     assert sink.lines() == []
     assert handler.malformed_count() == 0
 
     adapter.now_value = 555
-    handler.feed(b"PING\n")
-    assert sink.lines() == ["pong 555"]
+    handler.feed(b"PING #1\n")
+    assert sink.lines() == ["ack 1 0", "pong 555"]
 
 
 def test_mixed_case_verb_is_unknown_not_dropped():
@@ -387,55 +391,73 @@ def test_mixed_case_verb_is_unknown_not_dropped():
 
 
 # ---------------------------------------------------------------------------
-# Unknown verb / wrong arity, and the malformed-line #id recovery rule
-# (protocol.md Sec 2.3): "if the line's last token is a well-formed
-# nonzero #id, reply err #<id> <code> -- including unknown verbs."
+# Unknown verb / wrong arity under mandatory sequencing (protocol.md Sec
+# 8.4, superseding the old Sec 2.3 recovery rule this subsection used to
+# pin): a well-formed, IN-ORDER id acks unconditionally, before the verb
+# is even looked up -- an unrecognized verb (or a known verb with the
+# wrong remaining-field count) is then a content-decode failure layered
+# on top, err 1/2 #<id>, never a bare or id-first reply. No trailing
+# field at all, or a trailing field that is not a well-formed '#[0-9]+',
+# is still unclassifiable and gets no reply at all (Sec 8.4 items 1-2) --
+# there is no longer any other kind of "unrecoverable" line, because an
+# out-of-order id (retransmit/gap) is classified and answered on the id
+# alone, without ever inspecting the verb (Sec 8.1/9.8 item 1).
 # ---------------------------------------------------------------------------
 
-def test_unknown_verb_no_reply_when_no_recoverable_id():
+def test_unknown_verb_no_reply_when_no_id_at_all_or_id_ill_formed():
     handler, adapter, sink = _new_handler()
     handler.feed(b"FOO\n")
     assert sink.lines() == []
     assert handler.malformed_count() == 1
 
-    handler.feed(b"FOO 1 2 3\n")
+    handler.feed(b"FOO 1 2 3\n")  # last field "3" is not '#[0-9]+'
     assert sink.lines() == []
     assert handler.malformed_count() == 2
 
 
-def test_unknown_verb_with_recoverable_id_gets_err_unknown():
+def test_unknown_verb_with_in_order_id_gets_ack_then_err_unknown():
     handler, adapter, sink = _new_handler()
-    handler.feed(b"FOO 1 2 3 #42\n")
-    assert sink.lines() == ["err #42 1"]
+    handler.feed(b"FOO 1 2 3 #1\n")
+    assert sink.lines() == ["ack 1 0", "err 1 #1"]
     assert handler.malformed_count() == 1
     sink.clear()
 
-    handler.feed(b"BAR #7\n")
-    assert sink.lines() == ["err #7 1"]
+    handler.feed(b"BAR #2\n")
+    assert sink.lines() == ["ack 2 0", "err 1 #2"]
     assert handler.malformed_count() == 2
 
 
-def test_unknown_verb_trailing_id_zero_gets_no_reply():
+def test_unknown_verb_trailing_id_zero_is_a_stale_retransmit_no_verb_lookup():
+    """Since ids start at 1, an inbound "#0" always compares less than
+    expected_next -- it is an ordinary retransmit (Sec 2.2/8.1), acked
+    against the highest already-accepted id (0, nothing accepted yet)
+    with the verb never even looked up. This supersedes the old "#0
+    suppresses the reply" rule this test used to pin -- there is no
+    longer any way to suppress a reply at all (Sec 2.2)."""
     handler, adapter, sink = _new_handler()
     handler.feed(b"FOO #0\n")
-    assert sink.lines() == []
-    assert handler.malformed_count() == 1
+    assert sink.lines() == ["ack 0 0"]
+    assert handler.malformed_count() == 0
 
 
-def test_wrong_arity_known_verb_recovers_id_too():
+def test_wrong_arity_known_verb_still_acks_before_erring():
+    """PING's only field is its own mandatory id -- "PING extra #1" has
+    ONE real field ("extra") beyond the id, which is wrong arity for a
+    zero-field verb; the ack still fires unconditionally (the id itself
+    is in order) before the arity error is layered on top."""
     handler, adapter, sink = _new_handler()
-    handler.feed(b"PING #5\n")
-    assert sink.lines() == ["err #5 2"]
+    handler.feed(b"PING extra #1\n")
+    assert sink.lines() == ["ack 1 0", "err 2 #1"]
     assert handler.malformed_count() == 1
 
 
 def test_wrong_arity_rejected_no_best_effort_parse():
     handler, adapter, sink = _new_handler()
-    handler.feed(b"PING extra\n")  # PING takes 0 fields
+    handler.feed(b"PING extra\n")  # no '#id' at all -- unclassifiable
     assert sink.lines() == []
     assert handler.malformed_count() == 1
 
-    handler.feed(b"HELLO extra\n")  # HELLO takes 0 fields too
+    handler.feed(b"HELLO extra\n")  # HELLO takes 0 fields, unsequenced
     assert sink.lines() == []
     assert adapter.identity_calls == 0
     assert handler.malformed_count() == 2
@@ -445,7 +467,8 @@ def test_id_rejects_leading_plus_sign():
     """The id's own grammar ('#' [0-9]+) allows no sign at all, unlike
     protocol.md Sec 2's general "every wire value is ... optionally
     signed" rule for ordinary fields -- "#+5" must NOT be treated as a
-    recoverable id."""
+    well-formed id, so the whole line is unclassifiable (Sec 8.4 item
+    2) and gets no reply at all."""
     handler, adapter, sink = _new_handler()
     handler.feed(b"FOO #+5\n")
     assert sink.lines() == []
@@ -453,37 +476,45 @@ def test_id_rejects_leading_plus_sign():
 
 
 # ---------------------------------------------------------------------------
-# ESTOP: no ack at all, EVER (protocol.md Sec 2.3/SUC-002) -- the one
-# deliberate exception to the malformed-line #id recovery rule above.
+# ESTOP: now ALWAYS replies the bare word "estop" (protocol.md Sec
+# 8.3/SUC-002, flipped 2026-08-21 -- this supersedes the pre-retarget
+# "ESTOP never replies" rule this subsection used to pin). Maximally
+# forgiving: ANY line whose verb token is exactly ESTOP executes the
+# stop and then replies, regardless of trailing junk or arity, and
+# never increments malformed_count() -- there is no arity to inspect at
+# all any more (resolved ambiguity #3, sprint 007 ticket 012).
 # ---------------------------------------------------------------------------
 
-def test_estop_produces_no_ack_at_all():
+def test_estop_replies_estop_after_executing():
     handler, adapter, sink = _new_handler()
     handler.feed(b"ESTOP\n")
-    assert sink.lines() == [], "ESTOP must never write anything to the sink"
+    assert sink.lines() == ["estop"]
     assert adapter.estop_calls == 1
     assert handler.malformed_count() == 0
 
 
-def test_estop_wrong_arity_still_produces_no_reply():
+def test_estop_wrong_arity_still_replies_estop():
     handler, adapter, sink = _new_handler()
     handler.feed(b"ESTOP 1\n")
-    assert sink.lines() == []
-    assert adapter.estop_calls == 0, "must never have reached the adapter"
-    assert handler.malformed_count() == 1
+    assert sink.lines() == ["estop"]
+    assert adapter.estop_calls == 1, "the stop must still have executed"
+    assert handler.malformed_count() == 0
 
 
-def test_estop_with_trailing_id_still_never_acks():
+def test_estop_with_trailing_id_still_just_replies_estop():
     """The sharpest version of the ESTOP carve-out: `ESTOP #5` has a
-    perfectly recoverable, well-formed nonzero id per the generic rule
-    -- every OTHER verb in this suite gets an err reply in this exact
-    shape (see test_wrong_arity_known_verb_recovers_id_too above).
-    ESTOP must not."""
+    perfectly well-formed, in-order-looking trailing id -- every OTHER
+    verb in this suite acks that shape (see
+    test_wrong_arity_known_verb_still_acks_before_erring above). ESTOP
+    is outside the sequence entirely: no ack, no err, just the bare
+    `estop` reply, same as every other ESTOP shape."""
     handler, adapter, sink = _new_handler()
     handler.feed(b"ESTOP #5\n")
-    assert sink.lines() == [], "ESTOP must never ack, even with a recoverable id"
-    assert adapter.estop_calls == 0
-    assert handler.malformed_count() == 1
+    assert sink.lines() == ["estop"], (
+        "ESTOP must reply the bare word 'estop', never ack/err, even "
+        "with a trailing token that looks like a well-formed id")
+    assert adapter.estop_calls == 1
+    assert handler.malformed_count() == 0
 
 
 # ---------------------------------------------------------------------------
@@ -493,36 +524,41 @@ def test_estop_with_trailing_id_still_never_acks():
 
 def test_help_text_is_generated_from_the_dispatch_table():
     handler, adapter, sink = _new_handler()
-    handler.feed(b"HELP\n")
+    handler.feed(b"HELP #1\n")
     lines = sink.lines()
-    assert len(lines) == 1
+    assert len(lines) == 2
+    assert lines[0] == "ack 1 0"
     expected_names = [
         name.decode("ascii") for name, _handler in protocol.ProtocolHandler.VERB_TABLE]
-    assert lines[0] == "help " + " ".join(expected_names)
+    assert lines[1] == "help " + " ".join(expected_names)
 
 
-def test_help_lists_every_verb_this_sprint_scopes_including_stubs():
-    """Ticket 001's own description: HELP's text must list every verb
-    this sprint scopes in, GET/SET/TLM/WHEELS/STOP included, whether
-    or not each one's body is a real implementation yet (GET/SET/TLM
-    are real as of ticket 002; WHEELS/STOP remain stubs until ticket
-    003) -- the reply text can't drift because it walks the SAME table
-    dispatch() uses (see the test above), so this is really just
-    pinning the expected content once, literally. Twelve verbs, no
-    RUN -- this sprint's own reduced scope (see this fixture's own
-    HELP block skip in _classify() above, for why the archetype's own
-    13-verb HELP vector cannot be used here)."""
+def test_help_matches_this_sprints_own_scoped_13_verb_list():
+    """Renamed from the pre-retarget "...12_verb_list" (sprint 007
+    ticket 013): RUN is in scope as of ticket 012's reliability-layer
+    retarget, so HELP's reply grows to 13 verbs, RUN last (protocol.md
+    Sec 6/9.7) -- reached via a mandatory in-order id now that HELP
+    itself is sequenced (Sec 8.3/8.4), with the ack always ahead of
+    HELP's own informational reply (Sec 8.1's "ack first, always")."""
     handler, adapter, sink = _new_handler()
-    handler.feed(b"HELP\n")
+    handler.feed(b"HELP #1\n")
     assert sink.lines() == [
-        "help HELLO PING ID VER STATUS HELP GET SET TLM WHEELS STOP ESTOP"
+        "ack 1 0",
+        "help HELLO PING ID VER STATUS HELP GET SET TLM WHEELS STOP "
+        "ESTOP RUN",
     ]
 
 
-def test_help_wrong_arity_recovers_id():
+def test_help_wrong_arity_still_acks_then_errs():
+    """"HELP #3" alone is NOT wrong arity any more -- the trailing
+    token is HELP's own mandatory id, consumed before HELP's own (zero
+    remaining fields) arity check ever runs, and #3 would in any case
+    be a gap against a fresh handler's expected_next=1. Wrong arity for
+    a sequenced, zero-field verb now needs a genuine extra field ahead
+    of an in-order id."""
     handler, adapter, sink = _new_handler()
-    handler.feed(b"HELP #3\n")
-    assert sink.lines() == ["err #3 2"]
+    handler.feed(b"HELP extra #1\n")
+    assert sink.lines() == ["ack 1 0", "err 2 #1"]
     assert handler.malformed_count() == 1
 
 
@@ -566,23 +602,22 @@ def test_result_code_falls_back_to_unknown_for_an_untaught_value():
 def test_get_named_field_returns_one_get_reply():
     handler, adapter, sink = _new_handler()
     adapter.get_overrides["wheel_control.pid_kp"] = 0.03
-    handler.feed(b"GET wheel_control.pid_kp\n")
-    assert sink.lines() == ["get wheel_control.pid_kp 0.030000"]
+    handler.feed(b"GET wheel_control.pid_kp #1\n")
+    assert sink.lines() == ["ack 1 0", "get wheel_control.pid_kp 0.030000"]
     assert handler.malformed_count() == 0
     assert adapter.get_calls == ["wheel_control.pid_kp"]
 
 
 def test_get_unknown_name_is_silent_not_malformed():
-    """protocol.md Sec 7.1, stated explicitly: "GET with an unknown
-    name is silent -- no reply, and not counted malformed." This is
-    the one unknown-token case in the whole grammar that does NOT
-    increment malformed_count() -- distinct from every other
-    unknown-name/unknown-verb case this test module otherwise covers,
-    which is exactly why the ticket calls out this case as worth its
-    own test."""
+    """protocol.md Sec 6's own table note: an unknown GET name still
+    gets the ack (Sec 8.1's unconditional in-order ack), but no `get`
+    line and no `err` either -- and is NOT counted malformed. This is
+    the one unknown-token case in the whole grammar that does not
+    increment malformed_count(), distinct from every other
+    unknown-name/unknown-verb case this test module otherwise covers."""
     handler, adapter, sink = _new_handler()
-    handler.feed(b"GET no.such.field\n")
-    assert sink.lines() == []
+    handler.feed(b"GET no.such.field #1\n")
+    assert sink.lines() == ["ack 1 0"]
     assert handler.malformed_count() == 0
     assert adapter.get_calls == ["no.such.field"]
 
@@ -595,8 +630,9 @@ def test_get_bare_dumps_one_line_per_declared_field_in_order():
     adapter.field_names = ["wheel_control.pid_kp", "wheel_control.pid_ki"]
     adapter.get_overrides["wheel_control.pid_kp"] = 0.03
     adapter.get_overrides["wheel_control.pid_ki"] = 0.002
-    handler.feed(b"GET\n")
+    handler.feed(b"GET #1\n")
     assert sink.lines() == [
+        "ack 1 0",
         "get wheel_control.pid_kp 0.030000",
         "get wheel_control.pid_ki 0.002000",
     ]
@@ -612,14 +648,14 @@ def test_get_bare_skips_a_declared_field_the_adapter_cannot_answer():
     handler, adapter, sink = _new_handler()
     adapter.field_names = ["known", "unanswerable"]
     adapter.get_overrides["known"] = 1.0
-    handler.feed(b"GET\n")
-    assert sink.lines() == ["get known 1.000000"]
+    handler.feed(b"GET #1\n")
+    assert sink.lines() == ["ack 1 0", "get known 1.000000"]
 
 
-def test_get_wrong_arity_recovers_id():
+def test_get_wrong_arity_still_acks_before_erring():
     handler, adapter, sink = _new_handler()
-    handler.feed(b"GET a b #4\n")
-    assert sink.lines() == ["err #4 2"]
+    handler.feed(b"GET a b #1\n")
+    assert sink.lines() == ["ack 1 0", "err 2 #1"]
     assert handler.malformed_count() == 1
     assert adapter.get_calls == []
 
@@ -634,8 +670,8 @@ def test_get_clamps_nan_from_adapter_to_zero():
     bug class."""
     handler, adapter, sink = _new_handler()
     adapter.get_overrides["weird"] = float("nan")
-    handler.feed(b"GET weird\n")
-    assert sink.lines() == ["get weird 0.000000"]
+    handler.feed(b"GET weird #1\n")
+    assert sink.lines() == ["ack 1 0", "get weird 0.000000"]
 
 
 def test_get_name_that_fails_ascii_decode_is_silent_like_unknown():
@@ -643,10 +679,11 @@ def test_get_name_that_fails_ascii_decode_is_silent_like_unknown():
     Sec 2) -- not restricted to ASCII, even though every real
     field-table name is. A non-ASCII name can never match a real name,
     so it takes the exact same silent path as an ordinary unknown
-    name, and the handler must not crash trying to decode it."""
+    name (still acked, no `get` line), and the handler must not crash
+    trying to decode it."""
     handler, adapter, sink = _new_handler()
-    handler.feed(b"GET \xff\xfe\n")
-    assert sink.lines() == []
+    handler.feed(b"GET \xff\xfe #1\n")
+    assert sink.lines() == ["ack 1 0"]
     assert handler.malformed_count() == 0
 
 
@@ -664,8 +701,8 @@ def test_set_rejects_underscore_digit_separator():
     spelling at all. Guarded explicitly so this is ERR_BADARG, not a
     silently accepted value."""
     handler, adapter, sink = _new_handler()
-    handler.feed(b"SET wheel_control.pid_kp 1_000 #9\n")
-    assert sink.lines() == ["err #9 2"]
+    handler.feed(b"SET wheel_control.pid_kp 1_000 #1\n")
+    assert sink.lines() == ["ack 1 0", "err 2 #1"]
     assert handler.malformed_count() == 1
     assert adapter.set_calls == []
 
@@ -684,8 +721,8 @@ def test_set_rejects_field_containing_disallowed_whitespace_byte(byte_value):
     byte set the space-grammar migration never touched."""
     handler, adapter, sink = _new_handler()
     value_field = bytes([byte_value]) + b"5.0"
-    handler.feed(b"SET wheel_control.pid_kp " + value_field + b" #9\n")
-    assert sink.lines() == ["err #9 2"]
+    handler.feed(b"SET wheel_control.pid_kp " + value_field + b" #1\n")
+    assert sink.lines() == ["ack 1 0", "err 2 #1"]
     assert handler.malformed_count() == 1
     assert adapter.set_calls == []
 
@@ -698,9 +735,9 @@ def test_set_value_field_never_sees_a_literal_leading_space():
     the guard to even have an opinion about -- the leading-space case
     this module's own docstrings describe as "closed structurally"."""
     handler, adapter, sink = _new_handler()
-    handler.feed(b"SET wheel_control.pid_kp     5.0 #9\n")
-    assert sink.lines() == ["ok #9"]
-    assert adapter.set_calls == [("wheel_control.pid_kp", 5.0, 9)]
+    handler.feed(b"SET wheel_control.pid_kp     5.0 #1\n")
+    assert sink.lines() == ["ack 1 0"], "ok is gone -- the ack IS the acceptance"
+    assert adapter.set_calls == [("wheel_control.pid_kp", 5.0, 1)]
 
 
 def test_hex_float_literal_rejected_by_numeric_parser():
@@ -715,8 +752,8 @@ def test_hex_float_literal_rejected_by_numeric_parser():
     silently regress if the parsing helper changes later (this
     ticket's own stated acceptance criterion)."""
     handler, adapter, sink = _new_handler()
-    handler.feed(b"SET wheel_control.pid_kp 0x1.8p3 #9\n")
-    assert sink.lines() == ["err #9 2"]
+    handler.feed(b"SET wheel_control.pid_kp 0x1.8p3 #1\n")
+    assert sink.lines() == ["ack 1 0", "err 2 #1"]
     assert handler.malformed_count() == 1
     assert adapter.set_calls == []
 
@@ -727,8 +764,8 @@ def test_set_rejects_decimal_exponent_notation():
     ("1e2" == 100.0), so this guard is genuinely load-bearing, not
     merely a pin of accidental ValueError behavior."""
     handler, adapter, sink = _new_handler()
-    handler.feed(b"SET wheel_control.pid_kp 1e2 #9\n")
-    assert sink.lines() == ["err #9 2"]
+    handler.feed(b"SET wheel_control.pid_kp 1e2 #1\n")
+    assert sink.lines() == ["ack 1 0", "err 2 #1"]
     assert handler.malformed_count() == 1
     assert adapter.set_calls == []
 
@@ -738,37 +775,41 @@ def test_set_rejects_inf_and_nan_literal_text():
     the literal text "inf"/"nan" successfully (no exponent, no
     underscore, no stray whitespace involved), so this is checked
     post-parse via a non-finite result, the same way the C++
-    archetype's own std::isnan/std::isinf calls do."""
+    archetype's own std::isnan/std::isinf calls do. Content-decode
+    failures still consume a sequence slot (Sec 9.8 item 1), so the
+    second command's id must advance to #2."""
     handler, adapter, sink = _new_handler()
-    handler.feed(b"SET wheel_control.pid_kp inf #9\n")
-    assert sink.lines() == ["err #9 2"]
-    handler.feed(b"SET wheel_control.pid_kp nan #8\n")
-    assert sink.lines() == ["err #9 2", "err #8 2"]
+    handler.feed(b"SET wheel_control.pid_kp inf #1\n")
+    assert sink.lines() == ["ack 1 0", "err 2 #1"]
+    handler.feed(b"SET wheel_control.pid_kp nan #2\n")
+    assert sink.lines() == ["ack 1 0", "err 2 #1", "ack 2 0", "err 2 #2"]
     assert handler.malformed_count() == 2
     assert adapter.set_calls == []
 
 
-def test_set_bad_value_with_nonzero_id_still_recovers_id():
-    """The fixture's own bad-value block only exercises the id-omitted
-    arm (OUT err 2, no id token) -- this covers the id-present arm the
-    fixture leaves untested: a malformed VALUE with a nonzero id still
-    acks against that id, same as protocol_handler.cpp's own
-    idOutcome-driven reply after a parseFloatField() failure."""
+def test_set_bad_value_with_nonzero_id_still_acks_before_erring():
+    """The fixture's own bad-value block only exercises the smallest
+    in-order case -- this covers the same shape with a different,
+    explicit id: a malformed VALUE with an in-order id still acks
+    against that id (unconditionally, before the value is even
+    decoded), then layers the BADARG err on top."""
     handler, adapter, sink = _new_handler()
-    handler.feed(b"SET wheel_control.pid_kp notanumber #9\n")
-    assert sink.lines() == ["err #9 2"]
+    handler.feed(b"SET wheel_control.pid_kp notanumber #1\n")
+    assert sink.lines() == ["ack 1 0", "err 2 #1"]
     assert handler.malformed_count() == 1
     assert adapter.set_calls == []
 
 
-def test_set_bad_value_with_id_zero_suppresses_reply():
-    """"#0" suppresses every reply, success or failure alike (Sec
-    8.2) -- including a handler-level value-decode failure that never
-    even reaches on_set()."""
+def test_set_id_zero_is_a_stale_retransmit_before_any_value_decode():
+    """"#0" no longer suppresses anything (Sec 2.2/8.1) -- since ids
+    start at 1, it always compares less than expected_next and is an
+    ordinary retransmit, classified on the id ALONE before the verb
+    (let alone its value field) is ever looked up. This supersedes the
+    old "#0 suppresses every reply" rule this test used to pin."""
     handler, adapter, sink = _new_handler()
     handler.feed(b"SET wheel_control.pid_kp notanumber #0\n")
-    assert sink.lines() == []
-    assert handler.malformed_count() == 1
+    assert sink.lines() == ["ack 0 0"]
+    assert handler.malformed_count() == 0
     assert adapter.set_calls == []
 
 
@@ -786,10 +827,10 @@ def test_set_third_field_not_a_well_formed_id_is_malformed():
     assert adapter.set_calls == []
 
 
-def test_set_wrong_arity_one_field_recovers_id():
+def test_set_wrong_arity_one_field_still_acks_before_erring():
     handler, adapter, sink = _new_handler()
-    handler.feed(b"SET #4\n")
-    assert sink.lines() == ["err #4 2"]
+    handler.feed(b"SET #1\n")
+    assert sink.lines() == ["ack 1 0", "err 2 #1"]
     assert handler.malformed_count() == 1
     assert adapter.set_calls == []
 
@@ -808,8 +849,8 @@ def test_set_name_that_fails_ascii_decode_is_treated_as_unknown():
     Adapter would return for any other name it does not recognize,
     rather than crashing on the decode."""
     handler, adapter, sink = _new_handler()
-    handler.feed(b"SET \xff\xfe 5.0 #9\n")
-    assert sink.lines() == ["err #9 1"]
+    handler.feed(b"SET \xff\xfe 5.0 #1\n")
+    assert sink.lines() == ["ack 1 0", "err 1 #1"]
     assert handler.malformed_count() == 0
     assert adapter.set_calls == []
 
@@ -822,10 +863,10 @@ def test_set_name_that_fails_ascii_decode_is_treated_as_unknown():
 # explicit coverage.
 # ---------------------------------------------------------------------------
 
-def test_tlm_valid_mode_persists_via_adapter_with_no_reply():
+def test_tlm_valid_mode_persists_via_adapter_with_no_own_reply():
     handler, adapter, sink = _new_handler()
-    handler.feed(b"TLM POSE\n")
-    assert sink.lines() == []
+    handler.feed(b"TLM POSE #1\n")
+    assert sink.lines() == ["ack 1 0"]
     assert adapter.tlm_calls == ["POSE"]
     assert handler.malformed_count() == 0
 
@@ -834,16 +875,16 @@ def test_tlm_valid_mode_persists_via_adapter_with_no_reply():
     "mode", ["OFF", "POSE", "FULL", "NOW", "AUTO", "BUFFER"])
 def test_tlm_decodes_every_documented_mode(mode):
     handler, adapter, sink = _new_handler()
-    handler.feed(("TLM %s\n" % mode).encode("ascii"))
-    assert sink.lines() == []
+    handler.feed(("TLM %s #1\n" % mode).encode("ascii"))
+    assert sink.lines() == ["ack 1 0"]
     assert adapter.tlm_calls == [mode]
     assert handler.malformed_count() == 0
 
 
 def test_tlm_unknown_mode_is_malformed():
     handler, adapter, sink = _new_handler()
-    handler.feed(b"TLM SIDEWAYS #3\n")
-    assert sink.lines() == ["err #3 2"]
+    handler.feed(b"TLM SIDEWAYS #1\n")
+    assert sink.lines() == ["ack 1 0", "err 2 #1"]
     assert handler.malformed_count() == 1
     assert adapter.tlm_calls == []
 
@@ -853,28 +894,31 @@ def test_tlm_mode_is_case_sensitive():
     as every other wire token (protocol.md Sec 2.1) -- "pose" is not
     "POSE"."""
     handler, adapter, sink = _new_handler()
-    handler.feed(b"TLM pose #3\n")
-    assert sink.lines() == ["err #3 2"]
+    handler.feed(b"TLM pose #1\n")
+    assert sink.lines() == ["ack 1 0", "err 2 #1"]
     assert adapter.tlm_calls == []
 
 
-def test_tlm_wrong_arity_recovers_id():
+def test_tlm_wrong_arity_still_acks_before_erring():
     handler, adapter, sink = _new_handler()
-    handler.feed(b"TLM POSE EXTRA #3\n")
-    assert sink.lines() == ["err #3 2"]
+    handler.feed(b"TLM POSE EXTRA #1\n")
+    assert sink.lines() == ["ack 1 0", "err 2 #1"]
     assert handler.malformed_count() == 1
     assert adapter.tlm_calls == []
 
 
-def test_tlm_invalid_mode_that_looks_like_an_id_still_recovers_it():
-    """TLM's single field IS the line's own last token -- when that
-    field is not a valid mode name, the generic malformed-line #id
-    recovery rule (protocol.md Sec 2.3) still applies to it, exactly
-    as it would to any other malformed trailing token; this is
-    distinct from wrong arity (there IS exactly one field here)."""
+def test_tlm_bare_id_only_has_zero_mode_fields_is_wrong_arity():
+    """Under mandatory sequencing the id is UNCONDITIONALLY the line's
+    last token (protocol.md Sec 8.4), never content-inspected the way
+    the pre-retarget optional-id design would have -- "TLM #1" is not
+    "an invalid mode field that happens to recover as an id" any more;
+    the id consumes the only trailing token, leaving TLM with ZERO
+    mode fields, which is ordinary wrong arity (same shape as
+    test_tlm_wrong_arity_still_acks_before_erring above, just with too
+    FEW fields instead of too many)."""
     handler, adapter, sink = _new_handler()
-    handler.feed(b"TLM #3\n")
-    assert sink.lines() == ["err #3 2"]
+    handler.feed(b"TLM #1\n")
+    assert sink.lines() == ["ack 1 0", "err 2 #1"]
     assert handler.malformed_count() == 1
     assert adapter.tlm_calls == []
 
@@ -900,9 +944,9 @@ def test_wheels_call_receives_parsed_numeric_fields_untouched():
     parse_wire_float() decoded them, with no scaling, clamping, or
     int-casting performed here (that is ticket 005's job)."""
     handler, adapter, sink = _new_handler()
-    handler.feed(b"WHEELS 100 -50 1000 #5\n")
-    assert sink.lines() == ["ok #5"]
-    assert adapter.wheels_calls == [(100.0, -50.0, 1000.0, 5)]
+    handler.feed(b"WHEELS 100 -50 1000 #1\n")
+    assert sink.lines() == ["ack 1 0"], "ok is gone -- the ack IS the acceptance"
+    assert adapter.wheels_calls == [(100.0, -50.0, 1000.0, 1)]
 
 
 def test_wheels_wrong_arity_two_fields_no_recoverable_id():
@@ -913,10 +957,10 @@ def test_wheels_wrong_arity_two_fields_no_recoverable_id():
     assert adapter.wheels_calls == []
 
 
-def test_wheels_wrong_arity_five_fields_recovers_id():
+def test_wheels_wrong_arity_five_fields_still_acks_before_erring():
     handler, adapter, sink = _new_handler()
-    handler.feed(b"WHEELS 1 2 3 4 #9\n")
-    assert sink.lines() == ["err #9 2"]  # BADARG -- WHEELS is a known verb
+    handler.feed(b"WHEELS 1 2 3 4 #1\n")
+    assert sink.lines() == ["ack 1 0", "err 2 #1"]  # BADARG -- known verb
     assert handler.malformed_count() == 1
     assert adapter.wheels_calls == []
 
@@ -938,43 +982,53 @@ def test_wheels_rejects_underscore_digit_separator():
     """protocol.md Sec 9.4, reused from SET's own guarded parser
     (ticket 002) rather than a second, divergent one."""
     handler, adapter, sink = _new_handler()
-    handler.feed(b"WHEELS 1_00 100 1000 #9\n")
-    assert sink.lines() == ["err #9 2"]
+    handler.feed(b"WHEELS 1_00 100 1000 #1\n")
+    assert sink.lines() == ["ack 1 0", "err 2 #1"]
     assert handler.malformed_count() == 1
     assert adapter.wheels_calls == []
 
 
 def test_wheels_rejects_hex_float_literal():
     handler, adapter, sink = _new_handler()
-    handler.feed(b"WHEELS 0x1.8p3 100 1000 #9\n")
-    assert sink.lines() == ["err #9 2"]
+    handler.feed(b"WHEELS 0x1.8p3 100 1000 #1\n")
+    assert sink.lines() == ["ack 1 0", "err 2 #1"]
     assert handler.malformed_count() == 1
     assert adapter.wheels_calls == []
 
 
 def test_wheels_rejects_inf_and_nan_literal_text():
     handler, adapter, sink = _new_handler()
-    handler.feed(b"WHEELS inf 100 1000 #9\n")
-    assert sink.lines() == ["err #9 2"]
-    handler.feed(b"WHEELS 100 nan 1000 #8\n")
-    assert sink.lines() == ["err #9 2", "err #8 2"]
+    handler.feed(b"WHEELS inf 100 1000 #1\n")
+    assert sink.lines() == ["ack 1 0", "err 2 #1"]
+    handler.feed(b"WHEELS 100 nan 1000 #2\n")
+    assert sink.lines() == ["ack 1 0", "err 2 #1", "ack 2 0", "err 2 #2"]
     assert handler.malformed_count() == 2
     assert adapter.wheels_calls == []
 
 
-def test_wheels_bad_value_with_id_omitted_acks_bare_err():
+def test_wheels_bad_value_with_no_id_at_all_gets_no_reply():
+    """No trailing '#id' token at all -- the line is unclassifiable
+    (protocol.md Sec 8.4 item 1), so there is no id to ack against and
+    no reply of any kind, regardless of what the bad value field would
+    otherwise have decoded to. This supersedes the pre-retarget "bare
+    err, no id" shape this test used to pin -- that bare-err reply no
+    longer exists at all (Sec 8.6)."""
     handler, adapter, sink = _new_handler()
     handler.feed(b"WHEELS notanumber 100 1000\n")
-    assert sink.lines() == ["err 2"]
+    assert sink.lines() == []
     assert handler.malformed_count() == 1
     assert adapter.wheels_calls == []
 
 
-def test_wheels_bad_value_with_id_zero_suppresses_reply():
+def test_wheels_id_zero_is_a_stale_retransmit_before_any_field_decode():
+    """"#0" no longer suppresses anything (Sec 2.2/8.1) -- it is an
+    ordinary retransmit, classified on the id alone before WHEELS's own
+    fields (valid or not) are ever looked at. This supersedes the old
+    "#0 suppresses the reply" rule this test used to pin."""
     handler, adapter, sink = _new_handler()
     handler.feed(b"WHEELS notanumber 100 1000 #0\n")
-    assert sink.lines() == []
-    assert handler.malformed_count() == 1
+    assert sink.lines() == ["ack 0 0"]
+    assert handler.malformed_count() == 0
     assert adapter.wheels_calls == []
 
 
@@ -990,10 +1044,10 @@ def test_stop_bare_no_field_has_no_recoverable_id():
     assert adapter.stop_calls == []
 
 
-def test_stop_wrong_arity_two_fields_recovers_id():
+def test_stop_wrong_arity_two_fields_still_acks_before_erring():
     handler, adapter, sink = _new_handler()
-    handler.feed(b"STOP #5 #7\n")
-    assert sink.lines() == ["err #7 2"]
+    handler.feed(b"STOP #5 #1\n")
+    assert sink.lines() == ["ack 1 0", "err 2 #1"]
     assert handler.malformed_count() == 1
     assert adapter.stop_calls == []
 
@@ -1006,70 +1060,89 @@ def test_stop_field_not_hash_shaped_is_malformed():
     assert adapter.stop_calls == []
 
 
-def test_stop_rejected_by_adapter_still_acks_with_id():
-    """STOP's id is REQUIRED, so unlike SET/WHEELS there is no
-    id-0-suppresses-ack carve-out on the rejection path either -- it
-    is always acked, even on rejection (protocol.md Sec 5.1)."""
+def test_stop_rejected_by_adapter_still_acks_before_erring():
+    """Every sequenced verb is always acked on an in-order id, rejection
+    or not (protocol.md Sec 8.2) -- STOP is no longer distinguished
+    from SET/WHEELS on this point the way the pre-retarget "STOP's id
+    is REQUIRED, unlike every other verb" design used to frame it: ALL
+    of PING/ID/VER/STATUS/HELP/GET/SET/TLM/WHEELS/STOP/RUN carry a
+    mandatory id now, so there is no more asymmetry to single STOP out
+    for."""
     handler, adapter, sink = _new_handler()
     adapter.stop_result = protocol.Result.BUSY
-    handler.feed(b"STOP #11\n")
-    assert sink.lines() == ["err #11 10"]
-    assert adapter.stop_calls == [11]
+    handler.feed(b"STOP #1\n")
+    assert sink.lines() == ["ack 1 0", "err 10 #1"]
+    assert adapter.stop_calls == [1]
 
 
 # ---------------------------------------------------------------------------
-# The #0-legality flip (protocol.md Sec 2.2/8.2, this ticket's own
-# explicit acceptance criterion): the SAME trailing token, "#0", is
-# legal (silent execute) on WHEELS -- an optional-id verb -- and
-# malformed on STOP -- a required-id verb. Tested side by side so the
-# asymmetry is pinned as one deliberate fact, not two coincidentally
-# similar tests.
+# "#0" under mandatory sequencing (protocol.md Sec 2.2/8.1, sprint 007
+# ticket 013): the pre-retarget WHEELS-vs-STOP asymmetry this
+# subsection used to pin ("#0" silently executes an optional-id verb
+# like WHEELS but is malformed on a required-id verb like STOP) is
+# GONE by design -- every sequenced verb is mandatory-id now, so there
+# is no more "optional-id verb" for WHEELS to be. Since ids start at 1,
+# an inbound "#0" always compares less than expected_next and is
+# therefore always an ordinary retransmit (Sec 8.1): acked against the
+# highest already-accepted id (0, nothing accepted yet) with the verb
+# NEVER looked up or executed, for WHEELS and STOP alike. What used to
+# be a deliberate asymmetry between two verb classes is now one uniform
+# rule with no verb-specific carve-out at all -- tested side by side,
+# same as before, so the "one deliberate fact" framing survives even
+# though the fact itself flipped.
 # ---------------------------------------------------------------------------
 
-def test_wheels_hash_zero_executes_silently_optional_id_verb():
+def test_wheels_hash_zero_is_a_stale_retransmit_never_executes():
     handler, adapter, sink = _new_handler()
     handler.feed(b"WHEELS 100 100 1000 #0\n")
-    assert sink.lines() == [], "WHEELS #0 must execute silently, no reply"
+    assert sink.lines() == ["ack 0 0"]
     assert handler.malformed_count() == 0, "WHEELS #0 is well-formed, not malformed"
-    assert adapter.wheels_calls == [(100.0, 100.0, 1000.0, 0)], (
-        "the command must still have executed, reply_id 0")
+    assert adapter.wheels_calls == [], (
+        "a retransmit id must never reach on_wheels() -- WHEELS #0 no "
+        "longer executes at all, unlike the pre-retarget optional-id rule")
 
 
-def test_stop_hash_zero_is_malformed_required_id_verb():
+def test_stop_hash_zero_is_a_stale_retransmit_never_executes():
     handler, adapter, sink = _new_handler()
     handler.feed(b"STOP #0\n")
-    assert sink.lines() == [], "STOP #0 must never reply"
-    assert handler.malformed_count() == 1, "STOP #0 is malformed, unlike WHEELS #0"
-    assert adapter.stop_calls == [], "the malformed line must never reach on_stop()"
+    assert sink.lines() == ["ack 0 0"]
+    assert handler.malformed_count() == 0, (
+        "STOP #0 is no longer malformed -- it is an ordinary retransmit, "
+        "the same as WHEELS #0 (the pre-retarget required-id/optional-id "
+        "asymmetry between the two verbs is gone)")
+    assert adapter.stop_calls == [], "the retransmit must never reach on_stop()"
 
 
 # ---------------------------------------------------------------------------
-# ESTOP (protocol.md Sec 2.3/5.1/SUC-002), ticket 003's own addition:
-# confirming the well-formed and malformed paths both land on "no
-# reply" for the SAME underlying reason (ESTOP's own rule winning over
-# the general recovery rule), not by coincidence of two different code
-# paths that both happen to stay silent. The individual well-formed and
-# malformed cases are each already covered above
-# (test_estop_produces_no_ack_at_all / test_estop_wrong_arity_still_
-# produces_no_reply / test_estop_with_trailing_id_still_never_acks,
-# ticket 001) -- this test is the side-by-side confirmation ticket 003
-# itself calls for.
+# ESTOP (protocol.md Sec 5.1/8.3/SUC-002), ticket 003's own addition,
+# flipped by ticket 012/013's 2026-08-21 retarget: confirming the
+# well-formed and trailing-junk shapes both land on the SAME "estop"
+# reply for the SAME underlying reason (ESTOP is maximally forgiving --
+# it never inspects its own arity at all any more), not by coincidence
+# of two different code paths that happen to agree. The individual
+# shapes are each already covered above (test_estop_replies_estop_
+# after_executing / test_estop_wrong_arity_still_replies_estop /
+# test_estop_with_trailing_id_still_just_replies_estop) -- this test is
+# the side-by-side confirmation ticket 003 originally called for, now
+# re-pinned to the reply-flip rather than the silence it used to pin.
 # ---------------------------------------------------------------------------
 
-def test_estop_wellformed_and_malformed_both_silent_for_the_same_reason():
+def test_estop_wellformed_and_with_trailing_junk_both_reply_estop_for_the_same_reason():
     handler, adapter, sink = _new_handler()
 
     handler.feed(b"ESTOP\n")  # well-formed
-    assert sink.lines() == []
+    assert sink.lines() == ["estop"]
     assert adapter.estop_calls == 1
     assert handler.malformed_count() == 0
 
-    handler.feed(b"ESTOP #5\n")  # malformed: wrong arity, id-shaped extra field
-    assert sink.lines() == [], (
-        "ESTOP must never ack even though '#5' is a well-formed nonzero "
-        "id the general recovery rule would otherwise honor")
-    assert adapter.estop_calls == 1, "the malformed call must never reach the adapter"
-    assert handler.malformed_count() == 1
+    handler.feed(b"ESTOP #5\n")  # trailing junk: an id-shaped extra field
+    assert sink.lines() == ["estop", "estop"], (
+        "ESTOP must reply 'estop' again, unconditionally, even though "
+        "'#5' looks like a well-formed id every OTHER verb would ack")
+    assert adapter.estop_calls == 2, "the second ESTOP must also have executed"
+    assert handler.malformed_count() == 0, (
+        "ESTOP never increments malformed_count() -- there is no arity "
+        "to inspect at all any more (resolved ambiguity #3)")
 
 
 # ---------------------------------------------------------------------------
@@ -1079,6 +1152,14 @@ def test_estop_wellformed_and_malformed_both_silent_for_the_same_reason():
 # unskipped, test_golden_vector_block above) covers the literal spec
 # S6.2 worked example; these tests cover header-change detection in
 # more depth than that one fixture block does.
+#
+# 2026-08-21 retarget (Sec 8.5): emit_telemetry() now ALSO piggybacks
+# the current reliability line -- "ack <expected_next-1> <last_done>"
+# when no gap is outstanding, else "nack <expected_next> <last_done>"
+# -- on every call, AFTER the thdr/t frame it accompanies (Sec 9.8 item
+# 5). None of these tests ever feed() a sequenced command, so
+# expected_next stays 1 and last_done stays 0 throughout: every call
+# below piggybacks the same "ack 0 0" line.
 # ---------------------------------------------------------------------------
 
 _COLUMNS_A = [("seq", 1, False), ("flags", 216, True)]
@@ -1093,8 +1174,11 @@ def test_emit_telemetry_sends_thdr_once_then_t_every_call():
     assert sink.lines() == [
         "thdr seq flags",
         "t 1 d8",
+        "ack 0 0",
         "t 2 8",
+        "ack 0 0",
         "t 2 8",
+        "ack 0 0",
     ]
 
 
@@ -1105,8 +1189,10 @@ def test_emit_telemetry_resends_thdr_when_column_count_changes():
     assert sink.lines() == [
         "thdr seq flags",
         "t 1 d8",
+        "ack 0 0",
         "thdr seq",
         "t 3",
+        "ack 0 0",
     ]
 
 
@@ -1117,8 +1203,10 @@ def test_emit_telemetry_resends_thdr_when_column_name_changes():
     assert sink.lines() == [
         "thdr seq flags",
         "t 1 d8",
+        "ack 0 0",
         "thdr seq otherflags",
         "t 3 1",
+        "ack 0 0",
     ]
 
 
@@ -1133,8 +1221,10 @@ def test_emit_telemetry_resends_thdr_when_hex_flag_changes():
     assert sink.lines() == [
         "thdr seq flags",
         "t 1 d8",
+        "ack 0 0",
         "thdr seq flags",
         "t 5 d8",
+        "ack 0 0",
     ]
 
 
@@ -1149,25 +1239,26 @@ def test_emit_telemetry_header_state_is_per_handler_instance_not_shared():
 
     handler_a.emit_telemetry(_COLUMNS_A)
     handler_a.emit_telemetry(_COLUMNS_A_AGAIN)
-    assert sink_a.lines() == ["thdr seq flags", "t 1 d8", "t 2 8"]
+    assert sink_a.lines() == [
+        "thdr seq flags", "t 1 d8", "ack 0 0", "t 2 8", "ack 0 0"]
 
     # handler_b has never emitted before -- even though handler_a has
     # already "seen" this exact column set, handler_b's own thdr is
     # still due, proving the state is not shared module-level state.
     handler_b.emit_telemetry(_COLUMNS_A)
-    assert sink_b.lines() == ["thdr seq flags", "t 1 d8"]
+    assert sink_b.lines() == ["thdr seq flags", "t 1 d8", "ack 0 0"]
 
 
 def test_emit_telemetry_decimal_column_formats_signed_no_hex():
     handler, adapter, sink = _new_handler()
     handler.emit_telemetry([("x", -1234, False), ("y", 892, False)])
-    assert sink.lines() == ["thdr x y", "t -1234 892"]
+    assert sink.lines() == ["thdr x y", "t -1234 892", "ack 0 0"]
 
 
 def test_emit_telemetry_hex_column_formats_lowercase_no_prefix():
     handler, adapter, sink = _new_handler()
     handler.emit_telemetry([("flags", 4096, True)])
-    assert sink.lines() == ["thdr flags", "t 1000"]
+    assert sink.lines() == ["thdr flags", "t 1000", "ack 0 0"]
 
 
 # ---------------------------------------------------------------------------
@@ -1233,12 +1324,32 @@ def test_embedded_nul_immediately_after_verb_is_rejected_not_truncated():
     assert handler.malformed_count() == 1
 
     # The recovery invariant (matches every other malformed-line case in
-    # this suite): a clean PING right after must still dispatch normally
-    # -- this one deliberately-malformed line must not have wedged the
-    # handler's parse state.
+    # this suite): a clean, in-order PING right after must still
+    # dispatch normally -- this one deliberately-malformed line must
+    # not have wedged the handler's parse state.
     adapter.now_value = 999
-    handler.feed(b"PING\n")
-    assert sink.lines() == ["pong 999"]
+    handler.feed(b"PING #1\n")
+    assert sink.lines() == ["ack 1 0", "pong 999"]
+
+
+def test_embedded_nul_immediately_after_verb_with_an_in_order_id_gets_ack_then_err_unknown():
+    """The companion shape to the test above, added by sprint 007
+    ticket 013's own reconciliation: under mandatory sequencing (Sec
+    8.4) the id is unconditionally the line's LAST token, extracted
+    before verb lookup ever runs -- so "PING\\x00extra #1" has a
+    perfectly well-formed, in-order id ("#1") even though its verb
+    token still cannot match VERB_TABLE's b"PING" entry for the exact
+    same length-aware-comparison reason as the no-id case above. The
+    ack fires unconditionally on the in-order id, THEN the unknown-verb
+    err layers on top -- this is the "ack + err 1" outcome the ticket's
+    own description calls out, distinct from the no-id case's "no reply
+    at all"."""
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"PING\x00extra #1\n")
+    assert sink.lines() == ["ack 1 0", "err 1 #1"]
+    assert adapter.now_calls == 0, (
+        "must have taken the unknown-verb path, not the PING handler")
+    assert handler.malformed_count() == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1396,12 +1507,18 @@ def test_recovers_after_adversarial_input(name, chunks):
     """The recovery invariant (protocol.md Sec 2/2.1), ported from
     radio-robot-lib's own test_recovers_after_adversarial_input: however
     hostile `chunks` is, `feed()` must (a) never raise an uncaught
-    exception and (b) still dispatch a clean PING correctly once the
-    garbage line is closed out with a plain '\\n' -- a handler that
-    wedges after one bad frame is useless on a lossy radio link. If
-    `feed()` itself raises, this test fails with that exception's own
-    traceback rather than a clean assertion message -- that failure
-    mode IS the point of this test, not a bug in it."""
+    exception and (b) still dispatch a clean, in-order PING correctly
+    once the garbage line is closed out with a plain '\\n' -- a handler
+    that wedges after one bad frame is useless on a lossy radio link.
+    None of these cases ever produces a legitimate, in-order sequenced
+    command (every one is either unclassifiable, out-of-order, or
+    otherwise malformed -- audited case by case for sprint 007 ticket
+    013's own reconciliation), so `expected_next` is still 1 on a fresh
+    handler by the time the recovery probe runs, for every case
+    uniformly -- "PING #1" is always in order here. If `feed()` itself
+    raises, this test fails with that exception's own traceback rather
+    than a clean assertion message -- that failure mode IS the point of
+    this test, not a bug in it."""
     handler, adapter, sink = _new_handler()
     adapter.now_value = 0
     for chunk in chunks:
@@ -1412,8 +1529,8 @@ def test_recovers_after_adversarial_input(name, chunks):
     # rationale for why the recovery command is not concatenated
     # directly onto an unterminated garbage prefix.
     handler.feed(b"\n")
-    handler.feed(b"PING\n")
-    assert sink.lines()[-1:] == ["pong 0"], (
+    handler.feed(b"PING #1\n")
+    assert sink.lines()[-2:] == ["ack 1 0", "pong 0"], (
         "case %r: PING after the garbage did not produce the expected "
         "reply -- handler did not recover; sink had %r"
         % (name, sink.lines()))
@@ -1429,14 +1546,19 @@ def test_recovers_after_every_adversarial_input_in_one_session():
     misdispatches. A PING is interleaved after every case; every one
     must come back clean, and the total count must match exactly (a
     deficit means some PING got lost; a surplus means a "malformed"
-    case actually dispatched as PING when it should not have)."""
+    case actually dispatched as PING when it should not have). None of
+    the adversarial cases ever legitimately advances the sequence (same
+    per-case audit as the test above), so on this ONE shared handler
+    the recovery PING's own id must climb by one per case (#1, #2,
+    #3, ...) -- each recovery PING is the only thing in the whole
+    session that ever successfully advances `expected_next`."""
     handler, adapter, sink = _new_handler()
     adapter.now_value = 0
-    for _name, case_chunks in _ADVERSARIAL_RECOVERY_CASES:
+    for case_index, (_name, case_chunks) in enumerate(_ADVERSARIAL_RECOVERY_CASES):
         for chunk in case_chunks:
             handler.feed(chunk)
         handler.feed(b"\n")
-        handler.feed(b"PING\n")
+        handler.feed(("PING #%d\n" % (case_index + 1)).encode("ascii"))
     pong_count = sink.lines().count("pong 0")
     assert pong_count == len(_ADVERSARIAL_RECOVERY_CASES), (
         "expected %d pong replies (one recovery PING per case), got %d "

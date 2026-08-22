@@ -114,10 +114,14 @@ class _RecordingTransport:
         self.sent.append(text)
 
 
-def _tick_and_get_replies(result, line=b"PING"):
+def _tick_and_get_replies(result, line=b"PING #1"):
     """Register a one-shot transport carrying `line`, tick the pump
     once, and return whatever the transport's own handler replied --
-    the shared "pump reaches comms.pump() end to end" proof used below."""
+    the shared "pump reaches comms.pump() end to end" proof used below.
+    `PING` is sequenced as of the 2026-08-21 reliability-layer retarget
+    (protocol.md Sec 8.3/8.4) and needs a mandatory `#id`; `#1` is
+    always in order here since each call registers a FRESH transport,
+    hence a fresh ProtocolHandler with `expected_next` still at 1."""
     transport = _RecordingTransport([line])
     result.comms.add_transport(transport)
     result.pump_timer.tick()
@@ -166,11 +170,14 @@ def test_happy_path_configures_diffdrive_and_boots_comms(tmp_path):
     assert result.comms.transport_count() == 1  # radio only -- no secrets
 
     # pump started: a tick reaches comms.pump() and the fresh transport's
-    # OWN handler answers PING for real.
+    # OWN handler answers PING for real -- the ack fires first
+    # (protocol.md Sec 8.1, unconditional on an in-order id), THEN
+    # PING's own "pong <now>" reply.
     assert result.pump_timer is not None
-    replies = _tick_and_get_replies(result, line=b"PING")
-    assert len(replies) == 1
-    assert replies[0].startswith(b"pong ")
+    replies = _tick_and_get_replies(result, line=b"PING #1")
+    assert len(replies) == 2
+    assert replies[0] == b"ack 1 0"
+    assert replies[1].startswith(b"pong ")
 
     # banner/READY already emitted during run() -- a fresh transport
     # registered after boot gets the exact banner text back.
@@ -216,9 +223,10 @@ def test_fail_closed_path_refuses_motion_but_keeps_comms_alive(tmp_path):
 
     # the pump still runs, and the wire still answers -- comms stays
     # serviceable even in the fail-closed case.
-    replies = _tick_and_get_replies(result, line=b"PING")
-    assert len(replies) == 1
-    assert replies[0].startswith(b"pong ")
+    replies = _tick_and_get_replies(result, line=b"PING #1")
+    assert len(replies) == 2
+    assert replies[0] == b"ack 1 0"
+    assert replies[1].startswith(b"pong ")
 
 
 def test_fail_closed_path_missing_file(tmp_path):
@@ -250,8 +258,9 @@ def test_no_secrets_path_skips_wifi_but_boots_everything_else(tmp_path):
     assert result.diffdrive_ready is True
     assert isinstance(result.dispatch, protocol_adapter.ProtocolAdapter)
     replies = _tick_and_get_replies(result)
-    assert len(replies) == 1
-    assert replies[0].startswith(b"pong ")
+    assert len(replies) == 2
+    assert replies[0] == b"ack 1 0"
+    assert replies[1].startswith(b"pong ")
 
 
 def test_secrets_present_starts_wifi_transport(tmp_path):

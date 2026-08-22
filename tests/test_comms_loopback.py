@@ -177,19 +177,22 @@ def test_hello_replies_with_the_exact_banner():
 def test_ping_replies_with_pong_and_the_adapters_now_value():
     c, host, adapter, _device = make_comms()
     adapter.now_value = 1234
-    host.send(b"PING")
+    host.send(b"PING #1")
     c.pump(0)
+    assert host.read_line() == b"ack 1 0"
     assert host.read_line() == b"pong 1234"
 
 
 def test_id_and_ver_replies():
     c, host, _adapter, _device = make_comms()
-    host.send(b"ID")
+    host.send(b"ID #1")
     c.pump(0)
+    assert host.read_line() == b"ack 1 0"
     assert host.read_line() == b"id differential tovez 6.0.0"
 
-    host.send(b"VER")
+    host.send(b"VER #2")
     c.pump(0)
+    assert host.read_line() == b"ack 2 0"
     assert host.read_line() == b"ver 6.0.0"
 
 
@@ -207,14 +210,16 @@ def test_add_transport_returns_false_once_max_transports_registered():
 
 def test_pump_reads_at_most_one_line_per_transport_per_call():
     c, host, _adapter, _device = make_comms()
-    host.send(b"PING")
-    host.send(b"PING")
+    host.send(b"PING #1")
+    host.send(b"PING #2")
     c.pump(0)
     # Only the FIRST queued line is drained this call -- no bounded
     # multi-line drain loop (module docstring).
+    assert host.read_line() == b"ack 1 0"
     assert host.read_line() == b"pong 0"
     assert host.read_line() is None
     c.pump(0)
+    assert host.read_line() == b"ack 2 0"
     assert host.read_line() == b"pong 0"
     assert host.read_line() is None
 
@@ -237,21 +242,25 @@ def test_two_transports_get_two_independent_handlers_sharing_one_adapter():
 
     # SET through transport A is visible to a GET through transport B --
     # proof the two handlers share the SAME adapter (one robot, not one
-    # per transport).
+    # per transport). "ok" is gone (protocol.md Sec 8.2, sprint 007
+    # ticket 012's reliability-layer retarget) -- the ack alone is the
+    # acceptance signal for a successful SET now.
     host_a.send(b"SET v_min 42.0 #1")
     c.pump(0)
-    assert host_a.read_line() == b"ok #1"
+    assert host_a.read_line() == b"ack 1 0"
 
-    host_b.send(b"GET v_min")
+    host_b.send(b"GET v_min #1")
     c.pump(0)
+    assert host_b.read_line() == b"ack 1 0"
     assert host_b.read_line() == b"get v_min 42.000000"
 
     # Each handler's own partial-line buffer is independent: a partial
     # line fed to A (no terminator yet) must not affect B's own,
     # separately-buffered, complete line.
     handler_a.feed(b"PIN")  # no '\n' yet -- buffered, not dispatched
-    host_b.send(b"PING")
+    host_b.send(b"PING #2")
     c.pump(0)
+    assert host_b.read_line() == b"ack 2 0"
     assert host_b.read_line() == b"pong 0"
     assert host_a.read_line() is None  # A's partial line never completed
 
@@ -275,6 +284,14 @@ def test_send_banner_and_send_ready_broadcast_to_every_transport():
 
 
 # --- telemetry-emission cadence: gated on the shared adapter's TLM mode --
+#
+# 2026-08-21 retarget (protocol.md Sec 8.5, sprint 007 ticket 012):
+# emit_telemetry() now ALSO piggybacks the current reliability line --
+# "ack <expected_next-1> <last_done>" (no gap outstanding, always true
+# here since none of these tests ever feed() a sequenced command) --
+# after the thdr/t frame it accompanies, on every call. Each handler
+# below starts a fresh sequence (expected_next=1, last_done=0), so the
+# piggybacked line is "ack 0 0" every time.
 
 def test_telemetry_off_emits_nothing_on_the_cadence():
     c, host, adapter, _device = make_comms()
@@ -291,6 +308,7 @@ def test_telemetry_on_emits_every_cadence_tick_even_while_parked():
     c.pump(0)
     assert host.read_line() == b"thdr ready active connL connR otos wedge flags"
     assert host.read_line() == b"t 0 0 0 0 0 0 0"
+    assert host.read_line() == b"ack 0 0"
     assert host.read_line() is None
 
 
@@ -306,6 +324,7 @@ def test_telemetry_auto_is_silent_while_parked_and_emits_while_active():
     c.pump(0)
     assert host.read_line() == b"thdr ready active connL connR otos wedge flags"
     assert host.read_line() == b"t 1 1 0 0 0 0 0"
+    assert host.read_line() == b"ack 0 0"
     assert host.read_line() is None
 
 
@@ -315,8 +334,10 @@ def test_telemetry_header_re_emits_once_per_handler_only_on_change():
     c.pump(0)
     assert host.read_line() == b"thdr ready active connL connR otos wedge flags"
     assert host.read_line() == b"t 0 0 0 0 0 0 0"
+    assert host.read_line() == b"ack 0 0"
 
     # Column SET is unchanged next cadence tick -- no repeated thdr.
     c.pump(0)
     assert host.read_line() == b"t 0 0 0 0 0 0 0"
+    assert host.read_line() == b"ack 0 0"
     assert host.read_line() is None
