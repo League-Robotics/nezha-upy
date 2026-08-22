@@ -1,9 +1,11 @@
 ---
-id: '009'
+id: 009
 title: 'Bench bring-up on tovez: TCP REPL mirror proven, USB REPL concurrency'
-status: open
-use-cases: [SUC-006]
-depends-on: ['008']
+status: done
+use-cases:
+- SUC-006
+depends-on:
+- 008
 github-issue: ''
 issue: wifi-bring-up-on-tovez-tcp-repl-udp-protocol.md
 completes_issue: true
@@ -56,19 +58,49 @@ broken.
 
 ## Acceptance Criteria
 
-- [ ] On-device identity confirmed before any other step.
-- [ ] TCP `:7654` reaches an interactive REPL (via the ticket 008
+- [x] On-device identity confirmed before any other step.
+- [x] TCP `:7654` reaches an interactive REPL (via the ticket 008
       prober and/or `nc`); `2+2` evaluates correctly.
-- [ ] Session survives 5 minutes idle.
-- [ ] USB REPL confirmed live and responsive throughout.
-- [ ] Any divergence from the mock-serial test's prediction is
+- [x] Session survives 5 minutes idle.
+- [x] USB REPL confirmed live and responsive throughout.
+- [x] Any divergence from the mock-serial test's prediction is
       diagnosed (via `state()`/AT trace) and recorded, not just
       worked around silently.
-- [ ] Findings appended to a tovez bench log in `docs/` (this ticket
+- [x] Findings appended to a tovez bench log in `docs/` (this ticket
       may start that log file; ticket 010 continues it) — e.g.
       `docs/bench-log-tovez-wifi-<date>.md`, matching this repo's
       existing `docs/bench-log-zetuv-2026-08-19.md` naming
       convention.
+
+## Completion Notes (2026-08-21/22)
+
+Full session recorded in `docs/bench-log-tovez-wifi-2026-08-21.md`.
+Headline findings:
+
+- tovez's physical WiFi module joined "Busboom Mesh" correctly but got
+  DHCP address `192.168.1.196`, not the bench convention's
+  `192.168.4.11` (`data/tovez.json`'s `connection.wifi_ip`) -- a
+  DHCP-reservation/module-identity mismatch (bench log §8), not a
+  firmware defect. Flagged for the stakeholder/ticket 010.
+- `mpremote connect ... exec`/`run` soft-resets the board on (most)
+  fresh connections, restarting WiFi bring-up from `AT+RST` each time
+  -- confirmed empirically (bench log §6). Diagnosis for the rest of
+  this session used one continuous `mpremote run <script>` session per
+  observation window instead of repeated separate connects.
+- Root-caused and fixed a real defect in this sprint's own bring-up
+  tooling: `tools/wifi_tcp_probe.py`'s `send_line()` sent a bare `\n`;
+  the real WiFi REPL mirror requires `\r` to submit a line, so every
+  probe attempt against real hardware silently hung on its own
+  "wake the prompt" step. Fixed + regression-tested (bench log §10).
+  This was the fix that actually closed acceptance criterion 2.
+- Added two small bench-debug accessors needed to diagnose the above:
+  `core.boot.last_result()` and `WifiAtLink.debug_trace()` (bench log
+  §9), both covered by new offline regression tests.
+- No defect found in `src/core/wifi_at.py`'s AT bring-up state machine
+  itself -- CIPMUX sequencing, one-CIPSEND-per-datagram, and the join
+  logic all matched the mock-serial predictions on real hardware.
+- `python3 -m pytest tests/`: 498 passed, 518 subtests passed at the
+  end of this session (started at 495 passed).
 
 ## Testing
 

@@ -283,6 +283,36 @@ def test_secrets_present_starts_wifi_transport(tmp_path):
     assert result.comms.transport_count() == 2  # radio + wifi
 
 
+# --- bench-debug accessor (sprint 007 ticket 009) -----------------------
+
+def test_last_result_returns_the_most_recent_run(tmp_path):
+    """`boot.last_result()` is the escape hatch a bench REPL session
+    uses to reach `wifi_link.state()` after the automatic power-on
+    `run()` call (whose return value `main.c` discards) -- ticket 009's
+    own bring-up session hit exactly this gap live on tovez. Confirm
+    it tracks the latest call and is not stale from a previous one."""
+    stub = _StubDiffDrive()
+    first = boot.run(
+        config_path=str(DATA_DIR / "tovez.json"),
+        secrets_path=_missing_path(tmp_path),
+        diffdrive_module=stub,
+    )
+    assert boot.last_result() is first
+
+    secrets_path = tmp_path / "wifi_secrets.json"
+    secrets_path.write_text(json.dumps({"ssid": "testnet", "password": "testpass"}))
+    second = boot.run(
+        config_path=str(DATA_DIR / "tovez.json"),
+        secrets_path=str(secrets_path),
+        diffdrive_module=stub,
+        wifi_serial_factory=_FakeWifiSerial,
+        wifi_repl_hook_factory=None,
+    )
+    assert boot.last_result() is second
+    assert boot.last_result() is not first
+    assert boot.last_result().wifi_link is not None
+
+
 # --- boot never blocks / never raises for the documented cases ---------
 
 def test_run_never_raises_for_bad_or_missing_config(tmp_path):

@@ -60,6 +60,7 @@ _JOIN_QUERY_ATTEMPTS = 6  # ~9s of AT+CWJAP? polling (auto-rejoin settle window)
 _PEER_SILENCE_MS = 60000  # mirrors Hardware::WifiLink::kPeerSilence
 _STATUS_LINE_MAX = 96
 _INCOMING_CHUNK_MAX = 256
+_DEBUG_LINES_MAX = 24  # bench AT trace ring -- see WifiAtLink.__init__
 
 _ST_CONFIGURE = "configure"
 _ST_JOIN = "join"
@@ -282,6 +283,23 @@ class WifiAtLink:
 
         self._v5_rx = []
 
+        # Bench-diagnostic AT trace (sprint 007 ticket 009): every raw
+        # status/reply line the module sends, plus the last command
+        # written -- the "cmd=/reply=" pairing the prior C++ spike's
+        # own debug surface (`robot.wifi_status()`) used to crack every
+        # AT bring-up bug it hit (reference/vevov-micropython-spike-
+        # handoff.md). Added because `state()`/the internal step
+        # counters were not enough to explain a live divergence this
+        # ticket hit on tovez: the link reports "ready" (`AT+CWJAP?`
+        # matched, `CIPSERVER`/`CIPSTART` both matched "OK") but the
+        # bench Mac never sees an ARP reply for the reserved IP. This
+        # ring is what lets a human read the module's own words instead
+        # of guessing. Bounded so it cannot leak into an unbounded heap
+        # grower; not read by any bring-up logic itself, only by
+        # `debug_trace()` for a human at the REPL.
+        self._last_command = None
+        self._debug_lines = []
+
         self._send_queue = []
         self._send_phase = None
         self._send_payload = b""
@@ -356,6 +374,13 @@ class WifiAtLink:
     def state(self):
         return self._state  # for tests/diagnostics
 
+    def debug_trace(self):
+        """``(last_command_written, [raw reply/status lines])`` -- the
+        bench AT-trace fallback (see ``__init__``'s own comment) for
+        when ``state()`` alone does not explain what is happening.
+        Bench REPL usage: ``boot.last_result().wifi_link.debug_trace()``."""
+        return self._last_command, list(self._debug_lines)
+
     def _enter_state(self, state, now):
         self._state = state
         self._step = 0
@@ -392,6 +417,7 @@ class WifiAtLink:
 
     def _start_command(self, command_text, expect, timeout_ms, now):
         self._serial.write((command_text + "\r\n").encode("ascii"))  # 1 write; under UARTE's 250-byte TX buf
+        self._last_command = command_text  # bench AT trace -- see __init__
         expect_bytes = expect.encode("ascii") if isinstance(expect, str) else expect
         self._start_await(expect_bytes, timeout_ms, now)
 
@@ -478,6 +504,17 @@ class WifiAtLink:
         """`<link>,CONNECT` / `<link>,CLOSED`. V5_LINK is ignored here:
         ESP-AT's mux CIPSTART reports this lifecycle for it too (not a
         TCP client), else it'd be mistaken for a REPL client."""
+        if line:
+            # Bench AT trace (see __init__) -- every non-blank line the
+            # module sends, regardless of whether it means anything to
+            # the state machine below. Best-effort decode: a malformed
+            # byte must not lose the rest of the trace.
+            try:
+                self._debug_lines.append(line.decode("ascii"))
+            except UnicodeError:
+                self._debug_lines.append(repr(line))
+            if len(self._debug_lines) > _DEBUG_LINES_MAX:
+                del self._debug_lines[0]
         try:
             text = line.decode("ascii")
         except UnicodeError:

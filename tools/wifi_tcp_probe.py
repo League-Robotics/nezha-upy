@@ -121,7 +121,20 @@ def recv_until(sock, predicate, timeout, bufsize=4096,
 
 
 def send_line(sock, text):
-    sock.sendall((text + "\n").encode("ascii"))
+    """Send `text` as one line, `\r\n`-terminated.
+
+    LANDMINE (sprint 007 ticket 009, found on tovez's real hardware):
+    a bare `\n` is NOT enough to submit a line to this firmware's WiFi
+    REPL mirror -- a client that sends only `\n` gets zero bytes back,
+    forever, even for a truly empty "wake the prompt" line. Confirmed
+    on-device: the identical blank line sent as `\r\n` gets back
+    `\r\n>>> ` immediately; sent as bare `\n` it gets nothing within
+    15s. The offline mock/loopback tests never caught this because
+    both `FakeSocket` and the real-loopback test's own scripted server
+    reply unconditionally, without caring what line ending the client
+    actually used -- neither models the real firmware's requirement.
+    """
+    sock.sendall((text + "\r\n").encode("ascii"))
 
 
 def hold_open(sock, duration_s, bufsize=4096,

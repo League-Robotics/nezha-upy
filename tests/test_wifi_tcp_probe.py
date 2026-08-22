@@ -95,6 +95,22 @@ def test_recv_until_raises_on_connection_closed():
         pass
 
 
+def test_send_line_terminates_with_crlf_not_bare_lf():
+    """Sprint 007 ticket 009: on real tovez hardware, a bare `\n` line
+    to the WiFi REPL mirror got zero bytes back within 15s -- the same
+    blank line sent as `\r\n` got an immediate `\r\n>>> ` reply. The
+    offline FakeSocket/loopback fixtures both reply unconditionally, so
+    neither would have caught a regression back to bare-`\n`; this
+    test pins the wire bytes directly."""
+    sock = FakeSocket([b"\r\n>>> "])
+    probe.send_line(sock, "")
+    assert sock.sent == [b"\r\n"]
+
+    sock2 = FakeSocket([b"2+2\r\n4\r\n>>> "])
+    probe.send_line(sock2, "2+2")
+    assert sock2.sent == [b"2+2\r\n"]
+
+
 def test_run_repl_probe_success():
     sock = FakeSocket([b"\r\n>>> ", b"2+2\r\n4\r\n>>> "])
     result = probe.run_repl_probe(sock, eval_expr="2+2", expect="4",
@@ -102,8 +118,10 @@ def test_run_repl_probe_success():
     assert result.prompt_ok
     assert result.eval_ok
     assert result.eval_reply == b"2+2\r\n4\r\n>>> "
-    # wake blank line, then the eval expression -- both newline-terminated
-    assert sock.sent == [b"\n", b"2+2\n"]
+    # wake blank line, then the eval expression -- both CRLF-terminated
+    # (sprint 007 ticket 009: bare LF alone never got a reply from the
+    # real firmware -- see send_line's own docstring)
+    assert sock.sent == [b"\r\n", b"2+2\r\n"]
 
 
 def test_run_repl_probe_eval_mismatch():
@@ -120,7 +138,7 @@ def test_run_repl_probe_no_eval():
     assert result.prompt_ok
     assert not result.eval_ok
     assert result.eval_reply == b""
-    assert sock.sent == [b"\n"]  # no eval line sent
+    assert sock.sent == [b"\r\n"]  # no eval line sent
 
 
 def test_format_tcp_report_ok():

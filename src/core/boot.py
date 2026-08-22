@@ -123,6 +123,7 @@ __all__ = [
     "VERSION",
     "BootResult",
     "run",
+    "last_result",
 ]
 
 CONFIG_PATH = "robot.json"  # bare name -- leading slash ENOENTs on this port
@@ -235,8 +236,15 @@ class _BootPumpTimer(comms.PumpTimer):
 class BootResult:
     """Everything ``run()`` assembled -- plain attributes (no
     ``dataclasses``, matching ``comms.Status``/``otos.OtosReading``),
-    so tests can assert on each piece directly. This module keeps no
-    module-level state; nothing survives boot outside this object."""
+    so tests can assert on each piece directly. Nothing here is
+    scattered into separate module globals; the one exception is
+    ``last_result()`` below (sprint 007 ticket 009, first hardware
+    bring-up of ``wifi_at.py``), which exists ONLY so a bench REPL
+    session -- which never sees ``run()``'s return value, since
+    ``main.c``'s boot call site discards it -- has some way to reach
+    ``result.wifi_link.state()`` for diagnosis. It is a debug
+    convenience, not a supported runtime API, and nothing in ``run()``
+    itself reads it back."""
 
     def __init__(self):
         self.robot_config = None   # released after Step 3; see run()
@@ -254,6 +262,28 @@ class BootResult:
         # document once the scalars are extracted, so the flag has to
         # outlive it.
         return self.config_loaded
+
+
+_last_result = None  # bench-debug only; see BootResult's own docstring
+
+
+def last_result():
+    """Return the ``BootResult`` from the most recent ``run()`` call,
+    or ``None`` if ``run()`` has never been called this boot.
+
+    Bench-diagnostic escape hatch (sprint 007 ticket 009): the
+    automatic power-on call to ``run()`` (``main.c``'s patched boot
+    site) discards its return value, so a REPL session opened after
+    boot has no handle on ``result.wifi_link``/``result.comms`` at
+    all -- there is no other reachable reference once ``run()``
+    returns (the pump keeps the object graph alive via the
+    ``run_every`` callback closure, but nothing exposes it to
+    Python). At the REPL: ``import core.boot as boot;
+    boot.last_result().wifi_link.state()``. Do not call ``run()``
+    again from the REPL to "refresh" this -- it would register a
+    second radio/WiFi transport and a second scheduled pump on top of
+    the one already running from power-on, corrupting both."""
+    return _last_result
 
 
 def run(config_path=CONFIG_PATH, secrets_path=SECRETS_PATH,
@@ -372,4 +402,6 @@ def run(config_path=CONFIG_PATH, secrets_path=SECRETS_PATH,
     # Every call above is non-blocking by contract or a one-shot native
     # call documented as returning immediately (native/README.md).
     # run() returning here is the "REPL stays live" guarantee.
+    global _last_result
+    _last_result = result
     return result

@@ -158,6 +158,19 @@ def test_reaches_ready_and_opens_v5_udp_socket():
     assert any(cmd.startswith(b"AT+CIPSTART=4,\"UDP\"") for cmd in commands)
 
 
+def test_debug_trace_records_last_command_and_raw_reply_lines():
+    """Bench-diagnostic AT trace (sprint 007 ticket 009): `state()`
+    alone did not explain a live divergence hit on tovez (link reports
+    "ready" yet the bench Mac never sees the device on the network) --
+    `debug_trace()` is the fallback that exposes the module's own raw
+    words. Confirm it actually captures the CWJAP query and its reply."""
+    link, serial = make_link()
+    run_until_ready(link)
+    last_command, lines = link.debug_trace()
+    assert last_command is not None
+    assert any("CWJAP" in line for line in lines)
+
+
 def test_no_at_command_is_ever_sent_one_byte_at_a_time():
     """Landmine: per-char AT sends flood the module. Every write() call
     during bring-up must carry a whole command/payload, never a single
