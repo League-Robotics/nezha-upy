@@ -108,6 +108,31 @@ call) and returns ``None`` -- ``protocol.py``'s ``_handle_estop()``
 never inspects an ``on_estop()`` return value at all (``ESTOP`` is never
 acked at the wire level, so there is no ``Result`` to hand back).
 
+``on_run(name, args)`` (sprint 007 ticket 012, ``protocol.md`` Sec 6.3):
+this port's own security-boundary decision -- an explicit, EMPTY-BY-
+DEFAULT registration allowlist (a plain ``{name: callable}`` dict, built
+at construction from an optional ``run_functions`` mapping and growable
+afterward via ``register_run()``), never a ``globals()``/``getattr()``
+blanket lookup. Sec 9.7's own explicit warning to a dynamic-language
+porter is the reason: "everything importable is remotely callable
+unless the porter deliberately restricts it." This ticket registers no
+real function -- every ``RUN`` this adapter receives answers
+``Result.UNKNOWN`` until some future ticket calls ``register_run()``
+with something real; that is the correct behavior for an adapter with
+an empty allowlist, not a stub left unfinished (mirrors the C++
+archetype's own ``DiffDriveAdapter``, which registers nothing and
+answers every ``RUN`` with ``ERR_UNKNOWN`` for the same reason).
+``args`` (a list of raw, undecoded ``bytes`` tokens -- ``protocol.py``
+performs no type conversion, Sec 6.3's own "the handler holds no
+function table" posture) are handed to the registered callable
+positionally; a registered function raising ANY exception (wrong
+arity, a byte string that will not convert, or anything else) is
+caught and mapped to ``Result.BADARG`` rather than propagating out of
+``on_run()`` and crashing the caller -- ``protocol.py``'s own docstring
+notes a registered function "must return promptly," but nothing
+requires it to be exception-clean, and a synchronous wire dispatch path
+is the wrong place to let one raise.
+
 ``on_tlm(mode)`` persists ``mode`` (one of the six decoded wire strings,
 already validated by the handler) as this adapter's own single, shared
 value -- ``protocol.md`` Sec 6's table entry: "mode-specific behavior
@@ -244,9 +269,15 @@ class ProtocolAdapter(object):
     handler that shares this adapter."""
 
     def __init__(self, move_queue, config_dispatch, counts_per_length,
-                 name, serial, drivetrain, profile, version, now_fn=None):
+                 name, serial, drivetrain, profile, version, now_fn=None,
+                 run_functions=None):
         self._move_queue = move_queue
         self._config_dispatch = config_dispatch
+        # protocol.md Sec 6.3: the registration table IS the security
+        # boundary for RUN -- empty by default (module docstring), a
+        # real ``{name: callable}`` dict (not globals()/getattr()), so
+        # an unregistered RUN call always answers Result.UNKNOWN.
+        self._run_functions = dict(run_functions) if run_functions else {}
         # Non-positive rejected, falls back to 1.0 (mm == counts) --
         # mirrors DiffDriveAdapter's own constructor guard (module
         # docstring) rather than dividing by zero in on_wheels() later.
@@ -382,6 +413,44 @@ class ProtocolAdapter(object):
         ``config.WHEEL_CONTROL_FIELDS``'s own declaration order (module
         docstring's field-name-exposure decision)."""
         return _FIELD_NAMES[index]
+
+    # ---- invocation by name (protocol.md Sec 6.3) ------------------------
+
+    def register_run(self, name, func):
+        """Adds one entry to the ``RUN`` allowlist -- the security
+        boundary itself (module docstring): a function is invocable
+        over the wire once, and only once, it is registered here by
+        name. This ticket calls this method for nothing real; it only
+        proves the mechanism (empty -> ``Result.UNKNOWN`` for
+        anything) -- populating it with an actual function is future
+        work."""
+        self._run_functions[name] = func
+
+    def on_run(self, name, args):
+        """``name`` is already ASCII-decoded by ``protocol.py`` (the
+        same courtesy it extends GET/SET names); ``args`` is a list of
+        RAW, undecoded ``bytes`` tokens -- this adapter (not the
+        handler) owns any type conversion a registered function needs
+        (protocol.md Sec 6.3). Returns ``(Result, value, has_value)``:
+        ``Result.UNKNOWN`` for a name with no registered entry;
+        ``Result.BADARG`` if calling the registered function raises
+        ANY exception (wrong arity, an argument that will not convert,
+        or anything else the function itself raises); otherwise
+        ``Result.OK`` with ``has_value`` true and ``value`` set only
+        when the function returned a non-``None`` result -- a ``None``
+        return is treated as void, matching protocol.md Sec 6.3's own
+        "function returned nothing (void) -> nothing beyond the ack"
+        row."""
+        func = self._run_functions.get(name)
+        if func is None:
+            return protocol.Result.UNKNOWN, None, False
+        try:
+            value = func(*args)
+        except Exception:
+            return protocol.Result.BADARG, None, False
+        if value is None:
+            return protocol.Result.OK, None, False
+        return protocol.Result.OK, value, True
 
     # ---- telemetry mode (protocol.md Sec 6) -------------------------------
 

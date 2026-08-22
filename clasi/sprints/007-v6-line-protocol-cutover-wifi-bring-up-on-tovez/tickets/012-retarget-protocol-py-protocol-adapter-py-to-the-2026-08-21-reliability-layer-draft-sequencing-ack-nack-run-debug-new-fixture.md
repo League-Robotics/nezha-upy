@@ -2,7 +2,7 @@
 id: '012'
 title: 'Retarget protocol.py/protocol_adapter.py to the 2026-08-21 reliability-layer
   draft: sequencing, ack/nack, RUN/debug, new fixture'
-status: open
+status: done
 use-cases:
 - SUC-001
 - SUC-002
@@ -225,52 +225,183 @@ kind of thing to override in review — they are recorded, not hidden.
 
 ## Acceptance Criteria
 
-- [ ] `reference/protocol-draft-2026-08-21.md` exists: a verbatim,
+- [x] `reference/protocol-draft-2026-08-21.md` exists: a verbatim,
       full-file snapshot of `radio-robot-lib/docs/design/protocol.md`
       as of this ticket's work, with a provenance header (base commit
       `c99e6e8`, uncommitted upstream working tree).
-- [ ] `protocol.py` implements `expected_next`/`last_done`/
+- [x] `protocol.py` implements `expected_next`/`last_done`/
       `gap_outstanding` as per-`ProtocolHandler`-instance state, reset
       by `HELLO`.
-- [ ] Every verb in `PING ID VER STATUS HELP GET SET TLM WHEELS STOP
+- [x] Every verb in `PING ID VER STATUS HELP GET SET TLM WHEELS STOP
       RUN` requires a mandatory trailing `#id`, classified via the
       three-way table (§8.1) *before* verb lookup; `HELLO`/`ESTOP`
       remain unsequenced.
-- [ ] `ok` is gone from every code path; `ack <n> <lastDone>` /
+- [x] `ok` is gone from every code path; `ack <n> <lastDone>` /
       `nack <n> <lastDone>` are emitted exactly per §8.1/§8.4; a
       retransmit (`< expected_next`) never re-executes the verb (a
       resent `WHEELS` does not drive the wheels twice — this needs an
       explicit test, not just inspection).
-- [ ] `err <code> #<id>` (code first) replaces the old `err #<id>
+- [x] `err <code> #<id>` (code first) replaces the old `err #<id>
       <code>` everywhere; the bare `err <code>` (no-id) form is gone.
-- [ ] `ESTOP` replies the bare word `estop`, written after
+- [x] `ESTOP` replies the bare word `estop`, written after
       `on_estop()` executes, for any input whose verb token is
       exactly `ESTOP` (well-formed or with trailing junk) — never
       increments `malformed_count()`.
-- [ ] `STATUS`'s reply carries a `next=<expected_next>` key in
+- [x] `STATUS`'s reply carries a `next=<expected_next>` key in
       addition to its existing keys.
-- [ ] `HELP`'s reply lists 13 verbs, `RUN` last.
-- [ ] `ProtocolHandler.send_debug(text)` exists: sanitizes `\n`/`\r`,
+- [x] `HELP`'s reply lists 13 verbs, `RUN` last.
+- [x] `ProtocolHandler.send_debug(text)` exists: sanitizes `\n`/`\r`,
       truncates to the 240-byte line cap, and `send_debug("")`/
       `send_debug(None)` both emit the bare `debug` line.
-- [ ] `RUN <function> [arg...] #id` is dispatched per the outcome
+- [x] `RUN <function> [arg...] #id` is dispatched per the outcome
       table in the Description (unknown/badarg/void/value-returning/
       bare-`RUN`/`RUN #<id>`-only cases all covered).
-- [ ] `hardware/protocol_adapter.py` gains `on_run(name, args)` backed
+- [x] `hardware/protocol_adapter.py` gains `on_run(name, args)` backed
       by an explicit, empty-by-default registration allowlist (not
       `globals()`); an unregistered `RUN` call returns
       `Result.UNKNOWN`.
-- [ ] `tests/fixtures/protocol_golden_vectors.txt` carries a
+- [x] `tests/fixtures/protocol_golden_vectors.txt` carries a
       `# SUPERSEDED 2026-08-21` banner and is otherwise untouched
       (kept, not deleted).
-- [ ] A new fixture (e.g. `tests/fixtures/protocol_golden_vectors_reliability.txt`)
+- [x] A new fixture (e.g. `tests/fixtures/protocol_golden_vectors_reliability.txt`)
       exists, authored from §6/§8's own tables plus this ticket's
       `RUN`/`debug` additions, and the CPython harness in
       `tests/unit/test_protocol_golden_vectors.py` is re-pointed at it
       for its fixture-driven (non-hand-authored) test cases.
-- [ ] `mpy-cross` compiles `src/core/protocol.py` and
+- [x] `mpy-cross` compiles `src/core/protocol.py` and
       `src/hardware/protocol_adapter.py` cleanly.
-- [ ] `git diff --exit-code -- vendor/` stays clean.
+- [x] `git diff --exit-code -- vendor/` stays clean.
+
+## Completion Notes (2026-08-21)
+
+**Built**: Step 0's snapshot at `reference/protocol-draft-2026-08-21.md`
+(1363 lines incl. an 16-line provenance header, byte-for-byte diff
+against the upstream working tree's `docs/design/protocol.md` is
+empty). `src/core/protocol.py`'s dispatch core was rewritten around
+id-extraction-before-verb-lookup (`_dispatch_sequenced()`), replacing
+the entire `ID_OMITTED`/`ID_ZERO`/`ID_NONZERO`/`ID_MALFORMED`/
+`resolve_trailing_optional_id()`/`_recover_trailing_id()`/
+`_reject_malformed()`/`_reply_ok*`/`_reply_err_bare` machinery per the
+plan; `VERB_TABLE` now lists all 13 verbs (`_SEQUENCED_VERB_TABLE`
+mechanically derived, excluding `HELLO`/`ESTOP`). `send_debug()`/
+`_handle_run()` added; `hardware/protocol_adapter.py` gained
+`on_run()`/`register_run()` with a plain-dict allowlist, empty by
+default. New fixture `tests/fixtures/protocol_golden_vectors_reliability.txt`:
+**37 blocks**, covering in-order ack per verb family (10 blocks),
+retransmit + gap (2 blocks), the gap-stall-and-self-heal chain (1
+multi-action block), ack+err layering incl. adapter-level rejection (3
+blocks), the two "no trailing field / malformed id" no-reply cases (2
+blocks), HELLO's reset (1 block), ESTOP's forgiveness matrix (4
+blocks), RUN's full outcome matrix (6 blocks), telemetry piggyback incl.
+the gap/nack variant (2 blocks), and `debug` (2 blocks) — all 37 pass
+against the retargeted handler on the first run after authoring from
+the spec tables (no vectors needed correction against the
+implementation). The old fixture keeps its `# SUPERSEDED 2026-08-21`
+banner, untouched otherwise.
+`tests/unit/test_protocol_golden_vectors.py`'s fixture-driven harness
+(`_FIXTURE_PATH`, `_apply_setup`, `_run_block`, the `test_golden_vector_block`
+parametrization) is re-pointed at the new fixture; the now-pointless
+skip/`_classify()` machinery (nothing is out-of-scope any more) was
+removed. Added 7 new hand-written tests at the end of that same file
+(clearly delimited, "ticket 012 ... new reliability-layer tests")
+covering what the fixture alone cannot prove: retransmit/gap
+non-re-execution via `wheels_calls` count, `ESTOP` never incrementing
+`malformed_count()`, and `debug`/`RUN`'s embedded-`\n`/`\r`
+sanitization and 240-byte truncation. Added 6 new tests to
+`tests/test_protocol_adapter.py` for `on_run()`'s allowlist mechanics
+(empty-by-default UNKNOWN, no `globals()`/`getattr()` reachability,
+`register_run()` success/void/exception-to-BADARG cases, and an
+end-to-end `ProtocolHandler.feed()` round trip), and fixed that same
+file's one pre-existing test that assumed id-less `TLM`/`STATUS` lines
+(`test_tlm_mode_is_shared_across_two_protocol_handler_instances`) —
+this is an adapter-sharing test, not a wire-shape pin, and the fix is
+mechanical (add `#1` to both lines), so it was kept in this ticket's
+own scope rather than left for ticket 013.
+
+**Full suite**: `python3 -m pytest tests/` → **149 failed, 344 passed,
+518 subtests passed** (was 476 passed / 11 skipped / 518 subtests
+before this ticket). Every failure is a downstream consequence of this
+retarget's own wire-shape changes (mandatory ids on session verbs,
+`ok` deletion, `ESTOP` now replying, 13-verb `HELP`) hitting a
+hand-authored test that still pins the pre-retarget shape — none are
+new bugs. Exactly four files fail, all pre-existing (none touched by
+this ticket beyond the one adapter-sharing fix above):
+
+- `tests/unit/test_protocol_golden_vectors.py` — **134 failed**, all
+  hand-authored `def test_*` functions (not fixture-driven blocks —
+  every one of the 37 new fixture blocks and all 7 of this ticket's own
+  new hand-written tests pass). Failure classes: (a) the `feed()`
+  boundary/blank-line/case/malformed-recovery tests whose own "prove it
+  still works" recovery probe is a bare, id-less `PING`/`HELLO`, now
+  malformed with no reply instead of `pong <n>`; (b) every
+  `test_wrong_arity_*_recovers_id`/`test_*_gets_err_unknown`-style test
+  built on the deleted optional-id recovery rule; (c) all three
+  `test_estop_*` tests pinning "ESTOP never replies"; (d)
+  `test_help_text_is_generated_from_the_dispatch_table` /
+  `test_help_lists_every_verb_this_sprint_scopes_including_stubs`
+  (12-verb HELP, no ids); (e) every GET/SET/TLM/WHEELS/STOP test built
+  on `ok #id`/bare `ok`/`#0`-suppression/`err #id <code>` shapes; (f)
+  every `test_emit_telemetry_*` test, since `emit_telemetry()` now also
+  emits the reliability piggyback line; (g)
+  `test_embedded_nul_immediately_after_verb_is_rejected_not_truncated`
+  and all 64 `test_recovers_after_adversarial_input[...]`/the one
+  `test_recovers_after_every_adversarial_input_in_one_session` case,
+  whose shared recovery probe is the same bare, id-less `PING`.
+- `tests/test_protocol_loopback_boot.py` — **5 failed** (of 6):
+  `test_ping_matches_protocol_md_literal_pong_now_shape`,
+  `test_id_and_ver_match_protocol_md_literal_shapes`,
+  `test_status_carries_every_protocol_md_key_present_not_positional`,
+  `test_help_matches_this_sprints_own_scoped_12_verb_list`,
+  `test_wheels_and_stop_ok_and_err_pair_matches_protocol_md_literal_shapes`
+  — all send id-less commands and/or assert the old `ok #id`/`err #id
+  <code>` shapes through the real boot-assembled engine.
+- `tests/test_comms_loopback.py` — **7 failed** (of 13):
+  `test_ping_replies_with_pong_and_the_adapters_now_value`,
+  `test_id_and_ver_replies`,
+  `test_pump_reads_at_most_one_line_per_transport_per_call`,
+  `test_two_transports_get_two_independent_handlers_sharing_one_adapter`,
+  `test_telemetry_on_emits_every_cadence_tick_even_while_parked`,
+  `test_telemetry_auto_is_silent_while_parked_and_emits_while_active`,
+  `test_telemetry_header_re_emits_once_per_handler_only_on_change` —
+  the first four send id-less `PING`/`ID`/`VER`; the telemetry three
+  assert an exact reply count/shape that doesn't yet account for the
+  piggybacked reliability line.
+- `tests/test_boot_sequence.py` — **3 failed** (of 6, NOT named in the
+  ticket text but found by this ticket's own full-suite run, same root
+  cause): `test_happy_path_configures_diffdrive_and_boots_comms`,
+  `test_fail_closed_path_refuses_motion_but_keeps_comms_alive`,
+  `test_no_secrets_path_skips_wifi_but_boots_everything_else` — each
+  drives a bare, id-less `PING` through the real boot-assembled engine
+  via its own `_tick_and_get_replies()` helper and asserts exactly one
+  reply comes back; now zero do (malformed, no reply), since `PING` is
+  a mandatory-id verb as of this retarget. Flagging this file
+  explicitly for ticket 013 since it was not in this ticket's or the
+  issue's own named list.
+
+**mpy-cross / vendor gates**: `python3 -m pytest tests/test_source_compile_gate.py`
+— 24 passed (covers both `protocol.py` and `protocol_adapter.py` via
+its existing glob). `git diff --exit-code -- vendor/` — clean (exit 0).
+
+**Draft vs. the three recorded ambiguity resolutions**: sanity-checked
+all three against `reference/protocol-draft-2026-08-21.md` while
+implementing; the draft text does not contradict any of them —
+`gap_outstanding`'s set/clear transitions (§8.1's own state-block
+comment "a nack is currently owed", read alongside §8.5's "as long as
+telemetry keeps flowing, a gap keeps producing fresh nacks"), TLM's
+unparseable-mode ack+err2 treatment (§8.4 item 3's general rule, §6's
+"—" being the success-path entry only), and ESTOP never incrementing
+`malformed_count()` (§8.3's "regardless of trailing junk or arity, ANY
+line whose verb token is ESTOP executes") are all directly consistent
+with the implementation as built. The draft was silent on one small
+corner this ticket had to decide on its own: `RUN`'s `ret <value>
+#<id>` line is truncated to the 240-byte cap as ONE formatted string
+(matching `send_debug()`'s own treatment literally, per §6.3's "sanitized
+... exactly like debug's text"), which means a sufficiently long
+returned value could in principle truncate into the trailing `#<id>`
+token itself — the draft does not address preserving the id during
+this truncation (unlike, e.g., its explicit id-is-always-last-token
+framing elsewhere), and this port did not invent a special case for it
+since no worked example or test calls for one.
 
 ## Testing
 

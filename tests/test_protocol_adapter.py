@@ -344,20 +344,108 @@ def test_on_tlm_persists_mode_on_the_adapter():
     assert tlm == "pose"
 
 
+# --- on_run: empty-allowlist-by-default posture (sprint 007 ticket 012) --
+
+def test_on_run_answers_unknown_for_any_name_by_default():
+    """protocol.md Sec 6.3's security-boundary decision, ported: an
+    unregistered RUN always answers Result.UNKNOWN -- this adapter
+    registers nothing real by default (module docstring), so this must
+    hold for ANY name, not just one arbitrarily chosen example."""
+    adapter, _queue, _diffdrive = _make_adapter()
+    for name in ("beep", "drive", "anything_at_all"):
+        result, value, has_value = adapter.on_run(name, [])
+        assert result == protocol.Result.UNKNOWN
+        assert value is None
+        assert has_value is False
+
+
+def test_on_run_does_not_use_globals_or_getattr_lookup():
+    """The allowlist IS the security boundary (module docstring,
+    protocol.md Sec 9.7's own explicit warning) -- a real, importable
+    function in this adapter's own module must NOT become remotely
+    callable just because it exists. ``on_estop`` is a real bound
+    method on the adapter itself; an unregistered RUN naming it must
+    still answer UNKNOWN, not somehow resolve and call it."""
+    adapter, _queue, diffdrive = _make_adapter()
+    result, _value, _has_value = adapter.on_run("on_estop", [])
+    assert result == protocol.Result.UNKNOWN
+    assert diffdrive.estop_calls == 0
+
+
+def test_register_run_makes_a_name_callable_and_returns_its_value():
+    adapter, _queue, _diffdrive = _make_adapter()
+    adapter.register_run("add", lambda a, b: str(int(a) + int(b)))
+    result, value, has_value = adapter.on_run("add", [b"2", b"3"])
+    assert result == protocol.Result.OK
+    assert has_value is True
+    assert value == "5"
+
+
+def test_register_run_void_function_reports_no_value():
+    adapter, _queue, _diffdrive = _make_adapter()
+    calls = []
+    adapter.register_run("beep", lambda: calls.append(1))
+    result, value, has_value = adapter.on_run("beep", [])
+    assert result == protocol.Result.OK
+    assert has_value is False
+    assert value is None
+    assert calls == [1]
+
+
+def test_register_run_function_raising_maps_to_badarg():
+    """A registered function's own exception (wrong arity, an argument
+    that will not convert, or anything else it raises) must never
+    propagate out of on_run() -- this is a synchronous wire-dispatch
+    seam, not a place for a caller's bug to crash the handler."""
+    adapter, _queue, _diffdrive = _make_adapter()
+
+    def _needs_two(a, b):
+        return a + b
+
+    adapter.register_run("needs_two", _needs_two)
+    result, value, has_value = adapter.on_run("needs_two", [b"1"])  # too few args
+    assert result == protocol.Result.BADARG
+    assert value is None
+    assert has_value is False
+
+
+def test_on_run_end_to_end_through_a_real_protocol_handler():
+    """Confirms the allowlist mechanism wired all the way through
+    ProtocolHandler.feed() -- not just the adapter method in
+    isolation."""
+    adapter, _queue, _diffdrive = _make_adapter()
+    adapter.register_run("double", lambda x: str(int(x) * 2))
+    sink = _RecordingSink()
+    handler = protocol.ProtocolHandler(adapter, sink)
+
+    handler.feed(b"RUN double 21 #1\n")
+    assert sink.written == "ack 1 0\nret 42 #1\n"
+
+    handler.feed(b"RUN nosuchfunction #2\n")
+    assert sink.written.endswith("ack 2 0\nerr 1 #2\n")
+
+
 def test_tlm_mode_is_shared_across_two_protocol_handler_instances():
     """sprint.md's Design Rationale: one ProtocolAdapter shared across
     every registered transport's own ProtocolHandler -- TLM is one
     robot-wide subscription, not one per channel. A TLM sent through
     handler #1's line grammar must be visible in handler #2's STATUS
-    reply, because both handlers wrap the SAME adapter instance."""
+    reply, because both handlers wrap the SAME adapter instance.
+
+    Updated for the 2026-08-21 reliability-layer retarget (sprint 007
+    ticket 012): both TLM and STATUS are sequenced verbs now, so each
+    needs its own mandatory ``#<id>`` -- each handler's own
+    ``expected_next`` starts at 1 independently (sequencing state is
+    per-handler-instance, protocol.py's own docstring), so both lines
+    below correctly use ``#1``."""
     adapter, _queue, _diffdrive = _make_adapter()
     sink1 = _RecordingSink()
     sink2 = _RecordingSink()
     handler1 = protocol.ProtocolHandler(adapter, sink1)
     handler2 = protocol.ProtocolHandler(adapter, sink2)
 
-    handler1.feed(b"TLM FULL\n")
-    assert sink1.written == ""  # TLM carries no id, no reply either way
+    handler1.feed(b"TLM FULL #1\n")
+    assert sink1.written == "ack 1 0\n"  # TLM's own reply is the ack alone
 
-    handler2.feed(b"STATUS\n")
+    handler2.feed(b"STATUS #1\n")
     assert "tlm=full" in sink2.written

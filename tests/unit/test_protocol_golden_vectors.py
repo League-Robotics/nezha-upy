@@ -1,8 +1,10 @@
-"""tests/unit/test_protocol_golden_vectors.py -- ticket 001 gate:
+"""tests/unit/test_protocol_golden_vectors.py -- ticket 001 gate,
+retargeted by ticket 012 (2026-08-21 reliability-layer retarget):
 ``src/core/protocol.py``'s ``ProtocolHandler`` against
-``tests/fixtures/protocol_golden_vectors.txt`` (radio-robot-lib's own
-cross-language conformance fixture, copied verbatim), plus explicit
-unit tests for what a tidy golden vector never exercises.
+``tests/fixtures/protocol_golden_vectors_reliability.txt`` (this
+repo's own fixture, mechanically derived from
+``reference/protocol-draft-2026-08-21.md``'s Sec 6/8 tables), plus
+explicit unit tests for what a tidy golden vector never exercises.
 
 Shape ported from radio-robot-lib's
 ``tests/protocol/test_protocol_harness.py`` -- two kinds of coverage,
@@ -10,19 +12,25 @@ same as there:
 
 1. ``test_golden_vector_block`` drives every block in the fixture
    through ``ProtocolHandler`` + a mock Adapter/Sink and asserts the
-   sink's captured output line-for-line. Blocks this sprint's reduced
-   verb scope does not (or does not yet) implement are marked
-   ``pytest.mark.skip`` per-block, with a reason naming the verb and
-   which ticket (if any) implements it -- see ``_classify()`` below.
-   Session verbs (HELLO/PING/ID/VER/STATUS/HELP), ``ESTOP``, and every
-   malformed-line-recovery vector (unknown verb, wrong arity, the
-   `#id` recovery rule, the lowercase-verb drop) run for real.
+   sink's captured output line-for-line. As of the 2026-08-21 retarget
+   every verb this sprint scopes in (13, RUN/debug included) is fully
+   implemented, so -- unlike the pre-retarget fixture this harness used
+   to drive -- EVERY block in the new fixture runs for real; there is
+   no per-block skip/classify mechanism any more (there is nothing left
+   to defer to a later ticket).
 
-2. The individual ``test_*`` functions below cover ``feed()``'s
-   byte-block-boundary contract, the 240-byte overflow-discard rule,
-   blank/all-whitespace-line silence, the malformed-line ``#id``
-   recovery rule in more depth than the fixture alone provides, and
-   ``HELP``'s "generated from the dispatch table" guarantee.
+2. The individual ``test_*`` functions below (largely UNCHANGED by
+   this retarget -- see each one's own docstring for which pre-
+   retarget shapes it still pins, pending ticket 013's reconciliation)
+   cover ``feed()``'s byte-block-boundary contract, the 240-byte
+   overflow-discard rule, blank/all-whitespace-line silence, the
+   malformed-line recovery rules in more depth than the fixture alone
+   provides, and ``HELP``'s "generated from the dispatch table"
+   guarantee. A NEW section at the end of this file (search for
+   "ticket 012 (2026-08-21 retarget): new reliability-layer tests")
+   adds hand-written coverage for what the fixture alone cannot prove
+   (e.g. a resent id must not re-drive the wheels -- a call-count
+   assertion, not a wire-visible one).
 
 Run with::
 
@@ -37,7 +45,11 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _SRC_DIR = _REPO_ROOT / "src"
 _THIS_DIR = Path(__file__).resolve().parent
-_FIXTURE_PATH = _REPO_ROOT / "tests" / "fixtures" / "protocol_golden_vectors.txt"
+# Ticket 012 (2026-08-21 retarget): re-pointed from the now-superseded
+# protocol_golden_vectors.txt (still present, banner-marked, gating
+# nothing) to this repo's own reliability-layer fixture.
+_FIXTURE_PATH = (_REPO_ROOT / "tests" / "fixtures"
+                  / "protocol_golden_vectors_reliability.txt")
 
 for _path in (_SRC_DIR, _THIS_DIR):
     if str(_path) not in sys.path:
@@ -71,82 +83,18 @@ def test_fixture_parses_with_no_errors():
 
 
 def test_fixture_block_count_is_stable():
-    """Pinned so a future re-sync of the fixture (or an accidental
-    change to the parser) shows up as a deliberate diff here, not a
-    silent drop. Recount if protocol_golden_vectors.txt is re-synced
-    from radio-robot-lib with new vectors."""
-    assert len(_BLOCKS) == 43
+    """Pinned so a future edit of the fixture (deliberate or not) shows
+    up as a visible diff here, not a silent drop. Recount if
+    protocol_golden_vectors_reliability.txt gains or loses vectors."""
+    assert len(_BLOCKS) == 37
 
 
 # ---------------------------------------------------------------------------
-# Classify each block by the verb (or action kind) it exercises, so
-# blocks outside this ticket's -- or this sprint's -- scope are marked
-# skip cleanly, by verb, rather than deleted from the fixture-driven
-# run. See this module's own docstring and src/core/protocol.py's for
-# the sprint-scope rationale (RUN/debug never ported at all;
-# GET/SET/TLM/WHEELS/STOP deferred to tickets 002/003).
+# Unlike the pre-retarget fixture this harness used to drive, EVERY
+# verb this sprint scopes in (13, RUN/debug included) is fully
+# implemented as of the 2026-08-21 retarget -- there is no per-block
+# skip/classify mechanism any more; every block below runs for real.
 # ---------------------------------------------------------------------------
-
-_OUT_OF_SPRINT_SCOPE_VERBS = (b"RUN",)
-
-
-def _classify(block):
-    """Returns ``(action, reason)`` -- ``action`` is ``"run"`` or
-    ``"skip"``; ``reason`` is ``None`` for ``"run"``, else a str
-    explaining why.
-
-    Ticket 003 un-skips WHEELS/STOP (real bodies land in this ticket)
-    and every EMIT-driven telemetry block (``emit_telemetry()`` is
-    this ticket's scope too) -- only RUN, the RUN-listing HELP vector,
-    and DEBUG (robot-to-host-only, never ported at all, per this
-    sprint's own scope) stay skipped, permanently."""
-    kinds = set(kind for kind, _payload in block.actions)
-    if "DEBUG" in kinds:
-        return "skip", (
-            "sendDebug()/the robot-to-host `debug` emission is outside "
-            "this sprint's verb scope -- never ported (see "
-            "src/core/protocol.py's own docstring)")
-
-    in_actions = [payload for kind, payload in block.actions if kind == "IN"]
-    if in_actions:
-        stripped = in_actions[0].strip(" ")
-        verb_text = stripped.split(" ", 1)[0] if stripped else ""
-        verb_bytes = verb_text.encode("ascii")
-
-        if verb_bytes in _OUT_OF_SPRINT_SCOPE_VERBS:
-            return "skip", (
-                "RUN is outside this sprint's verb scope entirely "
-                "(sprint.md's 'In Scope' verb list omits it) -- never ported")
-        if verb_text == "HELP" and "RUN" in block.expected_out[0].split(" "):
-            return "skip", (
-                "this fixture's HELP vector lists RUN because "
-                "radio-robot-lib's own archetype implements 13 verbs; this "
-                "sprint implements only the 12 verbs sprint.md scopes in, "
-                "so HELP's correct text here has no RUN -- pinned directly "
-                "by test_help_lists_every_verb_this_sprint_scopes_including_stubs "
-                "below instead of via this fixture block")
-
-    # EMIT-only blocks (no "IN" action at all) fall through to here and
-    # run for real -- emit_telemetry() is ticket 003's scope.
-    return "run", None
-
-
-def test_golden_vector_classification_counts():
-    """Pinned split so a change to _classify() (or a fixture re-sync)
-    is visible as a deliberate count change, not a silent drift in how
-    much of the fixture this ticket actually exercises. Ticket 002
-    moved the fixture's 12 SET blocks from skip to run: 12 (ticket 001)
-    + 12 (SET, ticket 002) = 24 run, 31 - 12 = 19 skip. Ticket 003 moves
-    4 WHEELS blocks + 3 STOP blocks + 1 multi-frame EMIT block from skip
-    to run: 24 + 8 = 32 run, 19 - 8 = 11 skip (2 DEBUG + 8 RUN + 1
-    RUN-listing HELP block, all permanently skipped -- RUN/debug are
-    never ported at all, per this sprint's own verb scope)."""
-    run_count = sum(1 for b in _BLOCKS if _classify(b)[0] == "run")
-    skip_count = sum(1 for b in _BLOCKS if _classify(b)[0] == "skip")
-    assert run_count == 32
-    assert skip_count == 11
-    assert run_count + skip_count == len(_BLOCKS)
-
 
 # The fixture's own SETUP key comment: "setresult <ordinal> --
 # Protocol::Result's declaration-order ordinal, see
@@ -199,11 +147,23 @@ def _apply_setup(adapter, key, tokens):
         adapter.wheels_result = _SETRESULT_ORDINAL_TO_RESULT[int(tokens[0])]
     elif key == "stopresult":
         adapter.stop_result = _SETRESULT_ORDINAL_TO_RESULT[int(tokens[0])]
+    elif key == "runresult":
+        adapter.run_result = _SETRESULT_ORDINAL_TO_RESULT[int(tokens[0])]
+    elif key == "runvalue":
+        adapter.run_value = tokens[0]
+    elif key == "runhasvalue":
+        adapter.run_has_value = bool(int(tokens[0]))
+    elif key == "getoverride":
+        name, value = tokens
+        adapter.get_overrides[name] = float(value)
+    elif key == "fieldnames":
+        adapter.field_names = list(tokens)
     else:
         raise ValueError(
-            "SETUP key %r not recognized by this ticket's mock adapter -- "
-            "if this fired for a block _classify() marked \"run\", either "
-            "the classifier or the mock adapter needs to grow to match" % (key,))
+            "SETUP key %r not recognized by this fixture's mock adapter -- "
+            "protocol_golden_vectors_reliability.txt's own header comment "
+            "lists every key this harness supports; either the fixture or "
+            "_apply_setup() needs to grow to match" % (key,))
 
 
 def _apply_emit_action(handler, payload):
@@ -231,18 +191,21 @@ def _run_block(block):
             handler.feed((payload + "\n").encode("ascii"))
         elif kind == "EMIT":
             _apply_emit_action(handler, payload)
+        elif kind == "DEBUG":
+            # protocol.md Sec 6.2: send_debug() is unsolicited,
+            # robot-to-host only -- never reached through feed(), so
+            # this fixture's own DEBUG action calls it directly, the
+            # same way EMIT calls emit_telemetry() directly.
+            handler.send_debug(payload)
         else:
-            raise ValueError(
-                "action kind %r not supported by this ticket's runner -- "
-                "DEBUG blocks are always classified \"skip\"" % (kind,))
+            raise ValueError("action kind %r not supported" % (kind,))
     return sink.lines()
 
 
-_PARAMS = []
-for _index, _block in enumerate(_BLOCKS):
-    _action, _reason = _classify(_block)
-    _marks = [pytest.mark.skip(reason=_reason)] if _action == "skip" else []
-    _PARAMS.append(pytest.param(_index, _block, id="block%02d" % _index, marks=_marks))
+_PARAMS = [
+    pytest.param(_index, _block, id="block%02d" % _index)
+    for _index, _block in enumerate(_BLOCKS)
+]
 
 
 @pytest.mark.parametrize("index,block", _PARAMS)
@@ -1480,3 +1443,126 @@ def test_recovers_after_every_adversarial_input_in_one_session():
         "-- a PING somewhere in the session did not come back, so state "
         "from an earlier case corrupted a later one"
         % (len(_ADVERSARIAL_RECOVERY_CASES), pong_count))
+
+
+# ---------------------------------------------------------------------------
+# ticket 012 (2026-08-21 retarget): new reliability-layer tests. These
+# cover what the new fixture (protocol_golden_vectors_reliability.txt)
+# cannot prove on its own -- the fixture only sees the SINK's wire
+# output, not the mock adapter's own call counts, so the acceptance
+# criterion "a resent WHEELS must not drive the wheels twice" (and its
+# gap-side counterpart, "a gapped WHEELS must not execute at all")
+# needs its own hand-written assertion against wheels_calls. Everything
+# else in this section either exercises a call-count the fixture can't
+# see, or a wire-shape corner the mechanically-derived fixture vectors
+# did not happen to cover.
+#
+# Unlike every OTHER section above, this one is NOT ticket 013's to
+# reconcile -- it is this ticket's own new coverage for its own new
+# behavior, not a pin of the pre-retarget scheme.
+# ---------------------------------------------------------------------------
+
+def test_retransmit_does_not_redrive_the_wheels():
+    """protocol.md Sec 8.1's own named hazard: "a resent WHEELS ...
+    must NOT drive the wheels a second time." Resending the SAME
+    already-accepted id must reach on_wheels() exactly once, with the
+    second (retransmit) reply echoing the highest already-accepted id,
+    not the resent one."""
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"WHEELS 100 100 1000 #1\n")
+    assert sink.lines() == ["ack 1 0"]
+    assert adapter.wheels_calls == [(100.0, 100.0, 1000.0, 1)]
+    sink.clear()
+
+    handler.feed(b"WHEELS 100 100 1000 #1\n")  # the exact same line again
+    assert sink.lines() == ["ack 1 0"], (
+        "a retransmit's ack must echo the highest ALREADY-accepted id "
+        "(expected_next - 1), not advance the sequence again")
+    assert adapter.wheels_calls == [(100.0, 100.0, 1000.0, 1)], (
+        "on_wheels() must have been called exactly ONCE -- the retransmit "
+        "must not have re-executed the command")
+
+
+def test_gap_does_not_execute_the_wheels_at_all():
+    """The gap branch's own rule (Sec 8.1): "do NOT execute" -- an
+    out-of-order id must never reach the Adapter, not even once."""
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"WHEELS 100 100 1000 #5\n")  # expected_next is 1
+    assert sink.lines() == ["nack 1 0"]
+    assert adapter.wheels_calls == [], (
+        "a gapped id must never reach on_wheels() at all")
+
+
+def test_gap_then_retransmit_of_the_gapped_id_still_does_not_execute():
+    """Once a gap is filled and the sequence has moved on, the id that
+    ONCE would have been in order is now itself a stale retransmit --
+    still must never execute, and still echoes the (by-then) highest
+    accepted id."""
+    handler, adapter, sink = _new_handler()
+    handler.feed(b"WHEELS 1 1 1 #1\n")  # in order, executes
+    handler.feed(b"WHEELS 2 2 2 #2\n")  # in order, executes
+    sink.clear()
+
+    handler.feed(b"WHEELS 3 3 3 #1\n")  # long-stale retransmit of #1
+    assert sink.lines() == ["ack 2 0"]
+    assert adapter.wheels_calls == [
+        (1.0, 1.0, 1.0, 1),
+        (2.0, 2.0, 2.0, 2),
+    ], "the stale id must not have produced a third on_wheels() call"
+
+
+def test_estop_never_increments_malformed_count():
+    """Resolved ambiguity #3 (this ticket's own record): ESTOP inspects
+    nothing about its own line under the 2026-08-21 forgiveness rule,
+    so there is no wrong-arity case left to count -- unlike the
+    pre-retarget behavior this supersedes (which still bumped
+    malformed_count() on a trailing-field ESTOP)."""
+    handler, adapter, sink = _new_handler()
+    for line in (b"ESTOP\n", b"ESTOP 1 2 3\n", b"ESTOP #5\n", b"ESTOP #abc\n"):
+        handler.feed(line)
+    assert handler.malformed_count() == 0
+    assert sink.lines() == ["estop"] * 4
+    assert adapter.estop_calls == 4
+
+
+def test_send_debug_strips_embedded_newline_and_carriage_return():
+    """protocol.md Sec 6.2: '\\n'/'\\r' are STRIPPED (removed, not just
+    trimmed from the ends) so free text can never forge a second line
+    onto the wire -- this is the one sanitization case the text-based
+    fixture format cannot itself spell (a fixture line cannot contain a
+    literal embedded newline)."""
+    handler, adapter, sink = _new_handler()
+    handler.send_debug("line one\nline two\r\nstill one line")
+    assert sink.lines() == ["debug line oneline twostill one line"]
+
+
+def test_send_debug_none_and_text_that_sanitizes_to_nothing_are_the_same_bare_line():
+    handler, adapter, sink = _new_handler()
+    handler.send_debug(None)
+    handler.send_debug("")
+    handler.send_debug("\n\r\n\r")  # sanitizes down to the empty string
+    assert sink.lines() == ["debug", "debug", "debug"]
+
+
+def test_run_ret_value_is_sanitized_and_truncated_like_debug_text():
+    """RUN's returned value gets the SAME treatment send_debug()'s text
+    does (protocol.md Sec 6.3): '\\n'/'\\r' stripped, whole line
+    truncated (never overflowed) to the 240-byte cap."""
+    handler, adapter, sink = _new_handler()
+    adapter.run_result = protocol.Result.OK
+    adapter.run_value = "has\na\rnewline"
+    adapter.run_has_value = True
+    handler.feed(b"RUN echo #1\n")
+    assert sink.lines() == ["ack 1 0", "ret hasanewline #1"]
+
+    sink.clear()
+    long_value = "X" * 300
+    adapter.run_value = long_value
+    handler.feed(b"RUN echo #2\n")
+    lines = sink.lines()
+    assert lines[0] == "ack 2 0"
+    ret_line = lines[1]
+    assert len(ret_line) <= protocol.MAX_LINE_BYTES - 1, (
+        "the formatted ret line must be truncated to fit the 240-byte "
+        "cap including its trailing newline")
+    assert ret_line.startswith("ret " + "X" * 10)

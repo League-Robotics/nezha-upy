@@ -1,3 +1,18 @@
+# SUPERSEDED 2026-08-21: this fixture gates the PRE-reliability-layer
+# scheme (optional ids, `ok` acceptance, `err #<id> <code>` field
+# order, no ESTOP reply, no RUN/debug). Sprint 007 ticket 012 retargets
+# `src/core/protocol.py`/`src/hardware/protocol_adapter.py` to the
+# 2026-08-21 reliability-layer draft (mandatory sequence ids,
+# ack/nack, RUN/debug) -- most vectors below are now wrong BY DESIGN
+# under the new scheme, so this file no longer gates anything.
+# tests/unit/test_protocol_golden_vectors.py's fixture-driven harness
+# is re-pointed at tests/fixtures/protocol_golden_vectors_reliability.txt
+# instead. Kept, not deleted, per this project's own established
+# convention (radio-robot-lib may still want this exact scheme if its
+# own C++ archetype has not caught up to the reliability layer yet
+# either) -- see reference/protocol-draft-2026-08-21.md for the design
+# authority the new fixture is derived from.
+#
 # golden_vectors.txt -- cross-language conformance fixture (see
 # docs/design/protocol.md S9.4's "archetype" framing), for the C++
 # handler under tests/protocol/test_protocol_harness.py::test_golden_vectors.

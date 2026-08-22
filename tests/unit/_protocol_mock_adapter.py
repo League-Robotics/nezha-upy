@@ -16,8 +16,17 @@ the GET/SET/TLM canned answers (``get_overrides``/``field_names`` for
 ``on_set()``, ``tlm_calls`` for ``on_tlm()``). Ticket 003 (WHEELS/STOP)
 adds ``wheels_result``/``wheels_calls`` for ``on_wheels()`` and
 ``stop_result``/``stop_calls`` for ``on_stop()`` -- same canned-Result
-convention as ``set_result``. This file is purely additive across the
-sprint, same as ``protocol.py`` itself. This file is CPython-only test
+convention as ``set_result``. Ticket 012 (2026-08-21 reliability-layer
+retarget) adds ``run_result``/``run_value``/``run_has_value``/
+``run_calls`` for ``on_run()`` -- same canned-answer convention,
+returning the ``(Result, value, has_value)`` triple ``protocol.py``'s
+own ``_handle_run()`` expects; this mock does NOT implement a real
+registration allowlist the way ``hardware/protocol_adapter.py`` does
+(that is what ``tests/test_protocol_adapter.py``'s own tests exercise)
+-- it always returns the canned triple regardless of ``name``/``args``,
+mirroring ``on_set()``'s own "ignore the specifics, return the canned
+answer" convention. This file is purely additive across the sprint,
+same as ``protocol.py`` itself. This file is CPython-only test
 scaffolding; nothing under ``src/`` imports it."""
 
 from core import protocol
@@ -82,6 +91,16 @@ class MockAdapter(object):
         self.stop_result = protocol.Result.OK
         self.stop_calls = []
 
+        # ---- RUN canned answers (ticket 012 scope, 2026-08-21
+        # retarget) -- same "one canned Result for every call in a
+        # test" convention as wheels_result/stop_result above, plus the
+        # value/has_value pair RUN's own outcome table needs (protocol.md
+        # Sec 6.3: void vs. value-returning are different reply shapes).
+        self.run_result = protocol.Result.OK
+        self.run_value = None
+        self.run_has_value = False
+        self.run_calls = []
+
     def identity(self):
         self.identity_calls += 1
         return (self.name, self.serial, self.drivetrain, self.profile,
@@ -126,6 +145,10 @@ class MockAdapter(object):
     def on_stop(self, reply_id):
         self.stop_calls.append(reply_id)
         return self.stop_result
+
+    def on_run(self, name, args):
+        self.run_calls.append((name, args))
+        return self.run_result, self.run_value, self.run_has_value
 
 
 class RecordingSink(protocol.Sink):
