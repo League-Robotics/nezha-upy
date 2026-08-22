@@ -315,6 +315,36 @@ class ConfigDispatch:
         dict, JSON field names -- what ``build_cfg_reply()`` reads from."""
         return self._wheel_control
 
+    def get_field(self, name):
+        """Name-keyed read accessor (sprint 007 ticket 005: v6's
+        ``GET``/``SET`` are by-name, not by-index -- ``src/hardware/
+        protocol_adapter.py``'s ``on_get()`` delegates here rather than
+        reaching into ``_wheel_control`` directly). ``name`` is a JSON
+        ``wheel_control`` field name (``WHEEL_CONTROL_FIELDS``'s left
+        column, e.g. ``"v_min"``) -- returns its current live value, or
+        ``None`` if ``name`` is not one of the 15 known fields.
+        Additive: does not touch ``_handle_set_field()``'s own binary,
+        index-keyed path, which retires separately (ticket 006)."""
+        for json_field, _kernel_field in WHEEL_CONTROL_FIELDS:
+            if json_field == name:
+                return self._wheel_control.get(json_field)
+        return None
+
+    def set_field(self, name, value):
+        """Name-keyed write accessor, the ``SET`` counterpart to
+        ``get_field()`` above (sprint 007 ticket 005). Applies ``value``
+        to ``name`` live, RAM only -- no on-flash persistence, matching
+        ``_handle_set_field()``'s own contract and ``protocol.md`` Sec 7
+        ("the library stores none"). Returns ``True`` on success,
+        ``False`` if ``name`` is not one of the 15 known
+        ``WHEEL_CONTROL_FIELDS`` names -- the caller (``ProtocolAdapter.
+        on_set()``) maps a ``False`` onto the wire's ``Result.UNKNOWN``."""
+        for json_field, _kernel_field in WHEEL_CONTROL_FIELDS:
+            if json_field == name:
+                self._wheel_control[json_field] = value
+                return True
+        return False
+
     def build_cfg_reply(self, group_id):
         """Pure function: pack the given group's current field values
         into a COBS+CRC-framed ``CFG`` wire frame (group_id:u8 then 15x

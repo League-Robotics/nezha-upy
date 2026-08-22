@@ -84,6 +84,7 @@ freeze(
         "core/wire.py",
         "hardware/__init__.py",
         "hardware/motion.py",
+        "hardware/protocol_adapter.py",
         "devices/__init__.py",
         "devices/line.py",
         "devices/otos.py",

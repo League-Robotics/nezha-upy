@@ -248,3 +248,38 @@ def test_get_config_with_no_transports_still_acks():
 def test_unknown_verb_returns_none():
     dispatch = _make_dispatch()
     assert dispatch.handle_command("WHEELS", b"", 1000) is None
+
+
+# --- name-keyed get_field/set_field (sprint 007 ticket 005) -------------
+# v6's GET/SET are by-name, not by-index -- src/hardware/
+# protocol_adapter.py's on_get()/on_set() delegate to these rather than
+# reaching into ConfigDispatch's private _wheel_control dict directly.
+
+def test_get_field_returns_live_value_for_known_name():
+    dispatch = _make_dispatch()
+    assert dispatch.get_field("v_min") == pytest.approx(
+        dispatch.current_wheel_control()["v_min"])
+
+
+def test_get_field_returns_none_for_unknown_name():
+    dispatch = _make_dispatch()
+    assert dispatch.get_field("not_a_real_field") is None
+
+
+def test_set_field_by_name_applies_live_and_returns_true():
+    dispatch = _make_dispatch()
+    assert dispatch.set_field("v_min", 42.0) is True
+    assert dispatch.current_wheel_control()["v_min"] == pytest.approx(42.0)
+    assert dispatch.get_field("v_min") == pytest.approx(42.0)
+
+
+def test_set_field_by_name_returns_false_for_unknown_name():
+    dispatch = _make_dispatch()
+    assert dispatch.set_field("not_a_real_field", 1.0) is False
+
+
+def test_get_field_and_set_field_cover_every_wheel_control_field():
+    dispatch = _make_dispatch()
+    for json_field, _kernel_field in config.WHEEL_CONTROL_FIELDS:
+        assert dispatch.set_field(json_field, 7.0) is True
+        assert dispatch.get_field(json_field) == pytest.approx(7.0)

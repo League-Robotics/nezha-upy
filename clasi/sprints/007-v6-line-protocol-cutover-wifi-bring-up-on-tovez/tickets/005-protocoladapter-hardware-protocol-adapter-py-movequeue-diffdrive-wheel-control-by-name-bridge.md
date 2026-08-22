@@ -2,9 +2,12 @@
 id: '005'
 title: 'ProtocolAdapter (hardware/protocol_adapter.py): MoveQueue/diffdrive + wheel_control-by-name
   bridge'
-status: open
-use-cases: [SUC-001, SUC-003]
-depends-on: ['004']
+status: done
+use-cases:
+- SUC-001
+- SUC-003
+depends-on:
+- '004'
 github-issue: ''
 issue: port-v6-line-protocol-hard-cutover-from-v5.md
 completes_issue: true
@@ -79,33 +82,85 @@ record the final list in this ticket's completion notes.
 
 ## Acceptance Criteria
 
-- [ ] `src/hardware/protocol_adapter.py` exists with `ProtocolAdapter`
+- [x] `src/hardware/protocol_adapter.py` exists with `ProtocolAdapter`
       implementing `identity`/`now`/`status`/`onWheels`/`onStop`/
       `onEstop`/`onGet`/`onSet`/`onTlm`.
-- [ ] `onWheels` scales by `countsPerLength` and calls
+- [x] `onWheels` scales by `countsPerLength` and calls
       `MoveQueue.diffdrive.drive(velocity, twist, lease)` — a test
       asserts the scaled velocity/twist values reach `drive()`, not
       raw duty, and that swapping which argument is "left" would flip
       the test (the wheel-swap sign-test convention this repo's other
       motion code already uses).
-- [ ] 5000 ms lease ceiling enforced in the adapter (`kRange` above
+- [x] 5000 ms lease ceiling enforced in the adapter (`kRange` above
       it), not the handler.
-- [ ] `onStop`/`onEstop` call `MoveQueue.diffdrive`'s neutral/estop
+- [x] `onStop`/`onEstop` call `MoveQueue.diffdrive`'s neutral/estop
       paths; `onEstop` returns nothing.
-- [ ] `config.ConfigDispatch` gains name-keyed `get_field`/`set_field`
+- [x] `config.ConfigDispatch` gains name-keyed `get_field`/`set_field`
       (or equivalent) accessors; its old binary
       `handle_command`/`_handle_set_field`/`_handle_config`/
       `_handle_get_config`/`build_cfg_reply` are left in place for now
       (they retire in ticket 006, which also deletes the `wire.py`
       dependency they need) — this ticket only adds the new
       accessors, it does not yet delete the old ones.
-- [ ] `onGet`/`onSet` resolve names through the new accessors;
+- [x] `onGet`/`onSet` resolve names through the new accessors;
       unknown-name behavior matches `protocol.md` §7 exactly (`onGet`
       silent-false, `onSet` returns `kUnknown`).
-- [ ] Offline-tested against a fake `diffdrive`/`config` stub
+- [x] Offline-tested against a fake `diffdrive`/`config` stub
       (mirrors the existing `comms.py`/`motion.py` interface-seam
       convention), covering every method above.
-- [ ] `py_compile`/`mpy-cross` clean.
+- [x] `py_compile`/`mpy-cross` clean.
+
+## Completion Notes
+
+- **GET/SET field-name list** (protocol.md §7: "which names are valid
+  is entirely the adapter's business"): the 15 `wheel_control` JSON
+  field names `config.WHEEL_CONTROL_FIELDS` already declares, exposed
+  VERBATIM (no prefix) and in that same declaration order for bare
+  `GET`'s enumeration — `v_min`, `bias_max`, `tau_adapt`, `a_steady`,
+  `deficit_threshold`, `deficit_window`, `pid_kp`, `pid_ki`,
+  `pid_i_max`, `pid_kaff`, `pid_max`, `pos_err_max`, `stall_speed`,
+  `stall_demand`, `stall_window`. Chosen over the C++ archetype's own
+  `"wheel_control.v_min"`-prefixed wire names because this port has no
+  second config group that could ever collide on a bare `v_min`, and
+  the un-prefixed name is what `data/<robot>.json` and `config.py`
+  already call the same field everywhere else in this codebase.
+  `field_count()`/`field_name(index)` hold this ordered list directly
+  (built once from `config.WHEEL_CONTROL_FIELDS` at import time);
+  resolution itself is not duplicated there — `on_get()`/`on_set()`
+  delegate to `ConfigDispatch.get_field()`/`set_field()`, the one place
+  that owns which of the 15 names are valid.
+- **Ambiguity resolved — `onStop` vs `onEstop`'s call target**: the
+  ticket description named `self._queue.diffdrive` neutral for
+  `onStop` but `self._queue.estop()` for `onEstop` — an asymmetry (one
+  bypasses `MoveQueue`'s own wrapper, the other doesn't). Read
+  literally and kept as written: `on_stop()` calls
+  `move_queue.diffdrive.neutral()` directly (never touches
+  `MoveQueue`'s own pending-list, which nothing in the v6 path ever
+  populates anyway); `on_estop()` calls `move_queue.estop()` (clears
+  the pending list AND latches the kernel `estop()` in one call). Both
+  satisfy the Acceptance Criteria's own looser phrasing ("call
+  `MoveQueue.diffdrive`'s neutral/estop paths") since `MoveQueue.
+  estop()` reaches `diffdrive.estop()` internally either way.
+- **Status-string → `Result` mapping**: `diffdrive.drive()` returns a
+  status STRING (`native/moddiffdrive.cpp`'s `statusToStr()`), not an
+  enum. Mapped via a small table (`_STATUS_TO_RESULT`) mirroring the
+  C++ archetype's `statusToResult()`: `"ok"` → `OK`;
+  `"refused_unconfigured"`/`"refused_not_begun"`/`"refused_estopped"` →
+  `NOT_CONFIGURED` (this port's `Result` has no dedicated "not ready"
+  code, so all three pre-ready refusals collapse the same way the
+  archetype's own switch does); `"refused_non_finite"` → `BADARG`;
+  `"refused_lease_ceiling"` (the native binding's own, separately
+  motivated 5000 ms guard, `kBindingLeaseMaxMs`) → `RANGE` defensively;
+  anything else → `UNKNOWN`, matching `protocol.py`'s own
+  "unrecognized value falls to UNKNOWN" convention.
+- **`on_tlm`'s `"NOW"` mode**: the C++ archetype special-cases `NOW` as
+  a non-persisted one-shot read; that nuance lives only in
+  `DiffDriveAdapter`'s own comment, not in `protocol.md` itself, and
+  neither this ticket's acceptance criteria nor its test list calls for
+  it — this port persists every mode the handler hands over, including
+  `NOW`, deferring any one-shot-without-changing-subscription behavior
+  to whichever "calling application" (ticket 006's `comms.py`) needs
+  it later.
 
 ## Testing
 
