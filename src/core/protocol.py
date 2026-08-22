@@ -576,23 +576,45 @@ class ProtocolHandler(object):
             # truncate -- a truncated prefix that still parses as a
             # legal command is one the host never sent (Sec 2.1).
             self._overflowing = True
-            del self._line_buf[:]
+            self._line_buf = bytearray()  # NOT `del ...[:]` -- see below
             return
         self._line_buf.append(byte)
 
     def _on_line_complete(self):
+        # BENCH DEFECT (sprint 007 ticket 010, found on tovez's real
+        # hardware): every `del self._line_buf[...]` below used to be
+        # exactly that -- item/slice deletion on a `bytearray`. CPython
+        # supports it fine (this module's own offline test suite is
+        # 100% CPython, so it never caught this), but this MicroPython
+        # build's `bytearray` does NOT: `TypeError: 'bytearray' object
+        # doesn't support item deletion`, raised inside the scheduled
+        # pump callback on the FIRST real line `feed()` ever completed
+        # on hardware (a HELLO datagram). The exception aborted that
+        # callback silently -- `wifi_at.pump()` (called right after
+        # `comms.pump()` in the same tick, per `core/boot.py`) never
+        # ran, so nothing downstream of it (state servicing, the send
+        # queue drain) advanced either -- which is why the peer-edge
+        # `READY` (sent via a different, unrelated code path in
+        # `wifi_at.py`, not through this handler at all) got through
+        # but `HELLO`'s own `send_banner()` reply never did: the crash
+        # happened before that reply's bytes could even be queued.
+        # Fixed by reassigning a fresh `bytearray()` (or slicing a new
+        # one) instead of deleting in place -- the same pattern
+        # `wifi_at.py`'s own line-buffer handling already uses
+        # everywhere (e.g. `_feed_status_byte`), which is presumably
+        # why THAT module's real-hardware bring-up never hit this.
         if self._overflowing:
             self._overflowing = False
-            del self._line_buf[:]
+            self._line_buf = bytearray()
             self._malformed_count += 1
             return
 
         # A lone '\r' immediately before '\n' is a terminal artifact,
         # stripped; '\r' appears nowhere else on the wire (Sec 2).
         if len(self._line_buf) > 0 and self._line_buf[-1] == 13:  # '\r'
-            del self._line_buf[-1:]
+            self._line_buf = self._line_buf[:-1]
         line = bytes(self._line_buf)
-        del self._line_buf[:]
+        self._line_buf = bytearray()
 
         # A blank or all-whitespace line is ignored SILENTLY (Sec 2) --
         # a terminal artifact, not an error; it does NOT count

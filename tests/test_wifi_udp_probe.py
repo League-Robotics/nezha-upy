@@ -14,6 +14,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TOOLS_DIR = REPO_ROOT / "tools"
 if str(TOOLS_DIR) not in sys.path:
@@ -125,6 +127,21 @@ def test_send_round_trip_reports_each_line():
         (b"PROBE 0", target), (b"PROBE 1", target), (b"PROBE 2", target)]
 
 
+def test_send_round_trip_sends_line_bytes_verbatim():
+    """`--line` (ticket 010) must reach `send_round_trip()` as the
+    EXACT text given -- no numeric suffix -- so a real protocol verb
+    like `HELLO` is sent unmodified. `make_probe_lines()`'s own
+    `PROBE %d` shape is arity-bearing content the v6 engine cannot
+    parse as any known verb, so it never replies to it directly; this
+    is what makes `--line HELLO` necessary for a genuine round-trip
+    check against the real engine (see module docstring)."""
+    target = ("robot", 7654)
+    sock = FakeUdpSocket([(b"device NEZHA2 robot fake fake", target)])
+    results = probe.send_round_trip(sock, target, ["HELLO"], timeout=0.05)
+    assert sock.sent == [(b"HELLO", target)]  # NOT b"HELLO 0"
+    assert results[0].sent == "HELLO"
+
+
 def test_listen_for_datagrams_collects_until_deadline():
     sock = FakeUdpSocket([
         (b"one", ("h", 1)),
@@ -208,3 +225,38 @@ def test_loopback_real_socket_listen_observes_arrivals():
         server.close()
 
     assert [a.data for a in arrivals] == [b"T0", b"T1", b"T2"]
+
+
+def test_cli_line_flag_overrides_count_and_preserves_order(monkeypatch):
+    """CLI-level check (ticket 010): `--line` (repeatable) drives what
+    `main()` actually sends, in the given order, ignoring `--count`
+    entirely -- exercised through a real loopback socket, same as the
+    other `test_loopback_real_socket_*` checks in this file."""
+    server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server.bind(("127.0.0.1", 0))
+    server_addr = server.getsockname()
+
+    received = []
+
+    def echo_two():
+        for _ in range(2):
+            data, addr = server.recvfrom(4096)
+            received.append(data)
+            server.sendto(b"ok", addr)
+
+    thread = threading.Thread(target=echo_two, daemon=True)
+    thread.start()
+    try:
+        argv = ["wifi_udp_probe.py",
+                "--host", server_addr[0], "--port", str(server_addr[1]),
+                "--local-port", "0", "--count", "5",  # must be ignored
+                "--line", "HELLO", "--line", "PING #1"]
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit) as exc:
+            probe.main()
+        assert exc.value.code == 0
+    finally:
+        thread.join(timeout=2.0)
+        server.close()
+
+    assert received == [b"HELLO", b"PING #1"]

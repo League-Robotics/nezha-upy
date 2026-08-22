@@ -39,6 +39,13 @@ hardware.
 Usage (bench, tovez):
   python3 tools/wifi_udp_probe.py --host 192.168.4.11
   python3 tools/wifi_udp_probe.py --host 192.168.4.11 --observe-seconds 30
+  python3 tools/wifi_udp_probe.py --host 192.168.4.11 --line HELLO \
+      --observe-seconds 5
+      # ticket 010: the v6 engine on the other end only replies to a
+      # well-formed protocol line -- HELLO is unsequenced (no #id
+      # needed) and always replies with the device banner, making it
+      # the natural round-trip probe line against the real engine,
+      # unlike the generic 'PROBE N' placeholders --count generates.
 
 Usage (offline, against any local test server):
   python3 tools/wifi_udp_probe.py --host 127.0.0.1 --port 9765 --local-port 0
@@ -209,7 +216,18 @@ def main():
                           "but is parameterized (e.g. 0) for local tests")
     ap.add_argument("--count", type=int, default=DEFAULT_COUNT,
                      help="number of distinct probe lines to send "
-                          "(0 to skip the round-trip phase)")
+                          "(0 to skip the round-trip phase); ignored "
+                          "if --line is given")
+    ap.add_argument("--line", action="append", default=None,
+                     help="send this EXACT line instead of a generated "
+                          "'PROBE N' placeholder -- repeatable, sent in "
+                          "the order given. Needed to exercise a real "
+                          "protocol verb (e.g. 'HELLO') against the v6 "
+                          "engine, which only replies to well-formed "
+                          "lines (ticket 010) -- 'PROBE N' is content the "
+                          "engine cannot parse as any verb, so it never "
+                          "answers it directly, unlike a bare loopback "
+                          "echo server")
     ap.add_argument("--interval-ms", type=float, default=DEFAULT_INTERVAL_MS,
                      help="delay between successive sends")
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S,
@@ -233,8 +251,9 @@ def main():
     target = (a.host, a.port)
     ok = True
     try:
-        if a.count > 0:
-            lines = make_probe_lines(a.count)
+        lines = a.line if a.line else (
+            make_probe_lines(a.count) if a.count > 0 else None)
+        if lines:
             results = send_round_trip(
                 sock, target, lines, timeout=a.timeout,
                 inter_send_delay_s=a.interval_ms / 1000.0)
