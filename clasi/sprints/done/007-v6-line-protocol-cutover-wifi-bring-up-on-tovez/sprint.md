@@ -1,7 +1,7 @@
 ---
 id: '007'
 title: v6 line protocol cutover + WiFi bring-up on tovez
-status: planning-docs
+status: closed
 branch: sprint/007-v6-line-protocol-cutover-wifi-bring-up-on-tovez
 worktree: false
 use-cases:
